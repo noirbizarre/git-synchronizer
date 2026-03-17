@@ -1,0 +1,45 @@
+[tools]
+prek = "latest"
+cargo-binstall = "latest"
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-llvm-cov" = "latest"
+
+[tasks.build]
+description = "Build the project"
+run = "cargo build"
+
+[tasks.release]
+description = "Build in release mode"
+run = "cargo build --release"
+
+[tasks.test]
+description = "Run tests with nextest"
+run = "cargo nextest run"
+
+[tasks.cover]
+description = "Run tests with coverage"
+run = "cargo llvm-cov nextest --lcov --output-path lcov.info"
+
+[tasks."cover:html"]
+description = "Generate HTML coverage report"
+run = "cargo llvm-cov nextest --html"
+
+[tasks.lint]
+description = "Run clippy"
+run = "cargo clippy -- -D warnings"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check code formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.check]
+description = "Run all checks"
+depends = ["fmt-check", "lint", "test"]
+
+[tasks.setup]
+description = "Install locally"
+run = "cargo install --path . --force"

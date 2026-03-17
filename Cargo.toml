@@ -1,0 +1,32 @@
+[package]
+name = "git-merge-cleaner"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Axel H. <noirbizarre@gmail.com>"]
+description = "Easily clean your merged branches and worktrees"
+repository = "https://github.com/noirbizarre/git-merge-cleaner"
+readme = "README.md"
+keywords = ["git", "branches", "cleanup", "worktree", "merge"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "git-merge-cleaner"
+path = "src/main.rs"
+
+[[bin]]
+name = "git-mc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+console = "0.15"
+dialoguer = "0.11"
+globset = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
