@@ -91,12 +91,12 @@ impl Config {
         let mut protected: Vec<String> = if branches.is_empty() {
             vec!["main".to_string()]
         } else {
-            let selected = ui.multi_select(
+            ui.multi_select(
                 "Which branches should be protected from deletion?",
                 &branches,
+                &branches,
                 &defaults,
-            )?;
-            selected.into_iter().map(|i| branches[i].clone()).collect()
+            )?
         };
 
         let extra = ui.input(
@@ -127,17 +127,13 @@ impl Config {
             let selected = ui.multi_select(
                 "Which remotes should merged branches be deleted from?",
                 &available_remotes,
+                &available_remotes,
                 &defaults,
             )?;
             if selected.is_empty() {
                 None
             } else {
-                Some(
-                    selected
-                        .into_iter()
-                        .map(|i| available_remotes[i].clone())
-                        .collect(),
-                )
+                Some(selected)
             }
         };
 

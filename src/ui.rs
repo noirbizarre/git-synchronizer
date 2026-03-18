@@ -1,5 +1,4 @@
 use console::{Style, Term};
-use dialoguer::{Confirm, Input, MultiSelect, Select};
 
 /// Terminal handle and style presets for consistent output.
 pub struct Ui {
@@ -76,42 +75,42 @@ impl Ui {
 
     /// Ask for confirmation, defaulting to "no" for safety.
     pub fn confirm(&self, prompt: &str, default: bool) -> anyhow::Result<bool> {
-        Ok(Confirm::new()
-            .with_prompt(prompt)
-            .default(default)
+        Ok(cliclack::confirm(prompt)
+            .initial_value(default)
             .interact()?)
     }
 
-    /// Present a multi-select list. Returns indices of selected items.
+    /// Present a multi-select list. Returns the selected values.
+    ///
+    /// `values` are the returned items; `labels` are what the user sees.
     pub fn multi_select(
         &self,
         prompt: &str,
-        items: &[String],
+        values: &[String],
+        labels: &[String],
         defaults: &[bool],
-    ) -> anyhow::Result<Vec<usize>> {
-        Ok(MultiSelect::new()
-            .with_prompt(prompt)
-            .items(items)
-            .defaults(defaults)
-            .interact()?)
-    }
+    ) -> anyhow::Result<Vec<String>> {
+        let initial_values: Vec<String> = values
+            .iter()
+            .zip(defaults.iter())
+            .filter_map(|(val, &selected)| if selected { Some(val.clone()) } else { None })
+            .collect();
 
-    /// Present a single-select list. Returns the index of the selected item.
-    pub fn select(&self, prompt: &str, items: &[String]) -> anyhow::Result<usize> {
-        Ok(Select::new()
-            .with_prompt(prompt)
-            .items(items)
-            .default(0)
-            .interact()?)
+        let mut ms = cliclack::multiselect(prompt);
+        for (val, label) in values.iter().zip(labels.iter()) {
+            ms = ms.item(val.clone(), label, "");
+        }
+        ms = ms.initial_values(initial_values);
+        ms = ms.required(false);
+        Ok(ms.interact()?)
     }
 
     /// Ask for a text input.
     pub fn input(&self, prompt: &str, default: &str) -> anyhow::Result<String> {
-        Ok(Input::new()
-            .with_prompt(prompt)
-            .default(default.to_string())
-            .allow_empty(true)
-            .interact_text()?)
+        Ok(cliclack::input(prompt)
+            .default_input(default)
+            .required(false)
+            .interact::<String>()?)
     }
 
     /// Print a summary line: "N branch(es) deleted."

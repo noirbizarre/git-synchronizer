@@ -1,0 +1,13 @@
+[workspace]
+# Use git-cliff for changelog generation
+changelog_config = "cliff.toml"
+# Update CHANGELOG.md in the release PR
+changelog_update = true
+# Create git tags on release
+git_tag_enable = true
+# Create GitHub releases with changelog as release notes
+git_release_enable = true
+# Do not run cargo-semver-checks (no public library API)
+semver_check = false
+# Labels to apply to the release PR
+pr_labels = ["release"]

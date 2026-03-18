@@ -54,8 +54,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 merged.clone()
             } else {
                 let defaults: Vec<bool> = vec![true; merged.len()];
-                let selected = ui.multi_select("Select branches to delete", &merged, &defaults)?;
-                selected.into_iter().map(|i| merged[i].clone()).collect()
+                ui.multi_select("Select branches to delete", &merged, &merged, &defaults)?
             };
 
             if !to_delete.is_empty() {
@@ -107,8 +106,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 merged.clone()
             } else {
                 let defaults: Vec<bool> = vec![true; merged.len()];
-                let selected = ui.multi_select("Select branches to delete", &display, &defaults)?;
-                selected.into_iter().map(|i| merged[i].clone()).collect()
+                ui.multi_select("Select branches to delete", &merged, &display, &defaults)?
             };
 
             let mut remote_deleted = 0usize;
