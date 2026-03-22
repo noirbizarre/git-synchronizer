@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -13,17 +15,25 @@ pub fn build_protected_matcher(config: &Config) -> Result<GlobSet> {
     Ok(builder.build()?)
 }
 
+/// Check whether a branch is protected, considering both global glob patterns
+/// and per-branch `branch.<name>.merge-cleaner-protected` config.
+fn is_protected(branch: &str, matcher: &GlobSet, branch_protected: &HashSet<String>) -> bool {
+    matcher.is_match(branch) || branch_protected.contains(branch)
+}
+
 /// Resolve protected patterns to actual existing local branch names.
 ///
 /// Literal patterns (e.g. "main") are kept as-is if they exist.
 /// Glob patterns (e.g. "release/*") are expanded to matching branches.
+/// Branches marked with per-branch `merge-cleaner-protected` config are also included.
 fn resolve_merge_targets(git: &Git, config: &Config) -> Result<Vec<String>> {
     let matcher = build_protected_matcher(config)?;
+    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
     let all_branches = git.local_branches()?;
 
     let targets: Vec<String> = all_branches
         .into_iter()
-        .filter(|b| matcher.is_match(b))
+        .filter(|b| is_protected(b, &matcher, &branch_protected))
         .collect();
 
     Ok(targets)
@@ -33,6 +43,7 @@ fn resolve_merge_targets(git: &Git, config: &Config) -> Result<Vec<String>> {
 /// and are not themselves protected.
 pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
     let matcher = build_protected_matcher(config)?;
+    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
     let current = git.current_branch()?;
     let targets = resolve_merge_targets(git, config)?;
 
@@ -44,7 +55,7 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
             if branch == current {
                 continue;
             }
-            if matcher.is_match(&branch) {
+            if is_protected(&branch, &matcher, &branch_protected) {
                 continue;
             }
             if !candidates.contains(&branch) {
@@ -56,7 +67,10 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
     // Also check branches not caught by --merged (rebase merge detection via git cherry)
     let all_branches = git.local_branches()?;
     for branch in &all_branches {
-        if candidates.contains(branch) || *branch == current || matcher.is_match(branch) {
+        if candidates.contains(branch)
+            || *branch == current
+            || is_protected(branch, &matcher, &branch_protected)
+        {
             continue;
         }
         for target in &targets {
@@ -75,6 +89,7 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
 /// and are not themselves protected, for the given remote.
 pub fn find_merged_remote(git: &Git, config: &Config, remote: &str) -> Result<Vec<String>> {
     let matcher = build_protected_matcher(config)?;
+    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
     let targets = resolve_merge_targets(git, config)?;
 
     let mut candidates: Vec<String> = Vec::new();
@@ -82,7 +97,7 @@ pub fn find_merged_remote(git: &Git, config: &Config, remote: &str) -> Result<Ve
     for target in &targets {
         let merged = git.merged_remote_branches(target, remote)?;
         for branch in merged {
-            if matcher.is_match(&branch) {
+            if is_protected(&branch, &matcher, &branch_protected) {
                 continue;
             }
             if !candidates.contains(&branch) {
@@ -369,5 +384,54 @@ mod tests {
 
         let merged = find_merged_local(&git, &config).unwrap();
         assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_find_merged_local_respects_branch_protected() {
+        let (_dir, git) = init_repo_with_branches();
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+        };
+
+        // Without per-branch protection, feature/done should be a candidate
+        let merged = find_merged_local(&git, &config).unwrap();
+        assert!(merged.contains(&"feature/done".to_string()));
+
+        // Mark feature/done as per-branch protected
+        git.set_branch_protected("feature/done", true).unwrap();
+        let merged = find_merged_local(&git, &config).unwrap();
+        assert!(
+            !merged.contains(&"feature/done".to_string()),
+            "per-branch protected branch should not be a deletion candidate"
+        );
+
+        // Clean up
+        git.set_branch_protected("feature/done", false).unwrap();
+    }
+
+    #[test]
+    fn test_branch_protected_serves_as_merge_target() {
+        let (_dir, git) = init_repo_with_branches();
+        // Only use per-branch protection on "main" (no global patterns match anything)
+        let config = Config {
+            protected: vec!["nonexistent-branch".to_string()],
+            remotes: None,
+        };
+
+        // Without any real protected branches, nothing is a merge target
+        let merged = find_merged_local(&git, &config).unwrap();
+        assert!(merged.is_empty());
+
+        // Mark "main" as per-branch protected — it should now be a merge target
+        git.set_branch_protected("main", true).unwrap();
+        let merged = find_merged_local(&git, &config).unwrap();
+        assert!(
+            merged.contains(&"feature/done".to_string()),
+            "branches merged into a per-branch protected branch should be candidates"
+        );
+
+        // Clean up
+        git.set_branch_protected("main", false).unwrap();
     }
 }

@@ -48,6 +48,17 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                             None => "(all)".to_string(),
                         }
                     ));
+
+                    let branch_protected = git.branch_protected_list()?;
+                    ui.line(&format!(
+                        "  {} {}",
+                        ui.bold.apply_to("branch protected:"),
+                        if branch_protected.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            branch_protected.join(", ")
+                        }
+                    ));
                 }
                 None => {
                     ui.muted("No configuration found. Run `git mc` to start the setup wizard.");
@@ -94,6 +105,18 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                 git.config_add("merge-cleaner.remote", r)?;
             }
             ui.success(&format!("Removed remote: {name}"));
+            Ok(())
+        }
+
+        ConfigAction::Protect { branch } => {
+            git.set_branch_protected(&branch, true)?;
+            ui.success(&format!("Branch '{branch}' marked as protected"));
+            Ok(())
+        }
+
+        ConfigAction::Unprotect { branch } => {
+            git.set_branch_protected(&branch, false)?;
+            ui.success(&format!("Branch '{branch}' is no longer protected"));
             Ok(())
         }
 

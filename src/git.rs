@@ -197,6 +197,51 @@ impl Git {
             Err(_) => Ok(false),
         }
     }
+
+    // ── Per-branch protection ────────────────────────────────────────
+
+    /// Return the names of branches that have
+    /// `branch.<name>.merge-cleaner-protected = true` in git config.
+    pub fn branch_protected_list(&self) -> Result<Vec<String>> {
+        let pattern = r"^branch\..*\.merge-cleaner-protected$";
+        match self.run(&["config", "--get-regexp", pattern]) {
+            Ok(out) => {
+                let mut branches = Vec::new();
+                for line in out.lines().filter(|l| !l.is_empty()) {
+                    // Each line: "branch.<name>.merge-cleaner-protected true"
+                    let mut parts = line.splitn(2, ' ');
+                    if let (Some(key), Some(value)) = (parts.next(), parts.next())
+                        && value.trim().eq_ignore_ascii_case("true")
+                    {
+                        // Extract branch name from "branch.<name>.merge-cleaner-protected"
+                        if let Some(name) = key
+                            .strip_prefix("branch.")
+                            .and_then(|s| s.strip_suffix(".merge-cleaner-protected"))
+                        {
+                            branches.push(name.to_string());
+                        }
+                    }
+                }
+                Ok(branches)
+            }
+            Err(_) => Ok(vec![]),
+        }
+    }
+
+    /// Set or unset per-branch protection for a given branch.
+    ///
+    /// When `protected` is `true`, sets `branch.<name>.merge-cleaner-protected = true`.
+    /// When `false`, unsets the key entirely.
+    pub fn set_branch_protected(&self, branch: &str, protected: bool) -> Result<()> {
+        let key = format!("branch.{branch}.merge-cleaner-protected");
+        if protected {
+            self.run(&["config", &key, "true"])?;
+        } else {
+            // --unset exits non-zero if the key doesn't exist; that's fine.
+            let _ = self.run(&["config", "--unset", &key]);
+        }
+        Ok(())
+    }
 }
 
 // ── Parsing helpers ──────────────────────────────────────────────────
@@ -644,6 +689,138 @@ bare
             worktrees.iter().map(|wt| wt.branch.as_deref()).collect();
         assert!(wt_branches.contains(&Some("main")));
         assert!(wt_branches.contains(&Some("feature/wt")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_branch_protected_list_empty() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let protected = git.branch_protected_list()?;
+        assert!(protected.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_branch_protected_list() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        // Mark two branches as protected via per-branch config
+        Command::new("git")
+            .args([
+                "config",
+                "branch.develop.merge-cleaner-protected",
+                "true",
+            ])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args([
+                "config",
+                "branch.staging.merge-cleaner-protected",
+                "true",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let mut protected = git.branch_protected_list()?;
+        protected.sort();
+        assert_eq!(protected, vec!["develop", "staging"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_branch_protected_and_unset() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // Set protection
+        git.set_branch_protected("develop", true)?;
+        let protected = git.branch_protected_list()?;
+        assert_eq!(protected, vec!["develop"]);
+
+        // Unset protection
+        git.set_branch_protected("develop", false)?;
+        let protected = git.branch_protected_list()?;
+        assert!(protected.is_empty());
+
+        // Unsetting a non-existent key should not error
+        git.set_branch_protected("nonexistent", false)?;
 
         Ok(())
     }

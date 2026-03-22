@@ -95,6 +95,18 @@ pub enum ConfigAction {
         name: String,
     },
 
+    /// Mark a branch as protected via per-branch config
+    Protect {
+        /// Branch name to protect
+        branch: String,
+    },
+
+    /// Remove per-branch protection from a branch
+    Unprotect {
+        /// Branch name to unprotect
+        branch: String,
+    },
+
     /// Re-run the interactive setup wizard
     Setup,
 }

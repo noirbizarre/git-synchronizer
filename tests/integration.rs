@@ -426,3 +426,110 @@ fn clean_local_only_deletes_local() {
     let branches = git_branches(&dir);
     assert!(!branches.contains(&"feature/done".to_string()));
 }
+
+// ── Per-branch protection ───────────────────────────────────────────
+
+#[test]
+fn config_protect_and_unprotect() {
+    let dir = init_repo();
+    let p = dir.path();
+
+    // Protect a branch
+    Command::cargo_bin("git-merge-cleaner")
+        .unwrap()
+        .args(["config", "protect", "develop"])
+        .current_dir(p)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Branch 'develop' marked as protected",
+        ));
+
+    // Verify with git config
+    let output = StdCommand::new("git")
+        .args(["config", "--get", "branch.develop.merge-cleaner-protected"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+
+    // Unprotect
+    Command::cargo_bin("git-merge-cleaner")
+        .unwrap()
+        .args(["config", "unprotect", "develop"])
+        .current_dir(p)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Branch 'develop' is no longer protected",
+        ));
+
+    // Verify key is removed
+    let output = StdCommand::new("git")
+        .args(["config", "--get", "branch.develop.merge-cleaner-protected"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "key should be unset after unprotect"
+    );
+}
+
+#[test]
+fn config_list_shows_branch_protected() {
+    let dir = init_repo();
+    let p = dir.path();
+    configure(&dir);
+
+    // Mark a branch as per-branch protected
+    StdCommand::new("git")
+        .args(["config", "branch.staging.merge-cleaner-protected", "true"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    Command::cargo_bin("git-merge-cleaner")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(p)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("branch protected:"))
+        .stderr(predicate::str::contains("staging"));
+}
+
+#[test]
+fn clean_respects_branch_protected() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    // Mark the merged branch as per-branch protected
+    let p = dir.path();
+    StdCommand::new("git")
+        .args([
+            "config",
+            "branch.feature/done.merge-cleaner-protected",
+            "true",
+        ])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    Command::cargo_bin("git-merge-cleaner")
+        .unwrap()
+        .args(["-y", "--no-fetch"])
+        .current_dir(p)
+        .assert()
+        .success();
+
+    // feature/done should NOT be deleted because it is per-branch protected
+    let branches = git_branches(&dir);
+    assert!(
+        branches.contains(&"feature/done".to_string()),
+        "per-branch protected branch should not be deleted"
+    );
+    // main should still exist
+    assert!(branches.contains(&"main".to_string()));
+}
