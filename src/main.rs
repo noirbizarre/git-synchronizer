@@ -28,7 +28,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         ConfigAction::List => {
             match config::Config::load(git)? {
                 Some(cfg) => {
-                    ui.heading("Current configuration [merge-cleaner]:");
+                    ui.heading("Current configuration [sync]:");
                     ui.blank();
 
                     ui.line(&format!(
@@ -61,48 +61,48 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                     ));
                 }
                 None => {
-                    ui.muted("No configuration found. Run `git mc` to start the setup wizard.");
+                    ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
                 }
             }
             Ok(())
         }
 
         ConfigAction::Set { key, value } => {
-            let full_key = format!("merge-cleaner.{key}");
+            let full_key = format!("sync.{key}");
             git.config_set(&full_key, &value)?;
             ui.success(&format!("Set {key} = {value}"));
             Ok(())
         }
 
         ConfigAction::AddProtected { pattern } => {
-            git.config_add("merge-cleaner.protected", &pattern)?;
+            git.config_add("sync.protected", &pattern)?;
             ui.success(&format!("Added protected pattern: {pattern}"));
             Ok(())
         }
 
         ConfigAction::RemoveProtected { pattern } => {
-            let mut protected = git.config_get_all("merge-cleaner.protected")?;
+            let mut protected = git.config_get_all("sync.protected")?;
             protected.retain(|p| p != &pattern);
-            git.config_unset_all("merge-cleaner.protected")?;
+            git.config_unset_all("sync.protected")?;
             for p in &protected {
-                git.config_add("merge-cleaner.protected", p)?;
+                git.config_add("sync.protected", p)?;
             }
             ui.success(&format!("Removed protected pattern: {pattern}"));
             Ok(())
         }
 
         ConfigAction::AddRemote { name } => {
-            git.config_add("merge-cleaner.remote", &name)?;
+            git.config_add("sync.remote", &name)?;
             ui.success(&format!("Added remote: {name}"));
             Ok(())
         }
 
         ConfigAction::RemoveRemote { name } => {
-            let mut remotes = git.config_get_all("merge-cleaner.remote")?;
+            let mut remotes = git.config_get_all("sync.remote")?;
             remotes.retain(|r| r != &name);
-            git.config_unset_all("merge-cleaner.remote")?;
+            git.config_unset_all("sync.remote")?;
             for r in &remotes {
-                git.config_add("merge-cleaner.remote", r)?;
+                git.config_add("sync.remote", r)?;
             }
             ui.success(&format!("Removed remote: {name}"));
             Ok(())

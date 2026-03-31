@@ -1,20 +1,19 @@
 use clap::{Parser, Subcommand};
 
-/// Easily clean your merged branches and worktrees.
+/// Easily synchronize your local branches and worktrees.
 ///
 /// Detects branches that have been merged into your main branch(es) and offers
 /// to delete them — both locally and on configured remotes. Also handles
 /// orphaned worktree cleanup.
 ///
 /// On first run, an interactive setup wizard stores preferences in the
-/// git config `[merge-cleaner]` section.
+/// git config `[sync]` section.
 #[derive(Parser, Debug)]
 #[command(
-    name = "git-merge-cleaner",
+    name = "git-sync",
     version,
     about,
     long_about = None,
-    after_help = "Also available as `git mc`."
 )]
 pub struct Cli {
     /// Skip all confirmation prompts (auto-confirm deletions)
@@ -51,7 +50,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Manage git-merge-cleaner configuration
+    /// Manage git-sync configuration
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -118,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_cli_default_flags() {
-        let cli = Cli::parse_from(["git-merge-cleaner"]);
+        let cli = Cli::parse_from(["git-sync"]);
         assert!(!cli.yes);
         assert!(!cli.dry_run);
         assert!(!cli.verbose);
@@ -131,14 +130,7 @@ mod tests {
 
     #[test]
     fn test_cli_flag_parsing() {
-        let cli = Cli::parse_from([
-            "git-merge-cleaner",
-            "-y",
-            "-n",
-            "-v",
-            "--no-fetch",
-            "--local-only",
-        ]);
+        let cli = Cli::parse_from(["git-sync", "-y", "-n", "-v", "--no-fetch", "--local-only"]);
         assert!(cli.yes);
         assert!(cli.dry_run);
         assert!(cli.verbose);
@@ -149,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_cli_config_subcommand() {
-        let cli = Cli::parse_from(["git-merge-cleaner", "config", "list"]);
+        let cli = Cli::parse_from(["git-sync", "config", "list"]);
         assert!(cli.command.is_some());
         match cli.command.unwrap() {
             Command::Config { action } => match action {
@@ -158,7 +150,7 @@ mod tests {
             },
         }
 
-        let cli = Cli::parse_from(["git-merge-cleaner", "config", "set", "remote", "origin"]);
+        let cli = Cli::parse_from(["git-sync", "config", "set", "remote", "origin"]);
         match cli.command.unwrap() {
             Command::Config { action } => match action {
                 ConfigAction::Set { key, value } => {
@@ -169,7 +161,7 @@ mod tests {
             },
         }
 
-        let cli = Cli::parse_from(["git-merge-cleaner", "config", "add-protected", "release/*"]);
+        let cli = Cli::parse_from(["git-sync", "config", "add-protected", "release/*"]);
         match cli.command.unwrap() {
             Command::Config { action } => match action {
                 ConfigAction::AddProtected { pattern } => {

@@ -252,7 +252,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-merge-cleaner"
+name = "git-synchronizer"
 version = "0.1.0"
 dependencies = [
  "anyhow",

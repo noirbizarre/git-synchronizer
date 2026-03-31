@@ -1,12 +1,10 @@
-# git-merge-cleaner
+# git-sync
 
-Easily clean your merged branches and worktrees.
+Easily synchronize your local branches and worktrees.
 
 A command-line tool that detects branches merged into your main branch(es) and
 offers to delete them -- both locally and on configured remotes. Also handles
 orphaned worktree cleanup.
-
-Also available as `git mc`.
 
 ## Features
 
@@ -15,7 +13,7 @@ Also available as `git mc`.
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Multiple merge detection strategies (fast merge and rebase-aware via `git cherry`)
 - Interactive setup wizard on first run
-- Configuration stored in git config (`[merge-cleaner]` section)
+- Configuration stored in git config (`[sync]` section)
 - Safety-first: `--force-with-lease` for remote deletions
 
 ## Installation
@@ -24,60 +22,60 @@ Also available as `git mc`.
 cargo install --path .
 ```
 
-This installs both `git-merge-cleaner` and `git-mc` binaries, making them
-available as `git merge-cleaner` and `git mc` subcommands.
+This installs the `git-sync` binary, making it
+available as the `git sync` subcommand.
 
 ## Usage
 
 ```sh
 # Interactive mode (prompts for confirmation at each step)
-git mc
+git sync
 
 # Auto-confirm everything
-git mc --yes
+git sync --yes
 
 # Dry run (show what would be done)
-git mc --dry-run
+git sync --dry-run
 
 # Show git commands being executed
-git mc --verbose
+git sync --verbose
 
 # Skip fetching/pruning
-git mc --no-fetch
+git sync --no-fetch
 
 # Only clean local or remote branches
-git mc --local-only
-git mc --remote-only
+git sync --local-only
+git sync --remote-only
 
 # Skip worktree cleanup
-git mc --no-worktrees
+git sync --no-worktrees
 ```
 
 ### Configuration management
 
 ```sh
 # Display current configuration
-git mc config list
+git sync config list
 
 # Re-run the interactive setup wizard
-git mc config setup
+git sync config setup
 
 # Add/remove protected branch patterns
-git mc config add-protected 'release/*'
-git mc config remove-protected 'develop'
+git sync config add-protected 'release/*'
+git sync config remove-protected 'develop'
 
 # Add/remove remotes to operate on
-git mc config add-remote upstream
-git mc config remove-remote upstream
+git sync config add-remote upstream
+git sync config remove-remote upstream
 ```
 
 ## Configuration
 
-Configuration is stored in the `[merge-cleaner]` section of your git config
+Configuration is stored in the `[sync]` section of your git config
 (local or global):
 
 ```ini
-[merge-cleaner]
+[sync]
     protected = main
     protected = master
     protected = release/*
@@ -91,7 +89,7 @@ Configuration is stored in the `[merge-cleaner]` section of your git config
 
 ### First run
 
-On first run (when no `[merge-cleaner]` config section exists), an interactive
+On first run (when no `[sync]` config section exists), an interactive
 setup wizard runs automatically:
 
 1. Auto-detects local branches and pre-selects well-known ones (`main`, `master`)
@@ -130,7 +128,7 @@ CLI flags:
 
 ```mermaid
 flowchart TD
-    Start([git mc]) --> LoadConfig[Load configuration]
+    Start([git sync]) --> LoadConfig[Load configuration]
     LoadConfig --> FirstRun{First run?}
     FirstRun -- Yes --> Setup[Interactive setup wizard]
     Setup --> FetchCheck

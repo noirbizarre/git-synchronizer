@@ -1,21 +1,17 @@
 [package]
-name = "git-merge-cleaner"
+name = "git-synchronizer"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Axel H. <noirbizarre@gmail.com>"]
-description = "Easily clean your merged branches and worktrees"
-repository = "https://github.com/noirbizarre/git-merge-cleaner"
+description = "Easily synchronize your local branches and worktrees"
+repository = "https://github.com/noirbizarre/git-synchronizer"
 readme = "README.md"
-keywords = ["git", "branches", "cleanup", "worktree", "merge"]
+keywords = ["git", "branches", "sync", "worktree", "synchronize"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "git-merge-cleaner"
-path = "src/main.rs"
-
-[[bin]]
-name = "git-mc"
+name = "git-sync"
 path = "src/main.rs"
 
 [dependencies]

@@ -16,7 +16,7 @@ pub fn build_protected_matcher(config: &Config) -> Result<GlobSet> {
 }
 
 /// Check whether a branch is protected, considering both global glob patterns
-/// and per-branch `branch.<name>.merge-cleaner-protected` config.
+/// and per-branch `branch.<name>.sync-protected` config.
 fn is_protected(branch: &str, matcher: &GlobSet, branch_protected: &HashSet<String>) -> bool {
     matcher.is_match(branch) || branch_protected.contains(branch)
 }
@@ -25,7 +25,7 @@ fn is_protected(branch: &str, matcher: &GlobSet, branch_protected: &HashSet<Stri
 ///
 /// Literal patterns (e.g. "main") are kept as-is if they exist.
 /// Glob patterns (e.g. "release/*") are expanded to matching branches.
-/// Branches marked with per-branch `merge-cleaner-protected` config are also included.
+/// Branches marked with per-branch `sync-protected` config are also included.
 fn resolve_merge_targets(git: &Git, config: &Config) -> Result<Vec<String>> {
     let matcher = build_protected_matcher(config)?;
     let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();

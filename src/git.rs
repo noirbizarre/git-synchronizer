@@ -201,22 +201,22 @@ impl Git {
     // ── Per-branch protection ────────────────────────────────────────
 
     /// Return the names of branches that have
-    /// `branch.<name>.merge-cleaner-protected = true` in git config.
+    /// `branch.<name>.sync-protected = true` in git config.
     pub fn branch_protected_list(&self) -> Result<Vec<String>> {
-        let pattern = r"^branch\..*\.merge-cleaner-protected$";
+        let pattern = r"^branch\..*\.sync-protected$";
         match self.run(&["config", "--get-regexp", pattern]) {
             Ok(out) => {
                 let mut branches = Vec::new();
                 for line in out.lines().filter(|l| !l.is_empty()) {
-                    // Each line: "branch.<name>.merge-cleaner-protected true"
+                    // Each line: "branch.<name>.sync-protected true"
                     let mut parts = line.splitn(2, ' ');
                     if let (Some(key), Some(value)) = (parts.next(), parts.next())
                         && value.trim().eq_ignore_ascii_case("true")
                     {
-                        // Extract branch name from "branch.<name>.merge-cleaner-protected"
+                        // Extract branch name from "branch.<name>.sync-protected"
                         if let Some(name) = key
                             .strip_prefix("branch.")
-                            .and_then(|s| s.strip_suffix(".merge-cleaner-protected"))
+                            .and_then(|s| s.strip_suffix(".sync-protected"))
                         {
                             branches.push(name.to_string());
                         }
@@ -230,10 +230,10 @@ impl Git {
 
     /// Set or unset per-branch protection for a given branch.
     ///
-    /// When `protected` is `true`, sets `branch.<name>.merge-cleaner-protected = true`.
+    /// When `protected` is `true`, sets `branch.<name>.sync-protected = true`.
     /// When `false`, unsets the key entirely.
     pub fn set_branch_protected(&self, branch: &str, protected: bool) -> Result<()> {
-        let key = format!("branch.{branch}.merge-cleaner-protected");
+        let key = format!("branch.{branch}.sync-protected");
         if protected {
             self.run(&["config", &key, "true"])?;
         } else {
@@ -439,12 +439,12 @@ bare
         assert!(merged.contains(&"feature/test".to_string()));
 
         // Config operations
-        git.config_add("merge-cleaner.protected", "main")?;
-        git.config_add("merge-cleaner.protected", "release/*")?;
-        let protected = git.config_get_all("merge-cleaner.protected")?;
+        git.config_add("sync.protected", "main")?;
+        git.config_add("sync.protected", "release/*")?;
+        let protected = git.config_get_all("sync.protected")?;
         assert_eq!(protected, vec!["main", "release/*"]);
 
-        assert!(git.config_section_exists("merge-cleaner")?);
+        assert!(git.config_section_exists("sync")?);
         assert!(!git.config_section_exists("nonexistent")?);
 
         Ok(())
@@ -758,7 +758,7 @@ bare
         Command::new("git")
             .args([
                 "config",
-                "branch.develop.merge-cleaner-protected",
+                "branch.develop.sync-protected",
                 "true",
             ])
             .current_dir(path)
@@ -766,7 +766,7 @@ bare
         Command::new("git")
             .args([
                 "config",
-                "branch.staging.merge-cleaner-protected",
+                "branch.staging.sync-protected",
                 "true",
             ])
             .current_dir(path)

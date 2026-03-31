@@ -46,12 +46,12 @@ fn init_repo() -> TempDir {
     dir
 }
 
-/// Seed the `[merge-cleaner]` config section so the clean workflow
+/// Seed the `[sync]` config section so the clean workflow
 /// doesn't trigger the interactive setup wizard.
 fn configure(dir: &TempDir) {
     let p = dir.path();
     StdCommand::new("git")
-        .args(["config", "--add", "merge-cleaner.protected", "main"])
+        .args(["config", "--add", "sync.protected", "main"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -131,33 +131,24 @@ fn git_branches(dir: &TempDir) -> Vec<String> {
 
 #[test]
 fn help_flag_shows_usage() {
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Easily clean your merged branches",
+            "Easily synchronize your local branches",
         ));
 }
 
 #[test]
 fn version_flag_shows_version() {
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("git-merge-cleaner"));
-}
-
-#[test]
-fn git_mc_binary_works() {
-    Command::cargo_bin("git-mc")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success();
+        .stdout(predicate::str::contains("git-sync"));
 }
 
 // ── Config subcommands ───────────────────────────────────────────────
@@ -165,7 +156,7 @@ fn git_mc_binary_works() {
 #[test]
 fn config_list_no_config() {
     let dir = init_repo();
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -179,7 +170,7 @@ fn config_list_shows_values() {
     let dir = init_repo();
     configure(&dir);
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -197,22 +188,22 @@ fn config_list_with_configured_remotes() {
 
     // Set up a config with specific remotes
     StdCommand::new("git")
-        .args(["config", "--add", "merge-cleaner.protected", "main"])
+        .args(["config", "--add", "sync.protected", "main"])
         .current_dir(p)
         .output()
         .unwrap();
     StdCommand::new("git")
-        .args(["config", "--add", "merge-cleaner.remote", "origin"])
+        .args(["config", "--add", "sync.remote", "origin"])
         .current_dir(p)
         .output()
         .unwrap();
     StdCommand::new("git")
-        .args(["config", "--add", "merge-cleaner.remote", "upstream"])
+        .args(["config", "--add", "sync.remote", "upstream"])
         .current_dir(p)
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "list"])
         .current_dir(p)
@@ -225,7 +216,7 @@ fn config_list_with_configured_remotes() {
 fn config_set_value() {
     let dir = init_repo();
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "set", "remote", "upstream"])
         .current_dir(dir.path())
@@ -235,7 +226,7 @@ fn config_set_value() {
 
     // Verify with git config
     let output = StdCommand::new("git")
-        .args(["config", "--get", "merge-cleaner.remote"])
+        .args(["config", "--get", "sync.remote"])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -248,7 +239,7 @@ fn config_add_and_remove_protected() {
     let p = dir.path();
 
     // Add a protected pattern
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "add-protected", "release/*"])
         .current_dir(p)
@@ -259,7 +250,7 @@ fn config_add_and_remove_protected() {
         ));
 
     // Add another
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "add-protected", "main"])
         .current_dir(p)
@@ -268,7 +259,7 @@ fn config_add_and_remove_protected() {
 
     // Verify both exist
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "merge-cleaner.protected"])
+        .args(["config", "--get-all", "sync.protected"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -277,7 +268,7 @@ fn config_add_and_remove_protected() {
     assert!(values.contains("main"));
 
     // Remove one
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "remove-protected", "release/*"])
         .current_dir(p)
@@ -289,7 +280,7 @@ fn config_add_and_remove_protected() {
 
     // Verify only main remains
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "merge-cleaner.protected"])
+        .args(["config", "--get-all", "sync.protected"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -302,7 +293,7 @@ fn config_add_and_remove_remote() {
     let p = dir.path();
 
     // Add remotes
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "add-remote", "origin"])
         .current_dir(p)
@@ -310,7 +301,7 @@ fn config_add_and_remove_remote() {
         .success()
         .stderr(predicate::str::contains("Added remote: origin"));
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "add-remote", "upstream"])
         .current_dir(p)
@@ -318,7 +309,7 @@ fn config_add_and_remove_remote() {
         .success();
 
     // Remove one
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "remove-remote", "upstream"])
         .current_dir(p)
@@ -328,7 +319,7 @@ fn config_add_and_remove_remote() {
 
     // Verify only origin remains
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "merge-cleaner.remote"])
+        .args(["config", "--get-all", "sync.remote"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -343,7 +334,7 @@ fn clean_dry_run_preserves_branches() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["-y", "-n", "--no-fetch"])
         .current_dir(dir.path())
@@ -364,7 +355,7 @@ fn clean_deletes_merged_branch() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(dir.path())
@@ -383,7 +374,7 @@ fn clean_no_merged_branches() {
     configure(&dir);
     // No extra branches — nothing to delete
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(dir.path())
@@ -398,7 +389,7 @@ fn clean_remote_only_skips_local_deletion() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["-y", "--no-fetch", "--remote-only"])
         .current_dir(dir.path())
@@ -416,7 +407,7 @@ fn clean_local_only_deletes_local() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["-y", "--no-fetch", "--local-only"])
         .current_dir(dir.path())
@@ -435,7 +426,7 @@ fn config_protect_and_unprotect() {
     let p = dir.path();
 
     // Protect a branch
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "protect", "develop"])
         .current_dir(p)
@@ -447,14 +438,14 @@ fn config_protect_and_unprotect() {
 
     // Verify with git config
     let output = StdCommand::new("git")
-        .args(["config", "--get", "branch.develop.merge-cleaner-protected"])
+        .args(["config", "--get", "branch.develop.sync-protected"])
         .current_dir(p)
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
 
     // Unprotect
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "unprotect", "develop"])
         .current_dir(p)
@@ -466,7 +457,7 @@ fn config_protect_and_unprotect() {
 
     // Verify key is removed
     let output = StdCommand::new("git")
-        .args(["config", "--get", "branch.develop.merge-cleaner-protected"])
+        .args(["config", "--get", "branch.develop.sync-protected"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -484,12 +475,12 @@ fn config_list_shows_branch_protected() {
 
     // Mark a branch as per-branch protected
     StdCommand::new("git")
-        .args(["config", "branch.staging.merge-cleaner-protected", "true"])
+        .args(["config", "branch.staging.sync-protected", "true"])
         .current_dir(p)
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["config", "list"])
         .current_dir(p)
@@ -508,16 +499,12 @@ fn clean_respects_branch_protected() {
     // Mark the merged branch as per-branch protected
     let p = dir.path();
     StdCommand::new("git")
-        .args([
-            "config",
-            "branch.feature/done.merge-cleaner-protected",
-            "true",
-        ])
+        .args(["config", "branch.feature/done.sync-protected", "true"])
         .current_dir(p)
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-merge-cleaner")
+    Command::cargo_bin("git-sync")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(p)

@@ -49,7 +49,7 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../git-merge-cleaner-${{ github.ref_name }}-${{ matrix.target }}.tar.gz git-merge-cleaner git-mc
+          tar czf ../../../git-sync-${{ github.ref_name }}-${{ matrix.target }}.tar.gz git-sync
           cd ../../..
 
       - name: Package (windows)
@@ -57,10 +57,10 @@ jobs:
         shell: pwsh
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path git-merge-cleaner.exe, git-mc.exe -DestinationPath ../../../git-merge-cleaner-${{ github.ref_name }}-${{ matrix.target }}.zip
+          Compress-Archive -Path git-sync.exe -DestinationPath ../../../git-sync-${{ github.ref_name }}-${{ matrix.target }}.zip
           cd ../../..
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: git-merge-cleaner-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          files: git-sync-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}

@@ -3,9 +3,9 @@ use anyhow::Result;
 use crate::git::Git;
 use crate::ui::Ui;
 
-const SECTION: &str = "merge-cleaner";
+const SECTION: &str = "sync";
 
-/// Stored configuration from the `[merge-cleaner]` git config section.
+/// Stored configuration from the `[sync]` git config section.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Glob patterns for branches that should never be deleted.
@@ -25,7 +25,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from the `[merge-cleaner]` git config section.
+    /// Load configuration from the `[sync]` git config section.
     ///
     /// Returns `None` if the section doesn't exist (first-run scenario).
     pub fn load(git: &Git) -> Result<Option<Self>> {
@@ -47,7 +47,7 @@ impl Config {
         Ok(Some(Self { protected, remotes }))
     }
 
-    /// Persist configuration to the `[merge-cleaner]` git config section.
+    /// Persist configuration to the `[sync]` git config section.
     pub fn save(&self, git: &Git) -> Result<()> {
         // Protected branches (multi-value)
         git.config_unset_all(&format!("{SECTION}.protected"))?;
@@ -70,7 +70,7 @@ impl Config {
     ///
     /// Auto-detects branches and remotes, then asks the user to confirm/edit.
     pub fn interactive_setup(git: &Git, ui: &Ui) -> Result<Self> {
-        ui.heading("No configuration found. Let's set up git-merge-cleaner.");
+        ui.heading("No configuration found. Let's set up git-sync.");
         ui.blank();
 
         // ── Protected branches ───────────────────────────────────────
@@ -144,7 +144,7 @@ impl Config {
         let config = Self { protected, remotes };
         config.save(git)?;
 
-        ui.success("Configuration saved to git config [merge-cleaner] section.");
+        ui.success("Configuration saved to git config [sync] section.");
         ui.blank();
 
         Ok(config)
