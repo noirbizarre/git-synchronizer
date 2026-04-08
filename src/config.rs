@@ -13,6 +13,9 @@ pub struct Config {
     /// Remotes to consider for remote branch deletion.
     /// `None` means *all* remotes.
     pub remotes: Option<Vec<String>>,
+    /// Whether to use worktrunk (wt) for worktree removal.
+    /// `None` means auto-detect from worktrunk config presence.
+    pub worktrunk: Option<bool>,
 }
 
 impl Default for Config {
@@ -20,6 +23,7 @@ impl Default for Config {
         Self {
             protected: vec!["main".to_string(), "master".to_string()],
             remotes: None,
+            worktrunk: None,
         }
     }
 }
@@ -37,14 +41,18 @@ impl Config {
 
         let remotes = {
             let vals = git.config_get_all(&format!("{SECTION}.remote"))?;
-            if vals.is_empty() {
-                None
-            } else {
-                Some(vals)
-            }
+            if vals.is_empty() { None } else { Some(vals) }
         };
 
-        Ok(Some(Self { protected, remotes }))
+        let worktrunk = git
+            .config_get(&format!("{SECTION}.worktrunk"))?
+            .map(|v| v.eq_ignore_ascii_case("true"));
+
+        Ok(Some(Self {
+            protected,
+            remotes,
+            worktrunk,
+        }))
     }
 
     /// Persist configuration to the `[sync]` git config section.
@@ -60,6 +68,19 @@ impl Config {
         if let Some(ref remotes) = self.remotes {
             for remote in remotes {
                 git.config_add(&format!("{SECTION}.remote"), remote)?;
+            }
+        }
+
+        // Worktrunk integration (optional)
+        match self.worktrunk {
+            Some(val) => {
+                git.config_set(
+                    &format!("{SECTION}.worktrunk"),
+                    if val { "true" } else { "false" },
+                )?;
+            }
+            None => {
+                git.config_unset_all(&format!("{SECTION}.worktrunk"))?;
             }
         }
 
@@ -139,9 +160,25 @@ impl Config {
 
         ui.blank();
 
+        // ── Worktrunk integration ────────────────────────────────────
+        let worktrunk = if crate::git::worktrunk_available() {
+            ui.blank();
+            let use_wt = ui.confirm(
+                "Worktrunk (wt) detected. Use it for worktree removal (triggers pre/post-remove hooks)?",
+                true,
+            )?;
+            Some(use_wt)
+        } else {
+            None
+        };
+
         // ── Save ─────────────────────────────────────────────────────
 
-        let config = Self { protected, remotes };
+        let config = Self {
+            protected,
+            remotes,
+            worktrunk,
+        };
         config.save(git)?;
 
         ui.success("Configuration saved to git config [sync] section.");
@@ -215,12 +252,14 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: Some(vec!["origin".to_string()]),
+            worktrunk: None,
         };
         config.save(&git).unwrap();
 
         let loaded = Config::load(&git).unwrap().expect("config should exist");
         assert_eq!(loaded.protected, config.protected);
         assert_eq!(loaded.remotes, config.remotes);
+        assert_eq!(loaded.worktrunk, config.worktrunk);
     }
 
     #[test]
@@ -230,6 +269,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
+            worktrunk: None,
         };
         config.save(&git).unwrap();
 
@@ -242,6 +282,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.protected, vec!["main", "master"]);
         assert!(config.remotes.is_none());
+        assert!(config.worktrunk.is_none());
     }
 
     #[test]
@@ -251,18 +292,59 @@ mod tests {
         let config1 = Config {
             protected: vec!["main".to_string()],
             remotes: Some(vec!["origin".to_string()]),
+            worktrunk: Some(true),
         };
         config1.save(&git).unwrap();
 
         let config2 = Config {
             protected: vec!["develop".to_string(), "release/*".to_string()],
             remotes: Some(vec!["upstream".to_string()]),
+            worktrunk: Some(false),
         };
         config2.save(&git).unwrap();
 
         let loaded = Config::load(&git).unwrap().expect("config should exist");
         assert_eq!(loaded.protected, vec!["develop", "release/*"]);
         assert_eq!(loaded.remotes, Some(vec!["upstream".to_string()]));
+        assert_eq!(loaded.worktrunk, Some(false));
+    }
+
+    #[test]
+    fn test_config_worktrunk_roundtrip() {
+        let (_dir, git) = init_test_repo();
+
+        // Save with worktrunk enabled
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: Some(true),
+        };
+        config.save(&git).unwrap();
+
+        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        assert_eq!(loaded.worktrunk, Some(true));
+
+        // Overwrite with worktrunk disabled
+        let config2 = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: Some(false),
+        };
+        config2.save(&git).unwrap();
+
+        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        assert_eq!(loaded.worktrunk, Some(false));
+
+        // Overwrite with worktrunk unset
+        let config3 = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        config3.save(&git).unwrap();
+
+        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        assert!(loaded.worktrunk.is_none());
     }
 
     #[test]
@@ -272,6 +354,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
+            worktrunk: None,
         };
         config.save(&git).unwrap();
 

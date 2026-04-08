@@ -34,6 +34,48 @@ fn run_git(args: &[&str], verbose: bool, workdir: Option<&Path>) -> Result<Strin
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Run an external command (not git) and return its stdout as a trimmed string.
+///
+/// If `verbose` is true the command is printed to stderr before execution.
+fn run_cmd(bin: &str, args: &[&str], verbose: bool, workdir: Option<&Path>) -> Result<String> {
+    if verbose {
+        eprintln!("  $ {} {}", bin, args.join(" "));
+    }
+
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    if let Some(dir) = workdir {
+        cmd.current_dir(dir);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to execute: {} {}", bin, args.join(" ")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{} {} failed (exit {}):\n{}",
+            bin,
+            args.join(" "),
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Check if the worktrunk CLI (`wt`) is available on `$PATH`.
+pub fn worktrunk_available() -> bool {
+    Command::new("wt")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
 /// A thin wrapper around git CLI invocations.
 pub struct Git {
     verbose: bool,
@@ -59,6 +101,10 @@ impl Git {
 
     fn run(&self, args: &[&str]) -> Result<String> {
         run_git(args, self.verbose, self.workdir.as_deref())
+    }
+
+    fn run_wt(&self, args: &[&str]) -> Result<String> {
+        run_cmd("wt", args, self.verbose, self.workdir.as_deref())
     }
 
     // ── Repository info ──────────────────────────────────────────────
@@ -146,6 +192,47 @@ impl Git {
     /// Remove a worktree by path.
     pub fn worktree_remove(&self, path: &str) -> Result<()> {
         self.run(&["worktree", "remove", path])?;
+        Ok(())
+    }
+
+    // ── Worktrunk integration ────────────────────────────────────────
+
+    /// Check if a worktrunk config section exists in git config.
+    ///
+    /// Worktrunk stores its state under the `[worktrunk]` git config section.
+    /// Its presence indicates the repository is managed by worktrunk.
+    pub fn worktrunk_config_exists(&self) -> Result<bool> {
+        self.config_section_exists("worktrunk")
+    }
+
+    /// Remove a worktree via the worktrunk CLI, triggering pre/post-remove hooks.
+    ///
+    /// Uses `--foreground` to wait for hooks to complete, `--yes` to skip
+    /// wt's approval prompts (git-sync already confirmed with the user), and
+    /// `--no-delete-branch` because git-sync manages branch deletion separately.
+    pub fn worktrunk_remove(&self, branch: &str) -> Result<()> {
+        self.run_wt(&[
+            "remove",
+            branch,
+            "--foreground",
+            "--yes",
+            "--no-delete-branch",
+        ])?;
+        Ok(())
+    }
+
+    /// Remove a worktree via the worktrunk CLI using its path.
+    ///
+    /// Used for detached HEAD worktrees or orphans where the branch name
+    /// is not available. Falls back to path-based removal.
+    pub fn worktrunk_remove_by_path(&self, path: &str) -> Result<()> {
+        self.run_wt(&[
+            "remove",
+            path,
+            "--foreground",
+            "--yes",
+            "--no-delete-branch",
+        ])?;
         Ok(())
     }
 
@@ -592,7 +679,9 @@ bare
             .args(["rev-parse", "HEAD"])
             .current_dir(path)
             .output()?;
-        let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+        let sha = String::from_utf8_lossy(&sha_output.stdout)
+            .trim()
+            .to_string();
 
         // Add a diverging commit on main so cherry-pick creates a different SHA
         Command::new("git")
@@ -756,19 +845,11 @@ bare
 
         // Mark two branches as protected via per-branch config
         Command::new("git")
-            .args([
-                "config",
-                "branch.develop.sync-protected",
-                "true",
-            ])
+            .args(["config", "branch.develop.sync-protected", "true"])
             .current_dir(path)
             .output()?;
         Command::new("git")
-            .args([
-                "config",
-                "branch.staging.sync-protected",
-                "true",
-            ])
+            .args(["config", "branch.staging.sync-protected", "true"])
             .current_dir(path)
             .output()?;
 
