@@ -1,6 +1,4 @@
 [workspace]
-# Use git-cliff for changelog generation
-changelog_config = "cliff.toml"
 # Update CHANGELOG.md in the release PR
 changelog_update = true
 # Create git tags on release
@@ -11,3 +9,74 @@ git_release_enable = true
 semver_check = false
 # Labels to apply to the release PR
 pr_labels = ["release"]
+# Repository URL (avoids needing upstream tracking branch to resolve it)
+repo_url = "https://github.com/noirbizarre/git-synchronizer"
+# Use git tags instead of cargo registry for version detection (binary crate, not published)
+git_only = true
+
+[changelog]
+header = """
+# Changelog
+
+"""
+body = """
+{% if version -%}
+  ## 🚀 [{{ version }}]{% if release_link %}({{ release_link }}){% endif %} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% else -%}
+  ## [Unreleased]
+{% endif -%}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits
+| filter(attribute="scope")
+| sort(attribute="scope") %}
+  - **{{ commit.scope }}:** {{ commit.message | upper_first }} \
+    ([{{ commit.id | truncate(length=7, end="") }}]({{ remote.link }}/commit/{{ commit.id }}))\
+    {%- if commit.links %} {% for link in commit.links %}[{{link.text}}]({{link.href}}) {% endfor -%}{% endif %}
+  {%- if commit.breaking %}
+  {% raw %}  {% endraw %}🚨 **BREAKING**: {{ commit.breaking_description }}
+  {%- endif -%}
+{%- endfor -%}
+{% for commit in commits %}
+  {%- if not commit.scope %}
+  - {{ commit.message | upper_first }} \
+    ([{{ commit.id | truncate(length=7, end="") }}]({{ remote.link }}/commit/{{ commit.id }}))\
+    {%- if commit.links %} {% for link in commit.links %}[{{link.text}}]({{link.href}}) {% endfor -%}{% endif %}
+  {%- if commit.breaking %}
+  {% raw %}  {% endraw %}🚨 **BREAKING**: {{ commit.breaking_description }}
+  {%- endif -%}
+  {%- endif -%}
+{%- endfor %}
+{% endfor %}
+
+{% set ctx = __tera_context -%}
+{%- if ctx.remote.contributors is defined and ctx.remote.contributors | length != 0 %}
+### Contributors
+{%- for contributor in remote.contributors %}
+  - @{{ contributor.username }}
+{%- endfor %}
+{%- endif %}
+"""
+trim = true
+protect_breaking_commits = true
+sort_commits = "newest"
+commit_preprocessors = [
+  # Replace issue/PR numbers with GitHub links
+  { pattern = "\\(#([0-9]+)\\)", replace = "([#${1}](https://github.com/noirbizarre/git-synchronizer/pull/${1}))" },
+]
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->💫 New features" },
+  { message = "^fix", group = "<!-- 1 -->🐛 Bug fixes" },
+  { message = "^perf", group = "<!-- 2 -->📈 Performance" },
+  { message = "^doc", group = "<!-- 3 -->📖 Documentation" },
+  { message = "^refactor", group = "<!-- 4 -->🔧 Refactorings" },
+  { message = "^build", group = "<!-- 5 -->📦 Build" },
+  { message = "^ci", group = "<!-- 6 -->🛸 Continuous Integration" },
+  { message = "^test", group = "<!-- 7 -->🚦 Testing" },
+  { message = "^style", group = "<!-- 8 -->🎨 Style" },
+  { message = "^revert", group = "<!-- 9 -->🔙 Reverted" },
+  { message = "^wip", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore|^misc", group = "<!-- 10 -->🧹 Chores" },
+]
