@@ -520,3 +520,187 @@ fn clean_respects_branch_protected() {
     // main should still exist
     assert!(branches.contains(&"main".to_string()));
 }
+
+// ── Worktree config support ─────────────────────────────────────────
+
+/// Initialize a repo with `extensions.worktreeConfig = true` and a linked
+/// worktree. Returns (tempdir, main_path, worktree_path).
+fn init_repo_with_worktree_config() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let main_path = dir.path().join("main-repo");
+    std::fs::create_dir_all(&main_path).unwrap();
+
+    StdCommand::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+
+    std::fs::write(main_path.join("README.md"), "# test").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+
+    // Enable extensions.worktreeConfig
+    StdCommand::new("git")
+        .args(["config", "extensions.worktreeConfig", "true"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+
+    // Create a branch and a linked worktree
+    StdCommand::new("git")
+        .args(["branch", "feature/wt"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    let wt_path = dir.path().join("linked-wt");
+    StdCommand::new("git")
+        .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+
+    (dir, main_path, wt_path)
+}
+
+#[test]
+fn config_set_from_linked_worktree_visible_in_main() {
+    let (_dir, main_path, wt_path) = init_repo_with_worktree_config();
+
+    // Run config commands from the linked worktree
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "add-protected", "main"])
+        .current_dir(&wt_path)
+        .assert()
+        .success();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "add-protected", "release/*"])
+        .current_dir(&wt_path)
+        .assert()
+        .success();
+
+    // Config should be visible from the main worktree
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(&main_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("main"))
+        .stderr(predicate::str::contains("release/*"));
+}
+
+#[test]
+fn config_protect_from_linked_worktree_visible_in_main() {
+    let (_dir, main_path, wt_path) = init_repo_with_worktree_config();
+
+    // Seed minimal config so list doesn't show "no config"
+    StdCommand::new("git")
+        .args(["config", "--local", "--add", "sync.protected", "main"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+
+    // Protect a branch from the linked worktree
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "protect", "develop"])
+        .current_dir(&wt_path)
+        .assert()
+        .success();
+
+    // Branch protection should be visible from the main worktree
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(&main_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("develop"));
+}
+
+#[test]
+fn clean_from_linked_worktree_with_worktree_config() {
+    let (_dir, main_path, wt_path) = init_repo_with_worktree_config();
+
+    // Configure from main worktree
+    StdCommand::new("git")
+        .args(["config", "--local", "--add", "sync.protected", "main"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+
+    // Create and merge a branch from the main worktree
+    StdCommand::new("git")
+        .args(["checkout", "-b", "feature/done"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    std::fs::write(main_path.join("done.txt"), "done").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "done"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["merge", "feature/done"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+
+    // Run clean from the linked worktree — must succeed and see config
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--no-worktrees"])
+        .current_dir(&wt_path)
+        .assert()
+        .success();
+
+    // The merged branch should have been deleted
+    let output = StdCommand::new("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(&main_path)
+        .output()
+        .unwrap();
+    let branches: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    assert!(
+        !branches.contains(&"feature/done".to_string()),
+        "merged branch should be deleted when running from linked worktree"
+    );
+    assert!(branches.contains(&"main".to_string()));
+}
