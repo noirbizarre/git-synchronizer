@@ -129,6 +129,6 @@ mod tests {
         let ui = Ui::default();
         // Smoke test: styles should be constructable
         let styled = ui.heading.apply_to("test");
-        assert_eq!(styled.to_string().contains("test"), true);
+        assert!(styled.to_string().contains("test"));
     }
 }

@@ -59,6 +59,16 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                             branch_protected.join(", ")
                         }
                     ));
+
+                    ui.line(&format!(
+                        "  {} {}",
+                        ui.bold.apply_to("worktrunk:"),
+                        match cfg.worktrunk {
+                            Some(true) => "enabled",
+                            Some(false) => "disabled",
+                            None => "(auto-detect)",
+                        }
+                    ));
                 }
                 None => {
                     ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
@@ -130,6 +140,8 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
     let cfg = config::load_or_setup(git, ui)?;
 
+    let use_worktrunk = resolve_worktrunk(git, ui, cli, &cfg)?;
+
     let opts = cleaner::CleanerOptions {
         yes: cli.yes,
         dry_run: cli.dry_run,
@@ -137,7 +149,52 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         local_only: cli.local_only,
         remote_only: cli.remote_only,
         no_worktrees: cli.no_worktrees,
+        use_worktrunk,
     };
 
     cleaner::run(git, &cfg, ui, &opts)
+}
+
+/// Resolve whether to use worktrunk for worktree removal.
+///
+/// Priority: CLI flag > config setting > auto-detect from worktrunk config presence.
+fn resolve_worktrunk(git: &git::Git, ui: &ui::Ui, cli: &Cli, cfg: &config::Config) -> Result<bool> {
+    // 1. Explicit CLI flags take highest priority
+    if cli.worktrunk {
+        if !git::worktrunk_available() {
+            anyhow::bail!(
+                "Worktrunk (wt) not found on $PATH. \
+                 Install it from https://worktrunk.dev or remove --worktrunk."
+            );
+        }
+        return Ok(true);
+    }
+    if cli.no_worktrunk {
+        return Ok(false);
+    }
+
+    // 2. Config setting
+    if let Some(val) = cfg.worktrunk {
+        if val && !git::worktrunk_available() {
+            anyhow::bail!(
+                "sync.worktrunk is enabled but worktrunk (wt) is not found on $PATH. \
+                 Install it from https://worktrunk.dev or run: \
+                 git sync config set worktrunk false"
+            );
+        }
+        return Ok(val);
+    }
+
+    // 3. Auto-detect: check if worktrunk config section exists in git config
+    if git.worktrunk_config_exists()? && git::worktrunk_available() {
+        if cli.yes {
+            return Ok(true);
+        }
+        return ui.confirm(
+            "Worktrunk detected. Use it for worktree removal (triggers pre/post-remove hooks)?",
+            true,
+        );
+    }
+
+    Ok(false)
 }

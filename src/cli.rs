@@ -44,6 +44,14 @@ pub struct Cli {
     #[arg(long)]
     pub no_worktrees: bool,
 
+    /// Use worktrunk (wt) for worktree removal to trigger pre/post-remove hooks
+    #[arg(long, overrides_with = "no_worktrunk")]
+    pub worktrunk: bool,
+
+    /// Do not use worktrunk for worktree removal (overrides config)
+    #[arg(long, overrides_with = "worktrunk")]
+    pub no_worktrunk: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -125,6 +133,8 @@ mod tests {
         assert!(!cli.local_only);
         assert!(!cli.remote_only);
         assert!(!cli.no_worktrees);
+        assert!(!cli.worktrunk);
+        assert!(!cli.no_worktrunk);
         assert!(cli.command.is_none());
     }
 
@@ -137,6 +147,32 @@ mod tests {
         assert!(cli.no_fetch);
         assert!(cli.local_only);
         assert!(!cli.remote_only);
+    }
+
+    #[test]
+    fn test_cli_worktrunk_flag() {
+        let cli = Cli::parse_from(["git-sync", "--worktrunk"]);
+        assert!(cli.worktrunk);
+        assert!(!cli.no_worktrunk);
+    }
+
+    #[test]
+    fn test_cli_no_worktrunk_flag() {
+        let cli = Cli::parse_from(["git-sync", "--no-worktrunk"]);
+        assert!(!cli.worktrunk);
+        assert!(cli.no_worktrunk);
+    }
+
+    #[test]
+    fn test_cli_worktrunk_overrides() {
+        // Last flag wins with overrides_with
+        let cli = Cli::parse_from(["git-sync", "--worktrunk", "--no-worktrunk"]);
+        assert!(!cli.worktrunk);
+        assert!(cli.no_worktrunk);
+
+        let cli = Cli::parse_from(["git-sync", "--no-worktrunk", "--worktrunk"]);
+        assert!(cli.worktrunk);
+        assert!(!cli.no_worktrunk);
     }
 
     #[test]

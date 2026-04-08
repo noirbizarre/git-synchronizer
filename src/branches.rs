@@ -219,6 +219,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
+            worktrunk: None,
         };
         let matcher = build_protected_matcher(&config).unwrap();
         assert!(matcher.is_match("main"));
@@ -234,6 +235,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
+            worktrunk: None,
         };
 
         let merged = find_merged_local(&git, &config).unwrap();
@@ -254,6 +256,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
+            worktrunk: None,
         };
 
         let current = git.current_branch().unwrap();
@@ -353,6 +356,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
+            worktrunk: None,
         };
         let merged = find_merged_local(&git, &config).unwrap();
         assert!(merged.contains(&"feature/cherry".to_string()));
@@ -364,6 +368,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
+            worktrunk: None,
         };
 
         let targets = resolve_merge_targets(&git, &config).unwrap();
@@ -380,6 +385,7 @@ mod tests {
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
             remotes: None,
+            worktrunk: None,
         };
 
         let merged = find_merged_local(&git, &config).unwrap();
@@ -392,6 +398,7 @@ mod tests {
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
+            worktrunk: None,
         };
 
         // Without per-branch protection, feature/done should be a candidate
@@ -417,6 +424,7 @@ mod tests {
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
             remotes: None,
+            worktrunk: None,
         };
 
         // Without any real protected branches, nothing is a merge target

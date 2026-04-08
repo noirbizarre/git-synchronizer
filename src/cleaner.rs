@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::branches::{find_merged_local, find_merged_remote};
 use crate::config::Config;
-use crate::git::Git;
+use crate::git::{Git, Worktree};
 use crate::ui::Ui;
 use crate::worktrees::{find_orphan_worktrees, find_worktrees_for_branches};
 
@@ -14,6 +14,7 @@ pub struct CleanerOptions {
     pub local_only: bool,
     pub remote_only: bool,
     pub no_worktrees: bool,
+    pub use_worktrunk: bool,
 }
 
 /// Run the full clean-up workflow.
@@ -155,7 +156,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     if opts.dry_run {
                         ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
                     } else {
-                        match git.worktree_remove(&wt.path) {
+                        match remove_worktree(git, wt, opts.use_worktrunk) {
                             Ok(()) => removed += 1,
                             Err(e) => {
                                 ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
@@ -213,7 +214,7 @@ fn remove_worktrees_for_branches(
             if opts.dry_run {
                 ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
             } else {
-                match git.worktree_remove(&wt.path) {
+                match remove_worktree(git, wt, opts.use_worktrunk) {
                     Ok(()) => {}
                     Err(e) => {
                         ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
@@ -231,6 +232,18 @@ fn effective_remotes(git: &Git, config: &Config) -> Result<Vec<String>> {
     match &config.remotes {
         Some(configured) => Ok(configured.clone()),
         None => git.remotes(),
+    }
+}
+
+/// Remove a single worktree, optionally using worktrunk to trigger hooks.
+fn remove_worktree(git: &Git, wt: &Worktree, use_worktrunk: bool) -> Result<()> {
+    if use_worktrunk {
+        match &wt.branch {
+            Some(branch) => git.worktrunk_remove(branch),
+            None => git.worktrunk_remove_by_path(&wt.path),
+        }
+    } else {
+        git.worktree_remove(&wt.path)
     }
 }
 
@@ -332,6 +345,7 @@ mod tests {
         Config {
             protected: vec!["main".to_string()],
             remotes: None,
+            worktrunk: None,
         }
     }
 
@@ -343,6 +357,7 @@ mod tests {
             local_only: false,
             remote_only: false,
             no_worktrees: false,
+            use_worktrunk: false,
         }
     }
 
@@ -500,6 +515,7 @@ mod tests {
         let config_with = Config {
             protected: vec!["main".to_string()],
             remotes: Some(vec!["origin".to_string(), "upstream".to_string()]),
+            worktrunk: None,
         };
         let remotes = effective_remotes(&git, &config_with).unwrap();
         assert_eq!(remotes, vec!["origin", "upstream"]);
@@ -507,6 +523,7 @@ mod tests {
         let config_without = Config {
             protected: vec!["main".to_string()],
             remotes: None,
+            worktrunk: None,
         };
         let remotes = effective_remotes(&git, &config_without).unwrap();
         assert!(remotes.is_empty());
