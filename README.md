@@ -11,7 +11,9 @@ orphaned worktree cleanup.
 - Delete local and remote branches that have been merged
 - Worktree cleanup: removes worktrees for deleted branches and orphaned worktrees
 - Glob pattern support for protected branches (e.g. `release/*`)
+- Per-branch protection via git config (`branch.<name>.sync-protected`)
 - Multiple merge detection strategies (fast merge and rebase-aware via `git cherry`)
+- Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
 - Interactive setup wizard on first run
 - Configuration stored in git config (`[sync]` section)
 - Safety-first: `--force-with-lease` for remote deletions
@@ -22,8 +24,8 @@ orphaned worktree cleanup.
 cargo install --path .
 ```
 
-This installs the `git-sync` binary, making it
-available as the `git sync` subcommand.
+The crate is named `git-synchronizer` but installs a binary called `git-sync`,
+making it available as the `git sync` subcommand.
 
 ## Usage
 
@@ -49,6 +51,12 @@ git sync --remote-only
 
 # Skip worktree cleanup
 git sync --no-worktrees
+
+# Use worktrunk for worktree removal (triggers pre/post-remove hooks)
+git sync --worktrunk
+
+# Disable worktrunk even if configured or detected
+git sync --no-worktrunk
 ```
 
 ### Configuration management
@@ -63,6 +71,10 @@ git sync config setup
 # Add/remove protected branch patterns
 git sync config add-protected 'release/*'
 git sync config remove-protected 'develop'
+
+# Protect/unprotect individual branches
+git sync config protect develop
+git sync config unprotect develop
 
 # Add/remove remotes to operate on
 git sync config add-remote upstream
@@ -80,12 +92,25 @@ Configuration is stored in the `[sync]` section of your git config
     protected = master
     protected = release/*
     remote = origin
+    worktrunk = true
 ```
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `protected` | multi-value | Glob patterns for branches that should never be deleted |
 | `remote` | multi-value | Remotes to delete branches from (omit for all remotes) |
+| `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects |
+
+Individual branches can also be protected via the standard `[branch]`
+config namespace:
+
+```ini
+[branch "develop"]
+    sync-protected = true
+```
+
+A per-branch protected branch is excluded from deletion candidates and also
+serves as a merge target (branches merged into it are flagged for cleanup).
 
 ### First run
 
@@ -95,6 +120,7 @@ setup wizard runs automatically:
 1. Auto-detects local branches and pre-selects well-known ones (`main`, `master`)
 2. Asks for additional protected patterns (e.g. `release/*`)
 3. Lists available remotes and asks which ones to operate on
+4. If [worktrunk](https://worktrunk.dev) (`wt`) is detected on `$PATH`, asks whether to use it for worktree removal
 
 ## How it works
 
@@ -105,15 +131,18 @@ CLI flags:
    (or all) remotes to sync remote-tracking branches. Skipped with `--no-fetch`.
 
 2. **Delete merged local branches** -- identifies branches merged into any
-   protected branch using two complementary strategies:
+   protected branch (both glob-pattern and per-branch protected) using two
+   complementary strategies:
    - *Standard detection*: `git branch --merged <target>` catches fast-forward
      and regular merges.
    - *Rebase-aware detection*: `git cherry <target> <branch>` catches
      squash-merged and rebased branches by checking whether every commit has
      already been applied upstream.
 
-   The user selects which branches to delete. Associated worktrees are removed
-   first, then branches are deleted with `git branch -d`.
+   Per-branch protected branches also serve as merge targets, so branches
+   merged into them are detected as candidates too. The user selects which
+   branches to delete. Associated worktrees are removed first, then branches
+   are deleted with `git branch -d`.
    Skipped with `--remote-only`.
 
 3. **Delete merged remote branches** -- for each configured remote, identifies
@@ -123,7 +152,11 @@ CLI flags:
    Skipped with `--local-only`.
 
 4. **Clean orphan worktrees** -- finds worktrees whose branch no longer exists
-   locally and offers to remove them with `git worktree remove`.
+   locally and offers to remove them. When
+   [worktrunk](https://worktrunk.dev) is enabled (via `--worktrunk` flag,
+   `sync.worktrunk` config, or auto-detection), removal is delegated to
+   `wt remove` so that pre/post-remove hooks are triggered. Otherwise falls
+   back to `git worktree remove`.
    Skipped with `--no-worktrees`.
 
 ```mermaid
@@ -160,7 +193,10 @@ flowchart TD
     WTCheck{--no-worktrees?}
     WTCheck -- No --> FindOrphan[Find orphan worktrees]
     FindOrphan --> ConfirmWT[User confirms removal]
-    ConfirmWT --> RemoveOrphan[Remove orphan worktrees\ngit worktree remove]
+    ConfirmWT --> UseWT{Worktrunk\nenabled?}
+    UseWT -- Yes --> WTRemove[Remove worktrees\nwt remove]
+    UseWT -- No --> RemoveOrphan[Remove worktrees\ngit worktree remove]
+    WTRemove --> Done
     RemoveOrphan --> Done
     WTCheck -- Yes --> Done
 
@@ -179,6 +215,7 @@ mise run fmt            # Format code
 mise run check          # Run all checks (fmt + lint + test)
 mise run cover          # Generate lcov coverage report
 mise run cover:html     # Generate HTML coverage report
+mise run setup          # Install the binary locally
 ```
 
 ## License
