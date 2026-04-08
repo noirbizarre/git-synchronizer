@@ -169,9 +169,14 @@ impl Git {
 
     // ── Branch mutations ─────────────────────────────────────────────
 
-    /// Delete a local branch.
+    /// Delete a local branch (force).
+    ///
+    /// Uses `-D` instead of `-d` because the caller has already verified the
+    /// branch is merged into a protected target. The soft `-d` flag only
+    /// checks against HEAD which fails when running from a linked worktree
+    /// whose HEAD differs from the merge target.
     pub fn branch_delete(&self, branch: &str) -> Result<()> {
-        self.run(&["branch", "-d", branch])?;
+        self.run(&["branch", "-D", branch])?;
         Ok(())
     }
 
@@ -259,21 +264,32 @@ impl Git {
     }
 
     /// Set a single-valued config key.
+    ///
+    /// Uses `--local` to ensure the value is written to the shared
+    /// `.git/config` even when `extensions.worktreeConfig` is enabled
+    /// (where the default write scope would target the per-worktree
+    /// config file instead).
     pub fn config_set(&self, key: &str, value: &str) -> Result<()> {
-        self.run(&["config", key, value])?;
+        self.run(&["config", "--local", key, value])?;
         Ok(())
     }
 
     /// Add a value to a multi-valued config key.
+    ///
+    /// Uses `--local` to target the shared `.git/config`.
+    /// See [`config_set`](Self::config_set) for rationale.
     pub fn config_add(&self, key: &str, value: &str) -> Result<()> {
-        self.run(&["config", "--add", key, value])?;
+        self.run(&["config", "--local", "--add", key, value])?;
         Ok(())
     }
 
     /// Remove all values for a config key.
+    ///
+    /// Uses `--local` to target the shared `.git/config`.
+    /// See [`config_set`](Self::config_set) for rationale.
     pub fn config_unset_all(&self, key: &str) -> Result<()> {
         // --unset-all exits non-zero if the key doesn't exist; that's fine.
-        let _ = self.run(&["config", "--unset-all", key]);
+        let _ = self.run(&["config", "--local", "--unset-all", key]);
         Ok(())
     }
 
@@ -319,13 +335,16 @@ impl Git {
     ///
     /// When `protected` is `true`, sets `branch.<name>.sync-protected = true`.
     /// When `false`, unsets the key entirely.
+    ///
+    /// Uses `--local` to target the shared `.git/config`.
+    /// See [`config_set`](Self::config_set) for rationale.
     pub fn set_branch_protected(&self, branch: &str, protected: bool) -> Result<()> {
         let key = format!("branch.{branch}.sync-protected");
         if protected {
-            self.run(&["config", &key, "true"])?;
+            self.run(&["config", "--local", &key, "true"])?;
         } else {
             // --unset exits non-zero if the key doesn't exist; that's fine.
-            let _ = self.run(&["config", "--unset", &key]);
+            let _ = self.run(&["config", "--local", "--unset", &key]);
         }
         Ok(())
     }
@@ -902,6 +921,149 @@ bare
 
         // Unsetting a non-existent key should not error
         git.set_branch_protected("nonexistent", false)?;
+
+        Ok(())
+    }
+
+    // ── Worktree-config tests ────────────────────────────────────────
+
+    /// Helper: create a repo with `extensions.worktreeConfig = true` and
+    /// a linked worktree, returning (tempdir, main_path, worktree_path).
+    fn init_repo_with_worktree_config()
+    -> Result<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
+        let dir = tempfile::tempdir()?;
+        let main_path = dir.path().join("main-repo");
+        std::fs::create_dir_all(&main_path)?;
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&main_path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&main_path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&main_path)
+            .output()?;
+
+        std::fs::write(main_path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&main_path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&main_path)
+            .output()?;
+
+        // Enable extensions.worktreeConfig
+        Command::new("git")
+            .args(["config", "extensions.worktreeConfig", "true"])
+            .current_dir(&main_path)
+            .output()?;
+
+        // Create a branch and a linked worktree
+        Command::new("git")
+            .args(["branch", "feature/wt"])
+            .current_dir(&main_path)
+            .output()?;
+        let wt_path = dir.path().join("linked-wt");
+        Command::new("git")
+            .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
+            .current_dir(&main_path)
+            .output()?;
+
+        Ok((dir, main_path, wt_path))
+    }
+
+    #[test]
+    fn test_config_set_from_linked_worktree_writes_to_shared_config() -> Result<()> {
+        let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
+
+        // Write config from the linked worktree
+        let git_wt = Git::with_workdir(false, &wt_path);
+        git_wt.config_set("sync.worktrunk", "true")?;
+
+        // Read from the main worktree — must see the value
+        let git_main = Git::with_workdir(false, &main_path);
+        let val = git_main.config_get("sync.worktrunk")?;
+        assert_eq!(val.as_deref(), Some("true"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_add_from_linked_worktree_writes_to_shared_config() -> Result<()> {
+        let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
+
+        // Add config values from the linked worktree
+        let git_wt = Git::with_workdir(false, &wt_path);
+        git_wt.config_add("sync.protected", "main")?;
+        git_wt.config_add("sync.protected", "release/*")?;
+
+        // Read from the main worktree
+        let git_main = Git::with_workdir(false, &main_path);
+        let protected = git_main.config_get_all("sync.protected")?;
+        assert_eq!(protected, vec!["main", "release/*"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_unset_all_from_linked_worktree_clears_shared_config() -> Result<()> {
+        let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
+
+        // Set some values from the main worktree
+        let git_main = Git::with_workdir(false, &main_path);
+        git_main.config_add("sync.protected", "main")?;
+        git_main.config_add("sync.protected", "develop")?;
+
+        // Unset from the linked worktree
+        let git_wt = Git::with_workdir(false, &wt_path);
+        git_wt.config_unset_all("sync.protected")?;
+
+        // Verify from the main worktree
+        let protected = git_main.config_get_all("sync.protected")?;
+        assert!(protected.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_branch_protected_from_linked_worktree() -> Result<()> {
+        let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
+
+        // Set per-branch protection from the linked worktree
+        let git_wt = Git::with_workdir(false, &wt_path);
+        git_wt.set_branch_protected("develop", true)?;
+
+        // Read from the main worktree
+        let git_main = Git::with_workdir(false, &main_path);
+        let protected = git_main.branch_protected_list()?;
+        assert_eq!(protected, vec!["develop"]);
+
+        // Unset from the linked worktree
+        git_wt.set_branch_protected("develop", false)?;
+        let protected = git_main.branch_protected_list()?;
+        assert!(protected.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_section_exists_across_worktrees() -> Result<()> {
+        let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
+
+        // Write from linked worktree
+        let git_wt = Git::with_workdir(false, &wt_path);
+        git_wt.config_add("sync.protected", "main")?;
+
+        // Section should be visible from both worktrees
+        assert!(git_wt.config_section_exists("sync")?);
+        let git_main = Git::with_workdir(false, &main_path);
+        assert!(git_main.config_section_exists("sync")?);
 
         Ok(())
     }
