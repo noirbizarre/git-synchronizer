@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: 🕵️ Check (fmt + clippy)
+  lint:
+    name: 🕵️ Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -18,7 +18,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: j178/prek-action@v1
+      - uses: j178/prek-action@v2
 
   test:
     name: 🧪 Test (${{ matrix.os }})
