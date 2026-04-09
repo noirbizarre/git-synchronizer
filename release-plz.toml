@@ -5,6 +5,16 @@ changelog_update = true
 git_tag_enable = true
 # Create GitHub releases with changelog as release notes
 git_release_enable = true
+# Show contributors in the GitHub release
+git_release_body = """
+{{ changelog }}
+{% if remote.contributors %}
+### Contributors
+{% for contributor in remote.contributors %}
+* @{{ contributor.username }}
+{% endfor %}
+{% endif %}
+"""
 # Do not run cargo-semver-checks (no public library API)
 semver_check = false
 # Labels to apply to the release PR
