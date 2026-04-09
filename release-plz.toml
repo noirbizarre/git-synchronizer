@@ -26,7 +26,7 @@ body = """
   ## [Unreleased]
 {% endif -%}
 
-{% for group, commits in commits | group_by(attribute="group") %}
+{% for group, commits in commits | filter(attribute="merge_commit", value=false) | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits
 | filter(attribute="scope")
@@ -72,11 +72,11 @@ commit_parsers = [
   { message = "^doc", group = "<!-- 3 -->📖 Documentation" },
   { message = "^refactor", group = "<!-- 4 -->🔧 Refactorings" },
   { message = "^build", group = "<!-- 5 -->📦 Build" },
-  { message = "^ci", group = "<!-- 6 -->🛸 Continuous Integration" },
-  { message = "^test", group = "<!-- 7 -->🚦 Testing" },
-  { message = "^style", group = "<!-- 8 -->🎨 Style" },
-  { message = "^revert", group = "<!-- 9 -->🔙 Reverted" },
+  { message = "^ci", skip = true },
+  { message = "^test", skip = true },
+  { message = "^style", skip = true },
+  { message = "^revert", group = "<!-- 6 -->🔙 Reverted" },
   { message = "^wip", skip = true },
   { message = "^chore\\(release\\)", skip = true },
-  { message = "^chore|^misc", group = "<!-- 10 -->🧹 Chores" },
+  { message = "^chore|^misc", group = "<!-- 7 -->🧹 Chores" },
 ]
