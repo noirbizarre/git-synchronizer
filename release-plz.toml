@@ -11,8 +11,8 @@ semver_check = false
 pr_labels = ["release"]
 # Repository URL (avoids needing upstream tracking branch to resolve it)
 repo_url = "https://github.com/noirbizarre/git-synchronizer"
-# Use git tags instead of cargo registry for version detection (binary crate, not published)
-git_only = true
+# PR branch prefix
+pr_branch_prefix = "release/"
 
 [changelog]
 header = """
