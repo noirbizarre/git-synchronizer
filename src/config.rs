@@ -3,7 +3,8 @@ use anyhow::Result;
 use crate::git::Git;
 use crate::ui::Ui;
 
-const SECTION: &str = "sync";
+/// The git config section name used for all sync settings.
+pub const SECTION: &str = "sync";
 
 /// Stored configuration from the `[sync]` git config section.
 #[derive(Debug, Clone)]
