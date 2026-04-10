@@ -47,6 +47,7 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
     let current = git.current_branch()?;
     let targets = resolve_merge_targets(git, config)?;
 
+    let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<String> = Vec::new();
 
     for target in &targets {
@@ -58,7 +59,7 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
             if is_protected(&branch, &matcher, &branch_protected) {
                 continue;
             }
-            if !candidates.contains(&branch) {
+            if seen.insert(branch.clone()) {
                 candidates.push(branch);
             }
         }
@@ -67,14 +68,14 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
     // Also check branches not caught by --merged (rebase merge detection via git cherry)
     let all_branches = git.local_branches()?;
     for branch in &all_branches {
-        if candidates.contains(branch)
+        if seen.contains(branch)
             || *branch == current
             || is_protected(branch, &matcher, &branch_protected)
         {
             continue;
         }
         for target in &targets {
-            if git.cherry_merged(target, branch).unwrap_or(false) && !candidates.contains(branch) {
+            if git.cherry_merged(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
                 candidates.push(branch.clone());
                 break;
             }
@@ -92,6 +93,7 @@ pub fn find_merged_remote(git: &Git, config: &Config, remote: &str) -> Result<Ve
     let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
     let targets = resolve_merge_targets(git, config)?;
 
+    let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<String> = Vec::new();
 
     for target in &targets {
@@ -100,7 +102,7 @@ pub fn find_merged_remote(git: &Git, config: &Config, remote: &str) -> Result<Ve
             if is_protected(&branch, &matcher, &branch_protected) {
                 continue;
             }
-            if !candidates.contains(&branch) {
+            if seen.insert(branch.clone()) {
                 candidates.push(branch);
             }
         }
