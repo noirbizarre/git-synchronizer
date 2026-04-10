@@ -142,7 +142,8 @@ CLI flags:
    Per-branch protected branches also serve as merge targets, so branches
    merged into them are detected as candidates too. The user selects which
    branches to delete. Associated worktrees are removed first, then branches
-   are deleted with `git branch -d`.
+   are deleted with `git branch -D` (force-delete is safe here because the
+   branch is already verified as merged into a protected target).
    Skipped with `--remote-only`.
 
 3. **Delete merged remote branches** -- for each configured remote, identifies
@@ -179,7 +180,7 @@ flowchart TD
     Merged --> SelectLocal[User selects branches]
     Cherry --> SelectLocal
     SelectLocal --> RemoveWT1[Remove associated worktrees]
-    RemoveWT1 --> DeleteLocal[Delete local branches\ngit branch -d]
+    RemoveWT1 --> DeleteLocal[Delete local branches\ngit branch -D]
     DeleteLocal --> RemoteCheck
     LocalCheck -- Yes --> RemoteCheck
 
