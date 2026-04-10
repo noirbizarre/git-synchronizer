@@ -68,6 +68,9 @@ git sync config list
 # Re-run the interactive setup wizard
 git sync config setup
 
+# Set a configuration value directly
+git sync config set worktrunk false
+
 # Add/remove protected branch patterns
 git sync config add-protected 'release/*'
 git sync config remove-protected 'develop'
@@ -117,7 +120,7 @@ serves as a merge target (branches merged into it are flagged for cleanup).
 On first run (when no `[sync]` config section exists), an interactive
 setup wizard runs automatically:
 
-1. Auto-detects local branches and pre-selects well-known ones (`main`, `master`)
+1. Auto-detects local branches and pre-selects well-known ones (`main`, `master`, `develop`, `development`)
 2. Asks for additional protected patterns (e.g. `release/*`)
 3. Lists available remotes and asks which ones to operate on
 4. If [worktrunk](https://worktrunk.dev) (`wt`) is detected on `$PATH`, asks whether to use it for worktree removal
@@ -127,8 +130,8 @@ setup wizard runs automatically:
 The cleanup runs in four sequential phases, each of which can be skipped via
 CLI flags:
 
-1. **Fetch & prune remotes** -- runs `git remote update --prune` on configured
-   (or all) remotes to sync remote-tracking branches. Skipped with `--no-fetch`.
+1. **Fetch & prune remotes** -- runs `git remote update --prune` to fetch all
+   remotes and prune deleted remote-tracking branches. Skipped with `--no-fetch`.
 
 2. **Delete merged local branches** -- identifies branches merged into any
    protected branch (both glob-pattern and per-branch protected) using two
@@ -142,7 +145,8 @@ CLI flags:
    Per-branch protected branches also serve as merge targets, so branches
    merged into them are detected as candidates too. The user selects which
    branches to delete. Associated worktrees are removed first, then branches
-   are deleted with `git branch -d`.
+   are deleted with `git branch -D` (force-delete is safe here because the
+   branch is already verified as merged into a protected target).
    Skipped with `--remote-only`.
 
 3. **Delete merged remote branches** -- for each configured remote, identifies
@@ -179,7 +183,7 @@ flowchart TD
     Merged --> SelectLocal[User selects branches]
     Cherry --> SelectLocal
     SelectLocal --> RemoveWT1[Remove associated worktrees]
-    RemoveWT1 --> DeleteLocal[Delete local branches\ngit branch -d]
+    RemoveWT1 --> DeleteLocal[Delete local branches\ngit branch -D]
     DeleteLocal --> RemoteCheck
     LocalCheck -- Yes --> RemoteCheck
 

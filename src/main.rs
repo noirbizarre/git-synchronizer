@@ -3,6 +3,8 @@ mod cleaner;
 mod cli;
 mod config;
 mod git;
+#[cfg(test)]
+mod test_helpers;
 mod ui;
 mod worktrees;
 
@@ -33,7 +35,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("protected:"),
+                        ui.bold_style.apply_to("protected:"),
                         if cfg.protected.is_empty() {
                             "(none)".to_string()
                         } else {
@@ -42,7 +44,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                     ));
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("remotes:"),
+                        ui.bold_style.apply_to("remotes:"),
                         match &cfg.remotes {
                             Some(r) => r.join(", "),
                             None => "(all)".to_string(),
@@ -52,7 +54,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                     let branch_protected = git.branch_protected_list()?;
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("branch protected:"),
+                        ui.bold_style.apply_to("branch protected:"),
                         if branch_protected.is_empty() {
                             "(none)".to_string()
                         } else {
@@ -62,7 +64,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("worktrunk:"),
+                        ui.bold_style.apply_to("worktrunk:"),
                         match cfg.worktrunk {
                             Some(true) => "enabled",
                             Some(false) => "disabled",
@@ -78,41 +80,43 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         }
 
         ConfigAction::Set { key, value } => {
-            let full_key = format!("sync.{key}");
+            let full_key = format!("{}.{key}", config::SECTION);
             git.config_set(&full_key, &value)?;
             ui.success(&format!("Set {key} = {value}"));
             Ok(())
         }
 
         ConfigAction::AddProtected { pattern } => {
-            git.config_add("sync.protected", &pattern)?;
+            git.config_add(&format!("{}.protected", config::SECTION), &pattern)?;
             ui.success(&format!("Added protected pattern: {pattern}"));
             Ok(())
         }
 
         ConfigAction::RemoveProtected { pattern } => {
-            let mut protected = git.config_get_all("sync.protected")?;
+            let key = format!("{}.protected", config::SECTION);
+            let mut protected = git.config_get_all(&key)?;
             protected.retain(|p| p != &pattern);
-            git.config_unset_all("sync.protected")?;
+            git.config_unset_all(&key)?;
             for p in &protected {
-                git.config_add("sync.protected", p)?;
+                git.config_add(&key, p)?;
             }
             ui.success(&format!("Removed protected pattern: {pattern}"));
             Ok(())
         }
 
         ConfigAction::AddRemote { name } => {
-            git.config_add("sync.remote", &name)?;
+            git.config_add(&format!("{}.remote", config::SECTION), &name)?;
             ui.success(&format!("Added remote: {name}"));
             Ok(())
         }
 
         ConfigAction::RemoveRemote { name } => {
-            let mut remotes = git.config_get_all("sync.remote")?;
+            let key = format!("{}.remote", config::SECTION);
+            let mut remotes = git.config_get_all(&key)?;
             remotes.retain(|r| r != &name);
-            git.config_unset_all("sync.remote")?;
+            git.config_unset_all(&key)?;
             for r in &remotes {
-                git.config_add("sync.remote", r)?;
+                git.config_add(&key, r)?;
             }
             ui.success(&format!("Removed remote: {name}"));
             Ok(())

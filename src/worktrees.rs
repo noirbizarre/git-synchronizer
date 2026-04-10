@@ -50,85 +50,38 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
 
-    fn init_repo_with_worktree() -> (tempfile::TempDir, Git, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-
-        std::fs::write(path.join("README.md"), "# test").unwrap();
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-
-        // Create a branch and a worktree for it
-        StdCommand::new("git")
-            .args(["branch", "feature/wt"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-
-        let wt_path = dir.path().join("worktree-feature");
-        StdCommand::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-
-        let git = Git::with_workdir(false, path);
-        (dir, git, wt_path.to_string_lossy().to_string())
-    }
-
     #[test]
-    fn test_find_worktrees_for_branches() {
-        let (_dir, git, _wt_path) = init_repo_with_worktree();
+    fn test_find_worktrees_for_branches() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
-        let worktrees = find_worktrees_for_branches(&git, &["feature/wt".to_string()]).unwrap();
+        let worktrees = find_worktrees_for_branches(&git, &["feature/wt".to_string()])?;
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].branch.as_deref(), Some("feature/wt"));
+        Ok(())
     }
 
     #[test]
-    fn test_find_worktrees_for_branches_no_match() {
-        let (_dir, git, _wt_path) = init_repo_with_worktree();
+    fn test_find_worktrees_for_branches_no_match() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
-        let worktrees = find_worktrees_for_branches(&git, &["nonexistent".to_string()]).unwrap();
+        let worktrees = find_worktrees_for_branches(&git, &["nonexistent".to_string()])?;
         assert!(worktrees.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_find_orphan_worktrees_none_initially() {
-        let (_dir, git, _wt_path) = init_repo_with_worktree();
+    fn test_find_orphan_worktrees_none_initially() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
         // All worktrees have existing branches, so no orphans
-        let orphans = find_orphan_worktrees(&git).unwrap();
+        let orphans = find_orphan_worktrees(&git)?;
         assert!(orphans.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_find_orphan_worktrees_detects_orphan() {
-        let (_dir, git, _wt_path) = init_repo_with_worktree();
+    fn test_find_orphan_worktrees_detects_orphan() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
         let path = _dir.path();
 
         // Use update-ref to delete the branch ref directly, bypassing the
@@ -136,12 +89,12 @@ mod tests {
         StdCommand::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/wt"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Now the worktree's branch no longer exists, so it's orphaned
-        let orphans = find_orphan_worktrees(&git).unwrap();
+        let orphans = find_orphan_worktrees(&git)?;
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].branch.as_deref(), Some("feature/wt"));
+        Ok(())
     }
 }

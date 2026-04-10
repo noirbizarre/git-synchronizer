@@ -3,10 +3,11 @@ use anyhow::Result;
 use crate::git::Git;
 use crate::ui::Ui;
 
-const SECTION: &str = "sync";
+/// The git config section name used for all sync settings.
+pub const SECTION: &str = "sync";
 
 /// Stored configuration from the `[sync]` git config section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Glob patterns for branches that should never be deleted.
     pub protected: Vec<String>,
@@ -199,82 +200,47 @@ pub fn load_or_setup(git: &Git, ui: &Ui) -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as StdCommand;
-
-    fn init_test_repo() -> (tempfile::TempDir, Git) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-
-        // Need at least one commit for branches to work
-        std::fs::write(path.join("README.md"), "# test").unwrap();
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-
-        let git = Git::with_workdir(false, path);
-        (dir, git)
-    }
 
     #[test]
-    fn test_config_load_returns_none_when_not_configured() {
-        let (_dir, git) = init_test_repo();
-        let config = Config::load(&git).unwrap();
+    fn test_config_load_returns_none_when_not_configured() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+        let config = Config::load(&git)?;
         assert!(config.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_config_save_and_load_roundtrip() {
-        let (_dir, git) = init_test_repo();
+    fn test_config_save_and_load_roundtrip() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: None,
         };
-        config.save(&git).unwrap();
+        config.save(&git)?;
 
-        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        let loaded = Config::load(&git)?.expect("config should exist");
         assert_eq!(loaded.protected, config.protected);
         assert_eq!(loaded.remotes, config.remotes);
         assert_eq!(loaded.worktrunk, config.worktrunk);
+        Ok(())
     }
 
     #[test]
-    fn test_config_save_without_remotes() {
-        let (_dir, git) = init_test_repo();
+    fn test_config_save_without_remotes() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
             worktrunk: None,
         };
-        config.save(&git).unwrap();
+        config.save(&git)?;
 
-        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        let loaded = Config::load(&git)?.expect("config should exist");
         assert!(loaded.remotes.is_none());
+        Ok(())
     }
 
     #[test]
@@ -286,32 +252,33 @@ mod tests {
     }
 
     #[test]
-    fn test_config_save_overwrites_previous() {
-        let (_dir, git) = init_test_repo();
+    fn test_config_save_overwrites_previous() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config1 = Config {
             protected: vec!["main".to_string()],
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: Some(true),
         };
-        config1.save(&git).unwrap();
+        config1.save(&git)?;
 
         let config2 = Config {
             protected: vec!["develop".to_string(), "release/*".to_string()],
             remotes: Some(vec!["upstream".to_string()]),
             worktrunk: Some(false),
         };
-        config2.save(&git).unwrap();
+        config2.save(&git)?;
 
-        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        let loaded = Config::load(&git)?.expect("config should exist");
         assert_eq!(loaded.protected, vec!["develop", "release/*"]);
         assert_eq!(loaded.remotes, Some(vec!["upstream".to_string()]));
         assert_eq!(loaded.worktrunk, Some(false));
+        Ok(())
     }
 
     #[test]
-    fn test_config_worktrunk_roundtrip() {
-        let (_dir, git) = init_test_repo();
+    fn test_config_worktrunk_roundtrip() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Save with worktrunk enabled
         let config = Config {
@@ -319,9 +286,9 @@ mod tests {
             remotes: None,
             worktrunk: Some(true),
         };
-        config.save(&git).unwrap();
+        config.save(&git)?;
 
-        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        let loaded = Config::load(&git)?.expect("config should exist");
         assert_eq!(loaded.worktrunk, Some(true));
 
         // Overwrite with worktrunk disabled
@@ -330,9 +297,9 @@ mod tests {
             remotes: None,
             worktrunk: Some(false),
         };
-        config2.save(&git).unwrap();
+        config2.save(&git)?;
 
-        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        let loaded = Config::load(&git)?.expect("config should exist");
         assert_eq!(loaded.worktrunk, Some(false));
 
         // Overwrite with worktrunk unset
@@ -341,27 +308,29 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        config3.save(&git).unwrap();
+        config3.save(&git)?;
 
-        let loaded = Config::load(&git).unwrap().expect("config should exist");
+        let loaded = Config::load(&git)?.expect("config should exist");
         assert!(loaded.worktrunk.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_load_or_setup_returns_existing_config() {
-        let (_dir, git) = init_test_repo();
+    fn test_load_or_setup_returns_existing_config() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
             worktrunk: None,
         };
-        config.save(&git).unwrap();
+        config.save(&git)?;
 
         // load_or_setup should return the saved config without triggering setup
         let ui = Ui::new();
-        let loaded = load_or_setup(&git, &ui).unwrap();
+        let loaded = load_or_setup(&git, &ui)?;
         assert_eq!(loaded.protected, vec!["main"]);
         assert!(loaded.remotes.is_none());
+        Ok(())
     }
 }
