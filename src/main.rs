@@ -33,7 +33,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("protected:"),
+                        ui.bold_style.apply_to("protected:"),
                         if cfg.protected.is_empty() {
                             "(none)".to_string()
                         } else {
@@ -42,7 +42,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                     ));
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("remotes:"),
+                        ui.bold_style.apply_to("remotes:"),
                         match &cfg.remotes {
                             Some(r) => r.join(", "),
                             None => "(all)".to_string(),
@@ -52,7 +52,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                     let branch_protected = git.branch_protected_list()?;
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("branch protected:"),
+                        ui.bold_style.apply_to("branch protected:"),
                         if branch_protected.is_empty() {
                             "(none)".to_string()
                         } else {
@@ -62,7 +62,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 
                     ui.line(&format!(
                         "  {} {}",
-                        ui.bold.apply_to("worktrunk:"),
+                        ui.bold_style.apply_to("worktrunk:"),
                         match cfg.worktrunk {
                             Some(true) => "enabled",
                             Some(false) => "disabled",

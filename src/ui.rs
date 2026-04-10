@@ -3,11 +3,11 @@ use console::{Style, Term};
 /// Terminal handle and style presets for consistent output.
 pub struct Ui {
     term: Term,
-    pub heading: Style,
-    pub success: Style,
-    pub warning: Style,
-    pub muted: Style,
-    pub bold: Style,
+    pub heading_style: Style,
+    pub success_style: Style,
+    pub warning_style: Style,
+    pub muted_style: Style,
+    pub bold_style: Style,
 }
 
 impl Default for Ui {
@@ -20,11 +20,11 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             term: Term::stderr(),
-            heading: Style::new().cyan().bold(),
-            success: Style::new().green(),
-            warning: Style::new().yellow(),
-            muted: Style::new().dim(),
-            bold: Style::new().bold(),
+            heading_style: Style::new().cyan().bold(),
+            success_style: Style::new().green(),
+            warning_style: Style::new().yellow(),
+            muted_style: Style::new().dim(),
+            bold_style: Style::new().bold(),
         }
     }
 
@@ -32,26 +32,28 @@ impl Ui {
     pub fn heading(&self, text: &str) {
         let _ = self
             .term
-            .write_line(&format!("\n{}", self.heading.apply_to(text)));
+            .write_line(&format!("\n{}", self.heading_style.apply_to(text)));
     }
 
     /// Print a success message.
     pub fn success(&self, text: &str) {
         let _ = self
             .term
-            .write_line(&self.success.apply_to(text).to_string());
+            .write_line(&self.success_style.apply_to(text).to_string());
     }
 
     /// Print a warning.
     pub fn warning(&self, text: &str) {
         let _ = self
             .term
-            .write_line(&self.warning.apply_to(text).to_string());
+            .write_line(&self.warning_style.apply_to(text).to_string());
     }
 
     /// Print muted/dim text.
     pub fn muted(&self, text: &str) {
-        let _ = self.term.write_line(&self.muted.apply_to(text).to_string());
+        let _ = self
+            .term
+            .write_line(&self.muted_style.apply_to(text).to_string());
     }
 
     /// Print a plain line.
@@ -69,7 +71,7 @@ impl Ui {
         for item in items {
             let _ = self
                 .term
-                .write_line(&format!("  {} {}", self.muted.apply_to("-"), item));
+                .write_line(&format!("  {} {}", self.muted_style.apply_to("-"), item));
         }
     }
 
@@ -128,7 +130,7 @@ mod tests {
     fn test_ui_default() {
         let ui = Ui::default();
         // Smoke test: styles should be constructable
-        let styled = ui.heading.apply_to("test");
+        let styled = ui.heading_style.apply_to("test");
         assert!(styled.to_string().contains("test"));
     }
 }
