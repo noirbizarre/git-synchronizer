@@ -258,81 +258,6 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
 
-    /// Create a temporary git repo with an initial commit on `main`,
-    /// a merged branch `feature/done`, and an unmerged branch `feature/wip`.
-    fn init_repo_with_branches() -> Result<(tempfile::TempDir, Git)> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-
-        std::fs::write(path.join("README.md"), "# test")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        // Create and merge a feature branch
-        StdCommand::new("git")
-            .args(["checkout", "-b", "feature/done"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("done.txt"), "done")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "feature done"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["checkout", "main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["merge", "feature/done"])
-            .current_dir(path)
-            .output()?;
-
-        // Create an unmerged branch
-        StdCommand::new("git")
-            .args(["checkout", "-b", "feature/wip"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("wip.txt"), "wip")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "work in progress"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["checkout", "main"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
-        Ok((dir, git))
-    }
-
     fn default_config() -> Config {
         Config {
             protected: vec!["main".to_string()],
@@ -355,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_run_deletes_merged_local_branches() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let opts = opts_yes_skip_network();
@@ -375,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_run_dry_run_preserves_branches() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
@@ -392,32 +317,7 @@ mod tests {
 
     #[test]
     fn test_run_no_merged_branches() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
+        let (_dir, git) = crate::test_helpers::init_repo()?;
         let config = default_config();
         let ui = Ui::new();
         let opts = opts_yes_skip_network();
@@ -428,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_run_remote_only_skips_local_deletion() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
@@ -443,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_run_local_only_skips_remote_deletion() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
@@ -458,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_run_no_worktrees_skips_worktree_cleanup() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
@@ -473,32 +373,7 @@ mod tests {
 
     #[test]
     fn test_effective_remotes_uses_config() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config_with = Config {
             protected: vec!["main".to_string()],
@@ -520,31 +395,8 @@ mod tests {
 
     #[test]
     fn test_run_with_worktree_for_merged_branch() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-
-        std::fs::write(path.join("README.md"), "# test")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create and merge a branch
         StdCommand::new("git")

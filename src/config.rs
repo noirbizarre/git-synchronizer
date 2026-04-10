@@ -200,43 +200,10 @@ pub fn load_or_setup(git: &Git, ui: &Ui) -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as StdCommand;
-
-    fn init_test_repo() -> Result<(tempfile::TempDir, Git)> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-
-        // Need at least one commit for branches to work
-        std::fs::write(path.join("README.md"), "# test")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
-        Ok((dir, git))
-    }
 
     #[test]
     fn test_config_load_returns_none_when_not_configured() -> Result<()> {
-        let (_dir, git) = init_test_repo()?;
+        let (_dir, git) = crate::test_helpers::init_repo()?;
         let config = Config::load(&git)?;
         assert!(config.is_none());
         Ok(())
@@ -244,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_config_save_and_load_roundtrip() -> Result<()> {
-        let (_dir, git) = init_test_repo()?;
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
@@ -262,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_config_save_without_remotes() -> Result<()> {
-        let (_dir, git) = init_test_repo()?;
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
             protected: vec!["main".to_string()],
@@ -286,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_config_save_overwrites_previous() -> Result<()> {
-        let (_dir, git) = init_test_repo()?;
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config1 = Config {
             protected: vec!["main".to_string()],
@@ -311,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_config_worktrunk_roundtrip() -> Result<()> {
-        let (_dir, git) = init_test_repo()?;
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Save with worktrunk enabled
         let config = Config {
@@ -350,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_load_or_setup_returns_existing_config() -> Result<()> {
-        let (_dir, git) = init_test_repo()?;
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
             protected: vec!["main".to_string()],

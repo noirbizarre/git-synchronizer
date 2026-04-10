@@ -3,6 +3,8 @@ mod cleaner;
 mod cli;
 mod config;
 mod git;
+#[cfg(test)]
+mod test_helpers;
 mod ui;
 mod worktrees;
 

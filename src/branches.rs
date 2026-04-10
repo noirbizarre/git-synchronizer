@@ -117,76 +117,10 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
 
-    fn init_repo_with_branches() -> Result<(tempfile::TempDir, Git)> {
-        let dir = tempfile::tempdir()?;
+    /// Create a repo with branches plus an additional `release/1.0` branch.
+    fn init_repo_with_release() -> Result<(tempfile::TempDir, Git)> {
+        let (dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-
-        std::fs::write(path.join("README.md"), "# test")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        // Create and merge a feature branch
-        StdCommand::new("git")
-            .args(["checkout", "-b", "feature/done"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("done.txt"), "done")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "feature done"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["checkout", "main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["merge", "feature/done"])
-            .current_dir(path)
-            .output()?;
-
-        // Create an unmerged branch
-        StdCommand::new("git")
-            .args(["checkout", "-b", "feature/wip"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("wip.txt"), "wip")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "work in progress"])
-            .current_dir(path)
-            .output()?;
-
-        // Create a release branch (should be protected)
-        StdCommand::new("git")
-            .args(["checkout", "main"])
-            .current_dir(path)
-            .output()?;
         StdCommand::new("git")
             .args(["checkout", "-b", "release/1.0"])
             .current_dir(path)
@@ -195,8 +129,6 @@ mod tests {
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-
-        let git = Git::with_workdir(false, path);
         Ok((dir, git))
     }
 
@@ -218,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_find_merged_local() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
@@ -240,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_find_merged_local_excludes_current_branch() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
@@ -255,31 +187,8 @@ mod tests {
 
     #[test]
     fn test_find_merged_local_detects_cherry_picked_branches() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        StdCommand::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-
-        std::fs::write(path.join("README.md"), "# test")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a feature branch with a commit
         StdCommand::new("git")
@@ -341,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_resolve_merge_targets_with_globs() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
@@ -358,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_find_merged_local_no_targets() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = init_repo_with_release()?;
         // Use a pattern that matches nothing
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
@@ -373,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_find_merged_local_respects_branch_protected() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
@@ -399,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_branch_protected_serves_as_merge_target() -> Result<()> {
-        let (_dir, git) = init_repo_with_branches()?;
+        let (_dir, git) = init_repo_with_release()?;
         // Only use per-branch protection on "main" (no global patterns match anything)
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
