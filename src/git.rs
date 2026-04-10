@@ -107,6 +107,44 @@ impl Git {
         run_cmd("wt", args, self.verbose, self.workdir.as_deref())
     }
 
+    /// Run a git command and return whether it exited successfully.
+    ///
+    /// Unlike [`run`], this method does **not** bail on a non-zero exit code.
+    /// Exit code 0 returns `Ok(true)`, exit code 1 returns `Ok(false)`.
+    /// Any other exit code (e.g. 128 for bad refs) is treated as a real error.
+    ///
+    /// This is useful for commands like `git diff --quiet` that encode their
+    /// result in the exit status rather than in stdout.
+    fn run_exit_code(&self, args: &[&str]) -> Result<bool> {
+        if self.verbose {
+            eprintln!("  $ git {}", args.join(" "));
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        if let Some(dir) = &self.workdir {
+            cmd.current_dir(dir);
+        }
+
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to execute: git {}", args.join(" ")))?;
+
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!(
+                    "git {} failed (exit {}):\n{}",
+                    args.join(" "),
+                    output.status,
+                    stderr.trim()
+                );
+            }
+        }
+    }
+
     // ── Repository info ──────────────────────────────────────────────
 
     /// Return the current branch name.
@@ -165,6 +203,21 @@ impl Git {
         let out = self.run(&["cherry", upstream, branch])?;
         // If all lines start with `-`, every commit was cherry-picked upstream.
         Ok(!out.is_empty() && out.lines().all(|l| l.starts_with('-')))
+    }
+
+    /// Check whether the diff between `target` and `branch` is empty.
+    ///
+    /// Runs `git diff --quiet <target> <branch>` which compares the two tree
+    /// snapshots directly. An empty diff (exit 0) means the branch's content
+    /// is already fully present in the target — this catches squash-merge
+    /// cases where `git cherry` misses due to a different commit structure.
+    ///
+    /// Note: this only detects cases where the target tree contains at least
+    /// everything the branch tree has. When target advances with unrelated
+    /// changes after the squash-merge, the diff will no longer be empty;
+    /// those cases are handled by the simulated merge check (plan 1.3).
+    pub fn diff_empty(&self, target: &str, branch: &str) -> Result<bool> {
+        self.run_exit_code(&["diff", "--quiet", target, branch])
     }
 
     // ── Branch mutations ─────────────────────────────────────────────
@@ -745,6 +798,87 @@ bare
 
         // This branch's commit was NOT cherry-picked, so cherry_merged should be false
         assert!(!git.cherry_merged("main", "feature/not-cherry")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_diff_empty() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        // Create a feature branch with a commit
+        Command::new("git")
+            .args(["checkout", "-b", "feature/squash-test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("squash.txt"), "squash content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash commit"])
+            .current_dir(path)
+            .output()?;
+
+        // Switch back to main and squash-merge the feature branch
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["merge", "--squash", "feature/squash-test"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash merge feature"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // The branch was squash-merged, so the three-dot diff should be empty
+        assert!(git.diff_empty("main", "feature/squash-test")?);
+
+        // Create an unmerged branch — diff should NOT be empty
+        Command::new("git")
+            .args(["checkout", "-b", "feature/unmerged"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("unmerged.txt"), "unmerged content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "unmerged commit"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(!git.diff_empty("main", "feature/unmerged")?);
 
         Ok(())
     }
