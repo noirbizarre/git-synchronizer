@@ -7,7 +7,7 @@ use crate::ui::Ui;
 pub const SECTION: &str = "sync";
 
 /// Stored configuration from the `[sync]` git config section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Glob patterns for branches that should never be deleted.
     pub protected: Vec<String>,

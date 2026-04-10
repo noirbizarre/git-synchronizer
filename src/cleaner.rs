@@ -7,6 +7,7 @@ use crate::ui::Ui;
 use crate::worktrees::{find_orphan_worktrees, find_worktrees_for_branches};
 
 /// Options controlling cleaner behaviour, derived from CLI flags.
+#[derive(Debug, Clone, Default)]
 pub struct CleanerOptions {
     pub yes: bool,
     pub dry_run: bool,
