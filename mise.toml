@@ -11,7 +11,6 @@ cargo-binstall = "latest"
 "cargo:cargo-nextest" = "latest"
 "cargo:cargo-llvm-cov" = "latest"
 release-plz = "latest"
-git-cliff = "latest"
 
 [tasks.build]
 description = "Build the project"
