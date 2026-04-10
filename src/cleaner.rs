@@ -77,7 +77,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                 }
                 if !opts.dry_run {
-                    ui.summary(total_deleted, "local branch", "deleted");
+                    ui.summary(total_deleted, "local branch", "local branches", "deleted");
                 }
             }
         }
@@ -124,7 +124,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 }
             }
             if !opts.dry_run && remote_deleted > 0 {
-                ui.summary(remote_deleted, "remote branch", "deleted");
+                ui.summary(
+                    remote_deleted,
+                    "remote branch",
+                    "remote branches",
+                    "deleted",
+                );
             }
         }
     }
@@ -165,7 +170,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                 }
                 if !opts.dry_run && removed > 0 {
-                    ui.summary(removed, "worktree", "removed");
+                    ui.summary(removed, "worktree", "worktrees", "removed");
                 }
             }
         }

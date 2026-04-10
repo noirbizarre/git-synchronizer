@@ -113,10 +113,10 @@ impl Ui {
             .interact::<String>()?)
     }
 
-    /// Print a summary line: "N branch(es) deleted."
-    pub fn summary(&self, count: usize, noun: &str, verb: &str) {
-        let plural = if count == 1 { "" } else { "es" };
-        self.success(&format!("{count} {noun}{plural} {verb}."));
+    /// Print a summary line: "1 branch deleted." or "3 branches deleted."
+    pub fn summary(&self, count: usize, singular: &str, plural: &str, verb: &str) {
+        let noun = if count == 1 { singular } else { plural };
+        self.success(&format!("{count} {noun} {verb}."));
     }
 }
 
