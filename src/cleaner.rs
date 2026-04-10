@@ -40,7 +40,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
     let mut total_deleted = 0usize;
 
-    // ── 3. Local branches ────────────────────────────────────────────
+    // ── 2. Local branches ────────────────────────────────────────────
 
     if !opts.remote_only {
         let merged = find_merged_local(git, config)?;
@@ -83,7 +83,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         }
     }
 
-    // ── 4. Remote branches ───────────────────────────────────────────
+    // ── 3. Remote branches ───────────────────────────────────────────
 
     if !opts.local_only {
         let remotes = effective_remotes(git, config)?;
@@ -134,7 +134,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         }
     }
 
-    // ── 5. Orphan worktrees ──────────────────────────────────────────
+    // ── 4. Orphan worktrees ──────────────────────────────────────────
 
     if !opts.no_worktrees {
         let orphans = find_orphan_worktrees(git)?;
