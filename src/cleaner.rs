@@ -208,14 +208,14 @@ fn remove_worktrees_for_branches(
             format!(
                 "{} (branch: {})",
                 wt.path,
-                wt.branch.as_deref().unwrap_or("?")
+                wt.branch.as_deref().unwrap_or("detached")
             )
         })
         .collect();
     ui.heading("Worktrees for branches about to be deleted:");
     ui.bullet_list(&display);
 
-    if opts.yes || ui.confirm("Remove these worktrees first?", true)? {
+    if opts.yes || ui.confirm("Remove these worktrees first?", false)? {
         for wt in &worktrees {
             if opts.dry_run {
                 ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
@@ -260,91 +260,77 @@ mod tests {
 
     /// Create a temporary git repo with an initial commit on `main`,
     /// a merged branch `feature/done`, and an unmerged branch `feature/wip`.
-    fn init_repo_with_branches() -> (tempfile::TempDir, Git) {
-        let dir = tempfile::tempdir().unwrap();
+    fn init_repo_with_branches() -> Result<(tempfile::TempDir, Git)> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path();
 
         StdCommand::new("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
-        std::fs::write(path.join("README.md"), "# test").unwrap();
+        std::fs::write(path.join("README.md"), "# test")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create and merge a feature branch
         StdCommand::new("git")
             .args(["checkout", "-b", "feature/done"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("done.txt"), "done").unwrap();
+            .output()?;
+        std::fs::write(path.join("done.txt"), "done")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "feature done"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["merge", "feature/done"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create an unmerged branch
         StdCommand::new("git")
             .args(["checkout", "-b", "feature/wip"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("wip.txt"), "wip").unwrap();
+            .output()?;
+        std::fs::write(path.join("wip.txt"), "wip")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "work in progress"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         let git = Git::with_workdir(false, path);
-        (dir, git)
+        Ok((dir, git))
     }
 
     fn default_config() -> Config {
@@ -368,153 +354,149 @@ mod tests {
     }
 
     #[test]
-    fn test_run_deletes_merged_local_branches() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_run_deletes_merged_local_branches() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let opts = opts_yes_skip_network();
 
-        let branches_before = git.local_branches().unwrap();
+        let branches_before = git.local_branches()?;
         assert!(branches_before.contains(&"feature/done".to_string()));
         assert!(branches_before.contains(&"feature/wip".to_string()));
 
-        run(&git, &config, &ui, &opts).unwrap();
+        run(&git, &config, &ui, &opts)?;
 
-        let branches_after = git.local_branches().unwrap();
+        let branches_after = git.local_branches()?;
         assert!(!branches_after.contains(&"feature/done".to_string()));
         assert!(branches_after.contains(&"feature/wip".to_string()));
         assert!(branches_after.contains(&"main".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_run_dry_run_preserves_branches() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_run_dry_run_preserves_branches() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
         opts.dry_run = true;
 
-        let branches_before = git.local_branches().unwrap();
+        let branches_before = git.local_branches()?;
 
-        run(&git, &config, &ui, &opts).unwrap();
+        run(&git, &config, &ui, &opts)?;
 
-        let branches_after = git.local_branches().unwrap();
+        let branches_after = git.local_branches()?;
         assert_eq!(branches_before, branches_after);
+        Ok(())
     }
 
     #[test]
-    fn test_run_no_merged_branches() {
-        let dir = tempfile::tempdir().unwrap();
+    fn test_run_no_merged_branches() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path();
 
         StdCommand::new("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("README.md"), "# test").unwrap();
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         let git = Git::with_workdir(false, path);
         let config = default_config();
         let ui = Ui::new();
         let opts = opts_yes_skip_network();
 
-        run(&git, &config, &ui, &opts).unwrap();
+        run(&git, &config, &ui, &opts)?;
+        Ok(())
     }
 
     #[test]
-    fn test_run_remote_only_skips_local_deletion() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_run_remote_only_skips_local_deletion() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
         opts.remote_only = true;
 
-        run(&git, &config, &ui, &opts).unwrap();
+        run(&git, &config, &ui, &opts)?;
 
-        let branches = git.local_branches().unwrap();
+        let branches = git.local_branches()?;
         assert!(branches.contains(&"feature/done".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_run_local_only_skips_remote_deletion() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_run_local_only_skips_remote_deletion() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
         opts.local_only = true;
 
-        run(&git, &config, &ui, &opts).unwrap();
+        run(&git, &config, &ui, &opts)?;
 
-        let branches = git.local_branches().unwrap();
+        let branches = git.local_branches()?;
         assert!(!branches.contains(&"feature/done".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_run_no_worktrees_skips_worktree_cleanup() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_run_no_worktrees_skips_worktree_cleanup() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
         opts.no_worktrees = true;
 
-        run(&git, &config, &ui, &opts).unwrap();
+        run(&git, &config, &ui, &opts)?;
 
-        let branches = git.local_branches().unwrap();
+        let branches = git.local_branches()?;
         assert!(!branches.contains(&"feature/done".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_effective_remotes_uses_config() {
-        let dir = tempfile::tempdir().unwrap();
+    fn test_effective_remotes_uses_config() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path();
 
         StdCommand::new("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("README.md"), "# test").unwrap();
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         let git = Git::with_workdir(false, path);
 
@@ -523,7 +505,7 @@ mod tests {
             remotes: Some(vec!["origin".to_string(), "upstream".to_string()]),
             worktrunk: None,
         };
-        let remotes = effective_remotes(&git, &config_with).unwrap();
+        let remotes = effective_remotes(&git, &config_with)?;
         assert_eq!(remotes, vec!["origin", "upstream"]);
 
         let config_without = Config {
@@ -531,70 +513,61 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let remotes = effective_remotes(&git, &config_without).unwrap();
+        let remotes = effective_remotes(&git, &config_without)?;
         assert!(remotes.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_run_with_worktree_for_merged_branch() {
-        let dir = tempfile::tempdir().unwrap();
+    fn test_run_with_worktree_for_merged_branch() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path();
 
         StdCommand::new("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
-        std::fs::write(path.join("README.md"), "# test").unwrap();
+        std::fs::write(path.join("README.md"), "# test")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create and merge a branch
         StdCommand::new("git")
             .args(["checkout", "-b", "feature/wt-test"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("wt.txt"), "worktree test").unwrap();
+            .output()?;
+        std::fs::write(path.join("wt.txt"), "worktree test")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "worktree feature"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["merge", "feature/wt-test"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create a worktree for the merged branch
         let wt_path = path.join("wt-feature");
@@ -606,18 +579,18 @@ mod tests {
                 "feature/wt-test",
             ])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         let git = Git::with_workdir(false, path);
         let config = default_config();
         let ui = Ui::new();
         let opts = opts_yes_skip_network();
 
-        run(&git, &config, &ui, &opts).unwrap();
+        run(&git, &config, &ui, &opts)?;
 
-        let branches = git.local_branches().unwrap();
+        let branches = git.local_branches()?;
         assert!(!branches.contains(&"feature/wt-test".to_string()));
         assert!(!wt_path.exists());
+        Ok(())
     }
 }

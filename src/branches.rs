@@ -117,130 +117,115 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
 
-    fn init_repo_with_branches() -> (tempfile::TempDir, Git) {
-        let dir = tempfile::tempdir().unwrap();
+    fn init_repo_with_branches() -> Result<(tempfile::TempDir, Git)> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path();
 
         StdCommand::new("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
-        std::fs::write(path.join("README.md"), "# test").unwrap();
+        std::fs::write(path.join("README.md"), "# test")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create and merge a feature branch
         StdCommand::new("git")
             .args(["checkout", "-b", "feature/done"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("done.txt"), "done").unwrap();
+            .output()?;
+        std::fs::write(path.join("done.txt"), "done")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "feature done"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["merge", "feature/done"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create an unmerged branch
         StdCommand::new("git")
             .args(["checkout", "-b", "feature/wip"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("wip.txt"), "wip").unwrap();
+            .output()?;
+        std::fs::write(path.join("wip.txt"), "wip")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "work in progress"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create a release branch (should be protected)
         StdCommand::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["checkout", "-b", "release/1.0"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         let git = Git::with_workdir(false, path);
-        (dir, git)
+        Ok((dir, git))
     }
 
     #[test]
-    fn test_build_protected_matcher() {
+    fn test_build_protected_matcher() -> Result<()> {
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
             worktrunk: None,
         };
-        let matcher = build_protected_matcher(&config).unwrap();
+        let matcher = build_protected_matcher(&config)?;
         assert!(matcher.is_match("main"));
         assert!(matcher.is_match("release/1.0"));
         assert!(matcher.is_match("release/2.0-beta"));
         assert!(!matcher.is_match("feature/foo"));
         assert!(!matcher.is_match("develop"));
+        Ok(())
     }
 
     #[test]
-    fn test_find_merged_local() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_find_merged_local() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &config).unwrap();
+        let merged = find_merged_local(&git, &config)?;
 
         // feature/done was merged, so it should appear
         assert!(merged.contains(&"feature/done".to_string()));
@@ -250,79 +235,72 @@ mod tests {
         assert!(!merged.contains(&"main".to_string()));
         // release/1.0 matches the release/* pattern
         assert!(!merged.contains(&"release/1.0".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_find_merged_local_excludes_current_branch() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_find_merged_local_excludes_current_branch() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
             worktrunk: None,
         };
 
-        let current = git.current_branch().unwrap();
-        let merged = find_merged_local(&git, &config).unwrap();
+        let current = git.current_branch()?;
+        let merged = find_merged_local(&git, &config)?;
         assert!(!merged.contains(&current));
+        Ok(())
     }
 
     #[test]
-    fn test_find_merged_local_detects_cherry_picked_branches() {
-        let dir = tempfile::tempdir().unwrap();
+    fn test_find_merged_local_detects_cherry_picked_branches() -> Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path();
 
         StdCommand::new("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
-        std::fs::write(path.join("README.md"), "# test").unwrap();
+        std::fs::write(path.join("README.md"), "# test")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "init"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Create a feature branch with a commit
         StdCommand::new("git")
             .args(["checkout", "-b", "feature/cherry"])
             .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join("cherry.txt"), "cherry").unwrap();
+            .output()?;
+        std::fs::write(path.join("cherry.txt"), "cherry")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "cherry feature"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Cherry-pick onto main (simulating a rebase merge)
         let log_output = StdCommand::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         let commit_sha = String::from_utf8_lossy(&log_output.stdout)
             .trim()
             .to_string();
@@ -330,27 +308,23 @@ mod tests {
         StdCommand::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         // Add a diverging commit on main so cherry-pick creates a distinct commit
-        std::fs::write(path.join("diverge.txt"), "diverge").unwrap();
+        std::fs::write(path.join("diverge.txt"), "diverge")?;
         StdCommand::new("git")
             .args(["add", "."])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
         StdCommand::new("git")
             .args(["commit", "-m", "diverge"])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         StdCommand::new("git")
             .args(["cherry-pick", &commit_sha])
             .current_dir(path)
-            .output()
-            .unwrap();
+            .output()?;
 
         let git = Git::with_workdir(false, path);
 
@@ -360,29 +334,31 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &config).unwrap();
+        let merged = find_merged_local(&git, &config)?;
         assert!(merged.contains(&"feature/cherry".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_resolve_merge_targets_with_globs() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_resolve_merge_targets_with_globs() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
             remotes: None,
             worktrunk: None,
         };
 
-        let targets = resolve_merge_targets(&git, &config).unwrap();
+        let targets = resolve_merge_targets(&git, &config)?;
         assert!(targets.contains(&"main".to_string()));
         assert!(targets.contains(&"release/1.0".to_string()));
         assert!(!targets.contains(&"feature/done".to_string()));
         assert!(!targets.contains(&"feature/wip".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_find_merged_local_no_targets() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_find_merged_local_no_targets() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         // Use a pattern that matches nothing
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
@@ -390,13 +366,14 @@ mod tests {
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &config).unwrap();
+        let merged = find_merged_local(&git, &config)?;
         assert!(merged.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn test_find_merged_local_respects_branch_protected() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_find_merged_local_respects_branch_protected() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
@@ -404,24 +381,25 @@ mod tests {
         };
 
         // Without per-branch protection, feature/done should be a candidate
-        let merged = find_merged_local(&git, &config).unwrap();
+        let merged = find_merged_local(&git, &config)?;
         assert!(merged.contains(&"feature/done".to_string()));
 
         // Mark feature/done as per-branch protected
-        git.set_branch_protected("feature/done", true).unwrap();
-        let merged = find_merged_local(&git, &config).unwrap();
+        git.set_branch_protected("feature/done", true)?;
+        let merged = find_merged_local(&git, &config)?;
         assert!(
             !merged.contains(&"feature/done".to_string()),
             "per-branch protected branch should not be a deletion candidate"
         );
 
         // Clean up
-        git.set_branch_protected("feature/done", false).unwrap();
+        git.set_branch_protected("feature/done", false)?;
+        Ok(())
     }
 
     #[test]
-    fn test_branch_protected_serves_as_merge_target() {
-        let (_dir, git) = init_repo_with_branches();
+    fn test_branch_protected_serves_as_merge_target() -> Result<()> {
+        let (_dir, git) = init_repo_with_branches()?;
         // Only use per-branch protection on "main" (no global patterns match anything)
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
@@ -430,18 +408,19 @@ mod tests {
         };
 
         // Without any real protected branches, nothing is a merge target
-        let merged = find_merged_local(&git, &config).unwrap();
+        let merged = find_merged_local(&git, &config)?;
         assert!(merged.is_empty());
 
         // Mark "main" as per-branch protected — it should now be a merge target
-        git.set_branch_protected("main", true).unwrap();
-        let merged = find_merged_local(&git, &config).unwrap();
+        git.set_branch_protected("main", true)?;
+        let merged = find_merged_local(&git, &config)?;
         assert!(
             merged.contains(&"feature/done".to_string()),
             "branches merged into a per-branch protected branch should be candidates"
         );
 
         // Clean up
-        git.set_branch_protected("main", false).unwrap();
+        git.set_branch_protected("main", false)?;
+        Ok(())
     }
 }
