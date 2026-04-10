@@ -19,7 +19,7 @@ git_release_body = """
 semver_check = false
 # Labels to apply to the release PR
 pr_labels = ["release"]
-# Repository URL (avoids needing upstream tracking branch to resolve it)
+# Repository URL (avoids needing to upstream tracking branch to resolve it)
 repo_url = "https://github.com/noirbizarre/git-synchronizer"
 # PR branch prefix
 pr_branch_prefix = "release/"
@@ -87,6 +87,6 @@ commit_parsers = [
   { message = "^style", skip = true },
   { message = "^revert", group = "<!-- 6 -->🔙 Reverted" },
   { message = "^wip", skip = true },
-  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore:\\ release", skip = true },
   { message = "^chore|^misc", group = "<!-- 7 -->🧹 Chores" },
 ]
