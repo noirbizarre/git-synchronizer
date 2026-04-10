@@ -28,6 +28,11 @@ impl Ui {
         }
     }
 
+    // Output methods below are best-effort: I/O errors (e.g. broken pipe)
+    // are silently discarded because failing to *display* a message should
+    // not abort the cleanup workflow. Interactive methods (confirm,
+    // multi_select, input) propagate errors because they need a response.
+
     /// Print a section heading.
     pub fn heading(&self, text: &str) {
         let _ = self
