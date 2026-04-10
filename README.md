@@ -120,7 +120,7 @@ serves as a merge target (branches merged into it are flagged for cleanup).
 On first run (when no `[sync]` config section exists), an interactive
 setup wizard runs automatically:
 
-1. Auto-detects local branches and pre-selects well-known ones (`main`, `master`)
+1. Auto-detects local branches and pre-selects well-known ones (`main`, `master`, `develop`, `development`)
 2. Asks for additional protected patterns (e.g. `release/*`)
 3. Lists available remotes and asks which ones to operate on
 4. If [worktrunk](https://worktrunk.dev) (`wt`) is detected on `$PATH`, asks whether to use it for worktree removal
