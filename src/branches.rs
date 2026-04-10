@@ -82,6 +82,23 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
         }
     }
 
+    // Fast tree-SHA comparison: detects branches whose tree object is
+    // identical to a target's tree (cheapest content-equality check).
+    for branch in &all_branches {
+        if seen.contains(branch)
+            || *branch == current
+            || is_protected(branch, &matcher, &branch_protected)
+        {
+            continue;
+        }
+        for target in &targets {
+            if git.trees_match(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
+                candidates.push(branch.clone());
+                break;
+            }
+        }
+    }
+
     // Also check branches via empty diff (catches squash-merge cases
     // where the target tree already contains all branch changes)
     for branch in &all_branches {
@@ -311,6 +328,56 @@ mod tests {
         assert!(
             merged.contains(&"feature/squash".to_string()),
             "squash-merged branch should be detected as merged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_merged_local_detects_tree_match_branches() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a feature branch with a commit
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/tree-match"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("tree.txt"), "tree content")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "tree feature"])
+            .current_dir(path)
+            .output()?;
+
+        // Squash-merge onto main so both tips share the same tree object
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "--squash", "feature/tree-match"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "squash merge tree"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // Branch should be detected via tree SHA comparison
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        let merged = find_merged_local(&git, &config)?;
+        assert!(
+            merged.contains(&"feature/tree-match".to_string()),
+            "branch with matching tree SHA should be detected as merged"
         );
         Ok(())
     }
