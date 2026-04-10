@@ -68,6 +68,9 @@ git sync config list
 # Re-run the interactive setup wizard
 git sync config setup
 
+# Set a configuration value directly
+git sync config set worktrunk false
+
 # Add/remove protected branch patterns
 git sync config add-protected 'release/*'
 git sync config remove-protected 'develop'
