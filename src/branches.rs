@@ -82,6 +82,23 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
         }
     }
 
+    // Also check branches via empty diff (catches squash-merge cases
+    // where the target tree already contains all branch changes)
+    for branch in &all_branches {
+        if seen.contains(branch)
+            || *branch == current
+            || is_protected(branch, &matcher, &branch_protected)
+        {
+            continue;
+        }
+        for target in &targets {
+            if git.diff_empty(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
+                candidates.push(branch.clone());
+                break;
+            }
+        }
+    }
+
     candidates.sort();
     Ok(candidates)
 }
@@ -245,6 +262,56 @@ mod tests {
         };
         let merged = find_merged_local(&git, &config)?;
         assert!(merged.contains(&"feature/cherry".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_merged_local_detects_squash_merged_branches() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a feature branch with a commit
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/squash"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("squash.txt"), "squash")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "squash feature"])
+            .current_dir(path)
+            .output()?;
+
+        // Squash-merge onto main (creates a single squash commit, not a merge commit)
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "--squash", "feature/squash"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "squash merge"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // Squash-merged branch should be detected via empty three-dot diff
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        let merged = find_merged_local(&git, &config)?;
+        assert!(
+            merged.contains(&"feature/squash".to_string()),
+            "squash-merged branch should be detected as merged"
+        );
         Ok(())
     }
 
