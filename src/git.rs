@@ -205,6 +205,18 @@ impl Git {
         Ok(!out.is_empty() && out.lines().all(|l| l.starts_with('-')))
     }
 
+    /// Compare the tree objects of two refs.
+    ///
+    /// Runs `git rev-parse <target>^{tree}` and `git rev-parse <branch>^{tree}`
+    /// and returns `true` when the SHA hashes are identical — meaning the two
+    /// refs point at exactly the same file content.  This is the cheapest
+    /// possible content-equality check (two rev-parse calls, no diff traversal).
+    pub fn trees_match(&self, target: &str, branch: &str) -> Result<bool> {
+        let target_tree = self.run(&["rev-parse", &format!("{target}^{{tree}}")])?;
+        let branch_tree = self.run(&["rev-parse", &format!("{branch}^{{tree}}")])?;
+        Ok(target_tree.trim() == branch_tree.trim())
+    }
+
     /// Check whether the diff between `target` and `branch` is empty.
     ///
     /// Runs `git diff --quiet <target> <branch>` which compares the two tree
@@ -879,6 +891,87 @@ bare
             .output()?;
 
         assert!(!git.diff_empty("main", "feature/unmerged")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_trees_match() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        // Create a feature branch with a commit
+        Command::new("git")
+            .args(["checkout", "-b", "feature/squash-test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("squash.txt"), "squash content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash commit"])
+            .current_dir(path)
+            .output()?;
+
+        // Switch back to main and squash-merge the feature branch
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["merge", "--squash", "feature/squash-test"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash merge feature"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // After squash-merge, main and the branch have the same tree
+        assert!(git.trees_match("main", "feature/squash-test")?);
+
+        // Create an unmerged branch — trees should NOT match
+        Command::new("git")
+            .args(["checkout", "-b", "feature/unmerged"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("unmerged.txt"), "unmerged content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "unmerged commit"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(!git.trees_match("main", "feature/unmerged")?);
 
         Ok(())
     }
