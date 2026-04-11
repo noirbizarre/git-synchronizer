@@ -424,6 +424,8 @@ pub struct Worktree {
     pub head: Option<String>,
     pub branch: Option<String>,
     pub is_bare: bool,
+    pub is_locked: bool,
+    pub lock_reason: Option<String>,
 }
 
 /// Parse `git branch` output (with leading `*`, `+` and whitespace).
@@ -454,6 +456,8 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
                 head: None,
                 branch: None,
                 is_bare: false,
+                is_locked: false,
+                lock_reason: None,
             });
         } else if let Some(head) = line.strip_prefix("HEAD ") {
             if let Some(ref mut wt) = current {
@@ -473,6 +477,15 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
             && let Some(ref mut wt) = current
         {
             wt.is_bare = true;
+        } else if line == "locked"
+            && let Some(ref mut wt) = current
+        {
+            wt.is_locked = true;
+        } else if let Some(reason) = line.strip_prefix("locked ")
+            && let Some(ref mut wt) = current
+        {
+            wt.is_locked = true;
+            wt.lock_reason = Some(reason.to_string());
         }
     }
 
@@ -528,18 +541,69 @@ bare
         assert_eq!(worktrees[0].path, "/home/user/project");
         assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
         assert!(!worktrees[0].is_bare);
+        assert!(!worktrees[0].is_locked);
 
         assert_eq!(worktrees[1].path, "/home/user/project-feature");
         assert_eq!(worktrees[1].branch.as_deref(), Some("feature/foo"));
+        assert!(!worktrees[1].is_locked);
 
         assert_eq!(worktrees[2].path, "/home/user/project-bare");
         assert!(worktrees[2].is_bare);
+        assert!(!worktrees[2].is_locked);
     }
 
     #[test]
     fn test_parse_worktree_list_empty() {
         let worktrees = parse_worktree_list("");
         assert!(worktrees.is_empty());
+    }
+
+    #[test]
+    fn test_parse_worktree_list_locked_no_reason() {
+        let output = "\
+worktree /home/user/project
+HEAD abc1234
+branch refs/heads/main
+
+worktree /home/user/project-feature
+HEAD def5678
+branch refs/heads/feature/foo
+locked
+
+";
+        let worktrees = parse_worktree_list(output);
+        assert_eq!(worktrees.len(), 2);
+
+        assert!(!worktrees[0].is_locked);
+        assert!(worktrees[0].lock_reason.is_none());
+
+        assert!(worktrees[1].is_locked);
+        assert!(worktrees[1].lock_reason.is_none());
+    }
+
+    #[test]
+    fn test_parse_worktree_list_locked_with_reason() {
+        let output = "\
+worktree /home/user/project
+HEAD abc1234
+branch refs/heads/main
+
+worktree /home/user/project-feature
+HEAD def5678
+branch refs/heads/feature/foo
+locked work in progress, do not remove
+
+";
+        let worktrees = parse_worktree_list(output);
+        assert_eq!(worktrees.len(), 2);
+
+        assert!(!worktrees[0].is_locked);
+
+        assert!(worktrees[1].is_locked);
+        assert_eq!(
+            worktrees[1].lock_reason.as_deref(),
+            Some("work in progress, do not remove")
+        );
     }
 
     /// Integration test: verify basic git operations in a temporary repo.

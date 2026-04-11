@@ -10,6 +10,7 @@ orphaned worktree cleanup.
 
 - Delete local and remote branches that have been merged
 - Worktree cleanup: removes worktrees for deleted branches and orphaned worktrees
+- Respects locked worktrees: skips removal with an informational message
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
 - Multiple merge detection strategies (fast merge and rebase-aware via `git cherry`)
@@ -146,7 +147,10 @@ CLI flags:
    merged into them are detected as candidates too. The user selects which
    branches to delete. Associated worktrees are removed first, then branches
    are deleted with `git branch -D` (force-delete is safe here because the
-   branch is already verified as merged into a protected target).
+   branch is already verified as merged into a protected target). Locked
+   worktrees (via `git worktree lock`) are automatically skipped with an
+   informational message -- this also prevents their branch from being deleted,
+   since git refuses to delete a branch checked out in any worktree.
    Skipped with `--remote-only`.
 
 3. **Delete merged remote branches** -- for each configured remote, identifies
@@ -156,7 +160,8 @@ CLI flags:
    Skipped with `--local-only`.
 
 4. **Clean orphan worktrees** -- finds worktrees whose branch no longer exists
-   locally and offers to remove them. When
+   locally and offers to remove them. Locked worktrees are skipped
+   automatically. When
    [worktrunk](https://worktrunk.dev) is enabled (via `--worktrunk` flag,
    `sync.worktrunk` config, or auto-detection), removal is delegated to
    `wt remove` so that pre/post-remove hooks are triggered. Otherwise falls
