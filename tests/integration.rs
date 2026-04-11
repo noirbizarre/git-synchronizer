@@ -704,3 +704,152 @@ fn clean_from_linked_worktree_with_worktree_config() {
     );
     assert!(branches.contains(&"main".to_string()));
 }
+
+// ── Locked worktree handling ────────────────────────────────────────
+
+#[test]
+fn clean_skips_locked_worktree() {
+    let dir = init_repo();
+    let p = dir.path();
+    configure(&dir);
+
+    // Create and merge a branch
+    StdCommand::new("git")
+        .args(["checkout", "-b", "feature/locked"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    std::fs::write(p.join("locked.txt"), "locked feature").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "locked feature"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["merge", "feature/locked"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    // Create a worktree for the merged branch and lock it
+    let wt_path = p.join("wt-locked");
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "feature/locked",
+        ])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["worktree", "lock", wt_path.to_str().unwrap()])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    // Run clean — should skip the locked worktree
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch"])
+        .current_dir(p)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Skipping locked worktree"));
+
+    // The locked worktree directory should still exist
+    assert!(wt_path.exists(), "locked worktree should not be removed");
+
+    // The branch cannot be deleted because it's still checked out in
+    // the locked worktree — git refuses to delete it. This is expected:
+    // the worktree removal was skipped, so branch deletion also fails
+    // gracefully (logged as a warning).
+    let branches = git_branches(&dir);
+    assert!(
+        branches.contains(&"feature/locked".to_string()),
+        "branch should survive because its locked worktree prevents deletion"
+    );
+}
+
+#[test]
+fn clean_skips_locked_worktree_with_reason() {
+    let dir = init_repo();
+    let p = dir.path();
+    configure(&dir);
+
+    // Create and merge a branch
+    StdCommand::new("git")
+        .args(["checkout", "-b", "feature/locked-reason"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    std::fs::write(p.join("reason.txt"), "reason feature").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "reason feature"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["merge", "feature/locked-reason"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    // Create a worktree and lock it with a reason
+    let wt_path = p.join("wt-locked-reason");
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "feature/locked-reason",
+        ])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "lock",
+            wt_path.to_str().unwrap(),
+            "--reason",
+            "work in progress",
+        ])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    // Run clean — should show the lock reason
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch"])
+        .current_dir(p)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Skipping locked worktree"))
+        .stderr(predicate::str::contains("work in progress"));
+
+    // Locked worktree must still exist
+    assert!(wt_path.exists(), "locked worktree should not be removed");
+}

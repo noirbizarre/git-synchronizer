@@ -143,35 +143,47 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         if orphans.is_empty() {
             ui.muted("No orphan worktrees to remove.");
         } else {
-            let display: Vec<String> = orphans
-                .iter()
-                .map(|wt| {
-                    format!(
-                        "{} (branch: {})",
-                        wt.path,
-                        wt.branch.as_deref().unwrap_or("detached")
-                    )
-                })
-                .collect();
-            ui.heading(&format!("Found {} orphan worktree(s):", orphans.len()));
-            ui.bullet_list(&display);
+            // Partition into locked and unlocked orphan worktrees
+            let (locked, unlocked): (Vec<_>, Vec<_>) = orphans.iter().partition(|wt| wt.is_locked);
 
-            if opts.yes || ui.confirm("Remove orphan worktrees?", false)? {
-                let mut removed = 0usize;
-                for wt in &orphans {
-                    if opts.dry_run {
-                        ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
-                    } else {
-                        match remove_worktree(git, wt, opts.use_worktrunk) {
-                            Ok(()) => removed += 1,
-                            Err(e) => {
-                                ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
+            // Report locked worktrees
+            for wt in &locked {
+                ui.muted(&format_locked_skip_message(wt));
+            }
+
+            if unlocked.is_empty() {
+                ui.muted("No orphan worktrees to remove.");
+            } else {
+                let display: Vec<String> = unlocked
+                    .iter()
+                    .map(|wt| {
+                        format!(
+                            "{} (branch: {})",
+                            wt.path,
+                            wt.branch.as_deref().unwrap_or("detached")
+                        )
+                    })
+                    .collect();
+                ui.heading(&format!("Found {} orphan worktree(s):", unlocked.len()));
+                ui.bullet_list(&display);
+
+                if opts.yes || ui.confirm("Remove orphan worktrees?", false)? {
+                    let mut removed = 0usize;
+                    for wt in &unlocked {
+                        if opts.dry_run {
+                            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                        } else {
+                            match remove_worktree(git, wt, opts.use_worktrunk) {
+                                Ok(()) => removed += 1,
+                                Err(e) => {
+                                    ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
+                                }
                             }
                         }
                     }
-                }
-                if !opts.dry_run && removed > 0 {
-                    ui.summary(removed, "worktree", "worktrees", "removed");
+                    if !opts.dry_run && removed > 0 {
+                        ui.summary(removed, "worktree", "worktrees", "removed");
+                    }
                 }
             }
         }
@@ -202,7 +214,19 @@ fn remove_worktrees_for_branches(
         return Ok(());
     }
 
-    let display: Vec<String> = worktrees
+    // Partition into locked and unlocked worktrees
+    let (locked, unlocked): (Vec<_>, Vec<_>) = worktrees.iter().partition(|wt| wt.is_locked);
+
+    // Report locked worktrees
+    for wt in &locked {
+        ui.muted(&format_locked_skip_message(wt));
+    }
+
+    if unlocked.is_empty() {
+        return Ok(());
+    }
+
+    let display: Vec<String> = unlocked
         .iter()
         .map(|wt| {
             format!(
@@ -216,7 +240,7 @@ fn remove_worktrees_for_branches(
     ui.bullet_list(&display);
 
     if opts.yes || ui.confirm("Remove these worktrees first?", false)? {
-        for wt in &worktrees {
+        for wt in &unlocked {
             if opts.dry_run {
                 ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
             } else {
@@ -238,6 +262,25 @@ fn effective_remotes(git: &Git, config: &Config) -> Result<Vec<String>> {
     match &config.remotes {
         Some(configured) => Ok(configured.clone()),
         None => git.remotes(),
+    }
+}
+
+/// Format an informational skip message for a locked worktree.
+fn format_locked_skip_message(wt: &Worktree) -> String {
+    let branch_label = wt.branch.as_deref().unwrap_or("detached");
+    match &wt.lock_reason {
+        Some(reason) => {
+            format!(
+                "  Skipping locked worktree '{}' (branch: {branch_label}): {reason}",
+                wt.path
+            )
+        }
+        None => {
+            format!(
+                "  Skipping locked worktree '{}' (branch: {branch_label}).",
+                wt.path
+            )
+        }
     }
 }
 
@@ -444,5 +487,65 @@ mod tests {
         assert!(!branches.contains(&"feature/wt-test".to_string()));
         assert!(!wt_path.exists());
         Ok(())
+    }
+
+    #[test]
+    fn test_run_skips_locked_worktree() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_locked_worktree()?;
+        let config = default_config();
+        let ui = Ui::new();
+        let opts = opts_yes_skip_network();
+
+        run(&git, &config, &ui, &opts)?;
+
+        // The locked worktree directory should still exist
+        assert!(
+            std::path::Path::new(&wt_path).exists(),
+            "locked worktree should not be removed"
+        );
+
+        // The branch cannot be deleted because it's still checked out
+        // in the locked worktree — git refuses to delete it. This is
+        // expected: the worktree removal was skipped, so the branch
+        // deletion also fails gracefully (logged as a warning).
+        let branches = git.local_branches()?;
+        assert!(
+            branches.contains(&"feature/locked-wt".to_string()),
+            "branch should survive because its locked worktree prevents deletion"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_format_locked_skip_message_no_reason() {
+        let wt = Worktree {
+            path: "/tmp/wt".to_string(),
+            head: None,
+            branch: Some("feature/x".to_string()),
+            is_bare: false,
+            is_locked: true,
+            lock_reason: None,
+        };
+        let msg = format_locked_skip_message(&wt);
+        assert!(msg.contains("Skipping locked worktree"));
+        assert!(msg.contains("/tmp/wt"));
+        assert!(msg.contains("feature/x"));
+    }
+
+    #[test]
+    fn test_format_locked_skip_message_with_reason() {
+        let wt = Worktree {
+            path: "/tmp/wt".to_string(),
+            head: None,
+            branch: Some("feature/x".to_string()),
+            is_bare: false,
+            is_locked: true,
+            lock_reason: Some("do not touch".to_string()),
+        };
+        let msg = format_locked_skip_message(&wt);
+        assert!(msg.contains("Skipping locked worktree"));
+        assert!(msg.contains("/tmp/wt"));
+        assert!(msg.contains("feature/x"));
+        assert!(msg.contains("do not touch"));
     }
 }

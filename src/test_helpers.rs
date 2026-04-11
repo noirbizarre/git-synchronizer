@@ -109,3 +109,52 @@ pub fn init_repo_with_worktree() -> Result<(TempDir, Git, String)> {
 
     Ok((dir, git, wt_path.to_string_lossy().to_string()))
 }
+
+/// Create a repo with a merged branch, a linked worktree for it, and lock the worktree.
+pub fn init_repo_with_locked_worktree() -> Result<(TempDir, Git, String)> {
+    let (dir, git) = init_repo()?;
+    let path = dir.path();
+
+    // Create and merge a feature branch
+    StdCommand::new("git")
+        .args(["checkout", "-b", "feature/locked-wt"])
+        .current_dir(path)
+        .output()?;
+    std::fs::write(path.join("locked.txt"), "locked feature")?;
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["commit", "-m", "locked feature"])
+        .current_dir(path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["merge", "feature/locked-wt"])
+        .current_dir(path)
+        .output()?;
+
+    // Create a worktree for the merged branch
+    let wt_path = dir.path().join("worktree-locked");
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "feature/locked-wt",
+        ])
+        .current_dir(path)
+        .output()?;
+
+    // Lock the worktree
+    StdCommand::new("git")
+        .args(["worktree", "lock", wt_path.to_str().unwrap()])
+        .current_dir(path)
+        .output()?;
+
+    Ok((dir, git, wt_path.to_string_lossy().to_string()))
+}
