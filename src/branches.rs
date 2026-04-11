@@ -26,7 +26,7 @@ fn is_protected(branch: &str, matcher: &GlobSet, branch_protected: &HashSet<Stri
 /// Literal patterns (e.g. "main") are kept as-is if they exist.
 /// Glob patterns (e.g. "release/*") are expanded to matching branches.
 /// Branches marked with per-branch `sync-protected` config are also included.
-fn resolve_merge_targets(git: &Git, config: &Config) -> Result<Vec<String>> {
+pub fn resolve_merge_targets(git: &Git, config: &Config) -> Result<Vec<String>> {
     let matcher = build_protected_matcher(config)?;
     let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
     let all_branches = git.local_branches()?;

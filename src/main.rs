@@ -150,6 +150,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         yes: cli.yes,
         dry_run: cli.dry_run,
         no_fetch: cli.no_fetch,
+        no_pull: cli.no_pull,
         local_only: cli.local_only,
         remote_only: cli.remote_only,
         no_worktrees: cli.no_worktrees,

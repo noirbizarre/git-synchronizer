@@ -853,3 +853,386 @@ fn clean_skips_locked_worktree_with_reason() {
     // Locked worktree must still exist
     assert!(wt_path.exists(), "locked worktree should not be removed");
 }
+
+// ── Pull / fast-forward ─────────────────────────────────────────────
+
+/// Create a local bare "remote", clone it, push an initial commit, and
+/// configure sync.  Returns (tempdir, work_path, bare_path).
+fn init_repo_with_remote() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Bare remote
+    let bare_path = dir.path().join("remote.git");
+    StdCommand::new("git")
+        .args([
+            "init",
+            "--bare",
+            "--initial-branch=main",
+            bare_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    // Clone → working repo
+    let work_path = dir.path().join("work");
+    StdCommand::new("git")
+        .args([
+            "clone",
+            bare_path.to_str().unwrap(),
+            work_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Initial commit + push
+    std::fs::write(work_path.join("README.md"), "# test").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Configure sync
+    StdCommand::new("git")
+        .args(["config", "--add", "sync.protected", "main"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    (dir, work_path, bare_path)
+}
+
+/// Push a new commit to the bare remote from a temporary second clone.
+fn advance_remote_branch(bare_path: &std::path::Path, parent_dir: &std::path::Path) {
+    let pusher = parent_dir.join("pusher");
+    StdCommand::new("git")
+        .args([
+            "clone",
+            bare_path.to_str().unwrap(),
+            pusher.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    std::fs::write(pusher.join("remote-new.txt"), "remote content").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "advance remote"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+}
+
+/// Return the SHA of a ref in a repo.
+fn git_rev_parse(dir: &std::path::Path, refname: &str) -> String {
+    let output = StdCommand::new("git")
+        .args(["rev-parse", refname])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn no_pull_flag_accepted() {
+    let dir = init_repo();
+    configure(&dir);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--no-pull"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn pull_updates_current_branch() {
+    let (dir, work_path, bare_path) = init_repo_with_remote();
+
+    // Advance remote
+    advance_remote_branch(&bare_path, dir.path());
+
+    let before = git_rev_parse(&work_path, "HEAD");
+
+    // Run git-sync with pull enabled (default), fetch enabled
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y"])
+        .current_dir(&work_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Pulling"));
+
+    let after = git_rev_parse(&work_path, "HEAD");
+    assert_ne!(before, after, "main should have been fast-forwarded");
+    assert!(
+        work_path.join("remote-new.txt").exists(),
+        "new file from remote should exist after pull"
+    );
+}
+
+#[test]
+fn no_pull_skips_fast_forward() {
+    let (dir, work_path, bare_path) = init_repo_with_remote();
+
+    // Advance remote
+    advance_remote_branch(&bare_path, dir.path());
+
+    let before = git_rev_parse(&work_path, "HEAD");
+
+    // Run git-sync with --no-pull
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-pull"])
+        .current_dir(&work_path)
+        .assert()
+        .success();
+
+    let after = git_rev_parse(&work_path, "HEAD");
+    assert_eq!(
+        before, after,
+        "main should NOT have been updated with --no-pull"
+    );
+}
+
+#[test]
+fn pull_updates_branch_in_worktree() {
+    let (dir, work_path, bare_path) = init_repo_with_remote();
+
+    // Create a second protected branch, push it, check out in a worktree
+    StdCommand::new("git")
+        .args(["checkout", "-b", "develop"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push", "-u", "origin", "develop"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Add develop as protected
+    StdCommand::new("git")
+        .args(["config", "--add", "sync.protected", "develop"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Create a worktree for develop
+    let wt_path = dir.path().join("wt-develop");
+    StdCommand::new("git")
+        .args(["worktree", "add", wt_path.to_str().unwrap(), "develop"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Advance develop on the remote
+    let pusher = dir.path().join("pusher-dev");
+    StdCommand::new("git")
+        .args([
+            "clone",
+            "-b",
+            "develop",
+            bare_path.to_str().unwrap(),
+            pusher.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    std::fs::write(pusher.join("dev-new.txt"), "dev content").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "advance develop"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+
+    let before = git_rev_parse(&work_path, "develop");
+
+    // Run git-sync — should pull develop via the worktree
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y"])
+        .current_dir(&work_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Pulling"));
+
+    let after = git_rev_parse(&work_path, "develop");
+    assert_ne!(
+        before, after,
+        "develop should have been fast-forwarded via worktree"
+    );
+    assert!(
+        wt_path.join("dev-new.txt").exists(),
+        "new file should be in the worktree after pull"
+    );
+}
+
+#[test]
+fn pull_updates_non_checked_out_branch_via_fetch() {
+    let (dir, work_path, bare_path) = init_repo_with_remote();
+
+    // Create a second protected branch, push it, but do NOT check it out in a worktree
+    StdCommand::new("git")
+        .args(["checkout", "-b", "develop"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push", "-u", "origin", "develop"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Add develop as protected
+    StdCommand::new("git")
+        .args(["config", "--add", "sync.protected", "develop"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Advance develop on the remote
+    let pusher = dir.path().join("pusher-dev2");
+    StdCommand::new("git")
+        .args([
+            "clone",
+            "-b",
+            "develop",
+            bare_path.to_str().unwrap(),
+            pusher.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    std::fs::write(pusher.join("dev-new2.txt"), "dev content 2").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "advance develop 2"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push"])
+        .current_dir(&pusher)
+        .output()
+        .unwrap();
+
+    let before = git_rev_parse(&work_path, "develop");
+
+    // Run git-sync — should update develop via fetch refspec
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y"])
+        .current_dir(&work_path)
+        .assert()
+        .success();
+
+    let after = git_rev_parse(&work_path, "develop");
+    assert_ne!(
+        before, after,
+        "develop should have been fast-forwarded via fetch"
+    );
+}
+
+#[test]
+fn pull_dry_run_does_not_update() {
+    let (dir, work_path, bare_path) = init_repo_with_remote();
+
+    // Advance remote
+    advance_remote_branch(&bare_path, dir.path());
+
+    let before = git_rev_parse(&work_path, "HEAD");
+
+    // Run git-sync with --dry-run
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "-n"])
+        .current_dir(&work_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("dry-run"));
+
+    let after = git_rev_parse(&work_path, "HEAD");
+    assert_eq!(before, after, "HEAD should NOT change in dry-run mode");
+}

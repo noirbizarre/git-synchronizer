@@ -166,6 +166,65 @@ impl Git {
         Ok(())
     }
 
+    // ── Pull / fast-forward ─────────────────────────────────────────
+
+    /// Look up the upstream remote and branch for a local branch.
+    ///
+    /// Reads `branch.<name>.remote` and `branch.<name>.merge` from git config.
+    /// Returns `Some((remote, branch))` if both are set, `None` otherwise.
+    /// The merge ref (e.g. `refs/heads/main`) is stripped to just the branch name.
+    pub fn branch_upstream(&self, branch: &str) -> Result<Option<(String, String)>> {
+        let remote = match self.config_get(&format!("branch.{branch}.remote"))? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let merge = match self.config_get(&format!("branch.{branch}.merge"))? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let upstream_branch = merge
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&merge)
+            .to_string();
+        Ok(Some((remote, upstream_branch)))
+    }
+
+    /// Run `git pull --ff-only` in the current working directory.
+    ///
+    /// Used for target branches checked out in the current worktree.
+    pub fn pull_ff_only(&self) -> Result<()> {
+        self.run(&["pull", "--ff-only"])?;
+        Ok(())
+    }
+
+    /// Run `git pull --ff-only` in the given directory.
+    ///
+    /// Used for target branches checked out in a different worktree
+    /// (the one we are running from is handled by [`pull_ff_only`]).
+    pub fn pull_ff_only_in(&self, dir: &str) -> Result<()> {
+        run_git(
+            &["-C", dir, "pull", "--ff-only"],
+            self.verbose,
+            self.workdir.as_deref(),
+        )?;
+        Ok(())
+    }
+
+    /// Fast-forward a local branch ref to match its remote-tracking branch.
+    ///
+    /// Runs `git fetch <remote> <remote_branch>:<local_branch>`.
+    /// Only works for branches **not** checked out in any worktree.
+    pub fn fetch_update_branch(
+        &self,
+        remote: &str,
+        remote_branch: &str,
+        local_branch: &str,
+    ) -> Result<()> {
+        let refspec = format!("{remote_branch}:{local_branch}");
+        self.run(&["fetch", remote, &refspec])?;
+        Ok(())
+    }
+
     // ── Branch queries ───────────────────────────────────────────────
 
     /// Return local branches that have been merged into `target`.
@@ -1355,6 +1414,287 @@ locked work in progress, do not remove
         assert!(git_wt.config_section_exists("sync")?);
         let git_main = Git::with_workdir(false, &main_path);
         assert!(git_main.config_section_exists("sync")?);
+
+        Ok(())
+    }
+
+    // ── Pull / fast-forward tests ────────────────────────────────────
+
+    /// Helper: create a repo with a local bare "remote" and tracking set up.
+    /// Returns (tempdir, workdir_path, bare_remote_path).
+    fn init_repo_with_local_remote()
+    -> Result<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
+        let dir = tempfile::tempdir()?;
+
+        // Create a bare "remote" repo
+        let bare_path = dir.path().join("remote.git");
+        Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                bare_path.to_str().unwrap(),
+            ])
+            .output()?;
+
+        // Clone it to get a working repo with tracking
+        let work_path = dir.path().join("work");
+        Command::new("git")
+            .args([
+                "clone",
+                bare_path.to_str().unwrap(),
+                work_path.to_str().unwrap(),
+            ])
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&work_path)
+            .output()?;
+
+        // Create an initial commit and push
+        std::fs::write(work_path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&work_path)
+            .output()?;
+
+        Ok((dir, work_path, bare_path))
+    }
+
+    /// Advance the bare remote by pushing from a temporary second clone.
+    fn advance_remote(bare_path: &Path, dir: &Path) -> Result<()> {
+        let pusher = dir.join("pusher");
+        Command::new("git")
+            .args([
+                "clone",
+                bare_path.to_str().unwrap(),
+                pusher.to_str().unwrap(),
+            ])
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&pusher)
+            .output()?;
+        std::fs::write(pusher.join("new.txt"), "new content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "remote advance"])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["push"])
+            .current_dir(&pusher)
+            .output()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_branch_upstream_with_tracking() -> Result<()> {
+        let (_dir, work_path, _bare_path) = init_repo_with_local_remote()?;
+        let git = Git::with_workdir(false, &work_path);
+
+        let upstream = git.branch_upstream("main")?;
+        assert!(upstream.is_some());
+        let (remote, branch) = upstream.unwrap();
+        assert_eq!(remote, "origin");
+        assert_eq!(branch, "main");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_branch_upstream_without_tracking() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let git = Git::with_workdir(false, dir.path());
+
+        // Local-only repo — no upstream tracking
+        let upstream = git.branch_upstream("main")?;
+        assert!(upstream.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pull_ff_only() -> Result<()> {
+        let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
+
+        // Advance the remote with a new commit
+        advance_remote(&bare_path, dir.path())?;
+
+        // Fetch so we have the remote ref
+        let git = Git::with_workdir(false, &work_path);
+        git.remote_update_prune()?;
+
+        // Record the commit before pulling
+        let before = git.run(&["rev-parse", "HEAD"])?;
+
+        // Pull should fast-forward
+        git.pull_ff_only()?;
+
+        let after = git.run(&["rev-parse", "HEAD"])?;
+        assert_ne!(before, after, "HEAD should have advanced after pull");
+
+        // The new file from the remote should exist
+        assert!(work_path.join("new.txt").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pull_ff_only_in() -> Result<()> {
+        let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
+
+        // Create a branch and a linked worktree
+        let git = Git::with_workdir(false, &work_path);
+        Command::new("git")
+            .args(["checkout", "-b", "feature/wt-pull"])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["push", "-u", "origin", "feature/wt-pull"])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&work_path)
+            .output()?;
+
+        let wt_path = dir.path().join("wt-linked");
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/wt-pull",
+            ])
+            .current_dir(&work_path)
+            .output()?;
+
+        // Advance the remote branch via a second clone
+        let pusher = dir.path().join("pusher-wt");
+        Command::new("git")
+            .args([
+                "clone",
+                "-b",
+                "feature/wt-pull",
+                bare_path.to_str().unwrap(),
+                pusher.to_str().unwrap(),
+            ])
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&pusher)
+            .output()?;
+        std::fs::write(pusher.join("wt-new.txt"), "wt new")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "advance wt branch"])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["push"])
+            .current_dir(&pusher)
+            .output()?;
+
+        // Pull in the linked worktree
+        let wt_path_str = wt_path.to_str().unwrap();
+        git.pull_ff_only_in(wt_path_str)?;
+
+        // The new file should exist in the worktree
+        assert!(wt_path.join("wt-new.txt").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fetch_update_branch() -> Result<()> {
+        let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
+
+        // Create a branch, push it, then check out main
+        let git = Git::with_workdir(false, &work_path);
+        Command::new("git")
+            .args(["checkout", "-b", "feature/fetch-update"])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["push", "-u", "origin", "feature/fetch-update"])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&work_path)
+            .output()?;
+
+        // Record the branch SHA before
+        let before = git.run(&["rev-parse", "feature/fetch-update"])?;
+
+        // Advance the remote branch via a second clone
+        let pusher = dir.path().join("pusher-fetch");
+        Command::new("git")
+            .args([
+                "clone",
+                "-b",
+                "feature/fetch-update",
+                bare_path.to_str().unwrap(),
+                pusher.to_str().unwrap(),
+            ])
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&pusher)
+            .output()?;
+        std::fs::write(pusher.join("fetch-new.txt"), "fetch new")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "advance fetch branch"])
+            .current_dir(&pusher)
+            .output()?;
+        Command::new("git")
+            .args(["push"])
+            .current_dir(&pusher)
+            .output()?;
+
+        // Fast-forward the local branch without checkout
+        git.fetch_update_branch("origin", "feature/fetch-update", "feature/fetch-update")?;
+
+        let after = git.run(&["rev-parse", "feature/fetch-update"])?;
+        assert_ne!(
+            before, after,
+            "branch ref should have advanced after fetch update"
+        );
 
         Ok(())
     }

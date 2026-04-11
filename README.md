@@ -13,7 +13,8 @@ orphaned worktree cleanup.
 - Respects locked worktrees: skips removal with an informational message
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
-- Multiple merge detection strategies (fast merge and rebase-aware via `git cherry`)
+- Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, and empty-diff detection for squash merges)
+- Automatic fast-forward of target branches before detection (with `--no-pull` to skip)
 - Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
 - Interactive setup wizard on first run
 - Configuration stored in git config (`[sync]` section)
@@ -45,6 +46,9 @@ git sync --verbose
 
 # Skip fetching/pruning
 git sync --no-fetch
+
+# Skip pulling (fast-forwarding) target branches
+git sync --no-pull
 
 # Only clean local or remote branches
 git sync --local-only
@@ -128,20 +132,40 @@ setup wizard runs automatically:
 
 ## How it works
 
-The cleanup runs in four sequential phases, each of which can be skipped via
+The cleanup runs in five sequential phases, each of which can be skipped via
 CLI flags:
 
 1. **Fetch & prune remotes** -- runs `git remote update --prune` to fetch all
    remotes and prune deleted remote-tracking branches. Skipped with `--no-fetch`.
 
-2. **Delete merged local branches** -- identifies branches merged into any
-   protected branch (both glob-pattern and per-branch protected) using two
-   complementary strategies:
+2. **Pull / fast-forward target branches** -- fast-forwards each protected
+   branch to its remote-tracking upstream so that merge detection operates on
+   up-to-date refs. The strategy varies depending on the branch state:
+   - *Current branch*: `git pull --ff-only` in the working directory.
+   - *Checked out in another worktree*: `git pull --ff-only` run from that
+     worktree directory (works with both plain git and worktrunk-managed
+     worktrees).
+   - *Not checked out*: `git fetch <remote> <ref>:<branch>` to update the
+     local ref without any checkout.
+
+   Branches without upstream tracking info are silently skipped. If a
+   fast-forward fails (e.g. the branch has diverged), a warning is printed
+   and the remaining branches are still processed.
+   Skipped with `--no-pull`.
+
+3. **Delete merged local branches** -- identifies branches merged into any
+   protected branch (both glob-pattern and per-branch protected) using
+   several complementary strategies:
    - *Standard detection*: `git branch --merged <target>` catches fast-forward
      and regular merges.
    - *Rebase-aware detection*: `git cherry <target> <branch>` catches
-     squash-merged and rebased branches by checking whether every commit has
-     already been applied upstream.
+     rebased branches by checking whether every commit has already been
+     applied upstream.
+   - *Tree SHA comparison*: compares `git rev-parse <ref>^{tree}` between
+     the target and branch -- the cheapest content-equality check.
+   - *Empty-diff detection*: `git diff --quiet <target> <branch>` catches
+     squash-merge cases where the target tree already contains all branch
+     changes.
 
    Per-branch protected branches also serve as merge targets, so branches
    merged into them are detected as candidates too. The user selects which
@@ -153,13 +177,13 @@ CLI flags:
    since git refuses to delete a branch checked out in any worktree.
    Skipped with `--remote-only`.
 
-3. **Delete merged remote branches** -- for each configured remote, identifies
+4. **Delete merged remote branches** -- for each configured remote, identifies
    merged remote-tracking branches with `git branch -r --merged <target>`. The
    user selects which to delete, and they are removed with
    `git push --delete --force-with-lease` for safety.
    Skipped with `--local-only`.
 
-4. **Clean orphan worktrees** -- finds worktrees whose branch no longer exists
+5. **Clean orphan worktrees** -- finds worktrees whose branch no longer exists
    locally and offers to remove them. Locked worktrees are skipped
    automatically. When
    [worktrunk](https://worktrunk.dev) is enabled (via `--worktrunk` flag,
@@ -178,15 +202,29 @@ flowchart TD
 
     FetchCheck{--no-fetch?}
     FetchCheck -- No --> Fetch[Fetch & prune remotes]
-    Fetch --> LocalCheck
-    FetchCheck -- Yes --> LocalCheck
+    Fetch --> PullCheck
+    FetchCheck -- Yes --> PullCheck
+
+    PullCheck{--no-pull?}
+    PullCheck -- No --> Pull[Fast-forward target branches]
+    Pull --> PullCurrent[Current branch:\ngit pull --ff-only]
+    Pull --> PullWT[In worktree:\ngit -C path pull --ff-only]
+    Pull --> PullFetch[Not checked out:\ngit fetch remote ref:branch]
+    PullCurrent --> LocalCheck
+    PullWT --> LocalCheck
+    PullFetch --> LocalCheck
+    PullCheck -- Yes --> LocalCheck
 
     LocalCheck{--remote-only?}
     LocalCheck -- No --> FindLocal[Find merged local branches]
     FindLocal --> Merged[Standard detection\ngit branch --merged]
     FindLocal --> Cherry[Rebase-aware detection\ngit cherry]
+    FindLocal --> TreeSHA[Tree SHA comparison]
+    FindLocal --> EmptyDiff[Empty-diff detection\ngit diff --quiet]
     Merged --> SelectLocal[User selects branches]
     Cherry --> SelectLocal
+    TreeSHA --> SelectLocal
+    EmptyDiff --> SelectLocal
     SelectLocal --> RemoveWT1[Remove associated worktrees]
     RemoveWT1 --> DeleteLocal[Delete local branches\ngit branch -D]
     DeleteLocal --> RemoteCheck
