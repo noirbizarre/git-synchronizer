@@ -548,4 +548,127 @@ mod tests {
         assert!(msg.contains("feature/x"));
         assert!(msg.contains("do not touch"));
     }
+
+    #[test]
+    fn test_run_handles_orphan_worktrees() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a branch and a worktree for it
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/orphan"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("orphan.txt"), "orphan")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "orphan feature"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "feature/orphan"])
+            .current_dir(path)
+            .output()?;
+
+        let wt_path = path.join("wt-orphan");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/orphan",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        // Delete the branch ref, making the worktree orphaned
+        StdCommand::new("git")
+            .args(["update-ref", "-d", "refs/heads/feature/orphan"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let opts = opts_yes_skip_network();
+
+        // The run should complete without error — even though `git worktree
+        // remove` fails (the worktree appears dirty after its branch ref is
+        // deleted), the error is caught and logged as a warning.
+        run(&git, &config, &ui, &opts)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_skips_locked_orphan_worktree() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a branch and worktree, then merge the branch
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/locked-orphan"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("locked-orphan.txt"), "locked orphan")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "locked orphan feature"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "feature/locked-orphan"])
+            .current_dir(path)
+            .output()?;
+
+        let wt_path = path.join("wt-locked-orphan");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/locked-orphan",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        // Lock the worktree
+        StdCommand::new("git")
+            .args(["worktree", "lock", wt_path.to_str().unwrap()])
+            .current_dir(path)
+            .output()?;
+
+        // Delete the branch ref, making the worktree orphaned
+        StdCommand::new("git")
+            .args(["update-ref", "-d", "refs/heads/feature/locked-orphan"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let opts = opts_yes_skip_network();
+
+        run(&git, &config, &ui, &opts)?;
+
+        // The locked orphan worktree should still exist
+        assert!(
+            wt_path.exists(),
+            "locked orphan worktree should not be removed"
+        );
+        Ok(())
+    }
 }
