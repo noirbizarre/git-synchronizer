@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 
-use crate::branches::{find_merged_local, find_merged_remote};
+use crate::branches::{find_merged_local, find_merged_remote, resolve_merge_targets};
 use crate::config::Config;
 use crate::git::{Git, Worktree};
 use crate::ui::Ui;
@@ -12,6 +14,7 @@ pub struct CleanerOptions {
     pub yes: bool,
     pub dry_run: bool,
     pub no_fetch: bool,
+    pub no_pull: bool,
     pub local_only: bool,
     pub remote_only: bool,
     pub no_worktrees: bool,
@@ -39,9 +42,70 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         }
     }
 
+    // ── 2. Pull / fast-forward target branches ─────────────────────
+
+    if !opts.no_pull {
+        let targets = resolve_merge_targets(git, config)?;
+        if !targets.is_empty() {
+            let current = git.current_branch()?;
+            let worktrees = git.worktree_list()?;
+
+            // Map branch name → worktree path for branches checked out somewhere.
+            let wt_map: HashMap<String, String> = worktrees
+                .iter()
+                .filter(|wt| !wt.is_bare)
+                .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), wt.path.clone())))
+                .collect();
+
+            // Collect targets that have upstream tracking info.
+            let mut pullable: Vec<(String, String, String)> = Vec::new(); // (branch, remote, upstream_branch)
+            for target in &targets {
+                if let Some((remote, upstream_branch)) = git.branch_upstream(target)? {
+                    pullable.push((target.clone(), remote, upstream_branch));
+                }
+            }
+
+            if pullable.is_empty() {
+                ui.muted("No target branches with upstream tracking to pull.");
+            } else {
+                let display: Vec<String> = pullable
+                    .iter()
+                    .map(|(branch, remote, _)| format!("{branch} (from {remote})"))
+                    .collect();
+                ui.heading(&format!("Pulling {} target branch(es):", pullable.len()));
+                ui.bullet_list(&display);
+
+                for (branch, remote, upstream_branch) in &pullable {
+                    if opts.dry_run {
+                        ui.muted(&format!(
+                            "  (dry-run) Would pull '{branch}' from {remote}/{upstream_branch}."
+                        ));
+                        continue;
+                    }
+
+                    let result = if *branch == current {
+                        // Checked out in the current working directory
+                        git.pull_ff_only()
+                    } else if let Some(wt_path) = wt_map.get(branch) {
+                        // Checked out in another worktree
+                        git.pull_ff_only_in(wt_path)
+                    } else {
+                        // Not checked out anywhere — fast-forward via fetch
+                        git.fetch_update_branch(remote, upstream_branch, branch)
+                    };
+
+                    match result {
+                        Ok(()) => ui.success(&format!("  '{branch}' updated.")),
+                        Err(e) => ui.warning(&format!("  '{branch}': {e}")),
+                    }
+                }
+            }
+        }
+    }
+
     let mut total_deleted = 0usize;
 
-    // ── 2. Local branches ────────────────────────────────────────────
+    // ── 3. Local branches ────────────────────────────────────────────
 
     if !opts.remote_only {
         let merged = find_merged_local(git, config)?;
@@ -84,7 +148,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         }
     }
 
-    // ── 3. Remote branches ───────────────────────────────────────────
+    // ── 4. Remote branches ───────────────────────────────────────────
 
     if !opts.local_only {
         let remotes = effective_remotes(git, config)?;
@@ -135,7 +199,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         }
     }
 
-    // ── 4. Orphan worktrees ──────────────────────────────────────────
+    // ── 5. Orphan worktrees ──────────────────────────────────────────
 
     if !opts.no_worktrees {
         let orphans = find_orphan_worktrees(git)?;
@@ -314,6 +378,7 @@ mod tests {
             yes: true,
             dry_run: false,
             no_fetch: true,
+            no_pull: true,
             local_only: false,
             remote_only: false,
             no_worktrees: false,

@@ -32,6 +32,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_fetch: bool,
 
+    /// Skip pulling (fast-forwarding) target branches before detection
+    #[arg(long)]
+    pub no_pull: bool,
+
     /// Only clean local branches (skip remote deletion)
     #[arg(long)]
     pub local_only: bool,
@@ -130,6 +134,7 @@ mod tests {
         assert!(!cli.dry_run);
         assert!(!cli.verbose);
         assert!(!cli.no_fetch);
+        assert!(!cli.no_pull);
         assert!(!cli.local_only);
         assert!(!cli.remote_only);
         assert!(!cli.no_worktrees);
@@ -147,6 +152,13 @@ mod tests {
         assert!(cli.no_fetch);
         assert!(cli.local_only);
         assert!(!cli.remote_only);
+    }
+
+    #[test]
+    fn test_cli_no_pull_flag() {
+        let cli = Cli::parse_from(["git-sync", "--no-pull"]);
+        assert!(cli.no_pull);
+        assert!(!cli.no_fetch);
     }
 
     #[test]
