@@ -319,8 +319,12 @@ impl Git {
     }
 
     /// Remove a worktree by path.
-    pub fn worktree_remove(&self, path: &str) -> Result<()> {
-        self.run(&["worktree", "remove", path])?;
+    pub fn worktree_remove(&self, path: &str, force: bool) -> Result<()> {
+        if force {
+            self.run(&["worktree", "remove", "--force", path])?;
+        } else {
+            self.run(&["worktree", "remove", path])?;
+        }
         Ok(())
     }
 

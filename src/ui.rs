@@ -89,13 +89,16 @@ impl Ui {
 
     /// Present a multi-select list. Returns the selected values.
     ///
-    /// `values` are the returned items; `labels` are what the user sees.
+    /// `values` are the returned items; `labels` are what the user sees;
+    /// `hints` are optional secondary text rendered next to each item
+    /// (pass an empty slice to omit hints).
     pub fn multi_select(
         &self,
         prompt: &str,
         values: &[String],
         labels: &[String],
         defaults: &[bool],
+        hints: &[String],
     ) -> anyhow::Result<Vec<String>> {
         let initial_values: Vec<String> = values
             .iter()
@@ -103,9 +106,11 @@ impl Ui {
             .filter_map(|(val, &selected)| if selected { Some(val.clone()) } else { None })
             .collect();
 
+        let empty = String::new();
         let mut ms = cliclack::multiselect(prompt);
-        for (val, label) in values.iter().zip(labels.iter()) {
-            ms = ms.item(val.clone(), label, "");
+        for (i, (val, label)) in values.iter().zip(labels.iter()).enumerate() {
+            let hint = hints.get(i).unwrap_or(&empty);
+            ms = ms.item(val.clone(), label, hint.as_str());
         }
         ms = ms.initial_values(initial_values);
         ms = ms.required(false);
