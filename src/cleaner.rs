@@ -8,6 +8,16 @@ use crate::git::{Git, Worktree};
 use crate::ui::Ui;
 use crate::worktrees::{find_orphan_worktrees, find_worktrees_for_branches};
 
+/// Return a display-friendly path with `$HOME` replaced by `~`.
+fn tilde_path(abs: &str) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = abs.strip_prefix(&home)
+    {
+        return format!("~{rest}");
+    }
+    abs.to_string()
+}
+
 /// Options controlling cleaner behaviour, derived from CLI flags.
 #[derive(Debug, Clone, Default)]
 pub struct CleanerOptions {
@@ -116,11 +126,40 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             ui.heading(&format!("Found {} merged local branch(es):", merged.len()));
             ui.bullet_list(&merged);
 
+            // Build labels: append the worktree path for branches that have one.
+            let worktrees = git.worktree_list()?;
+            let wt_map: HashMap<String, String> = worktrees
+                .iter()
+                .filter(|wt| !wt.is_bare)
+                .filter_map(|wt| {
+                    wt.branch
+                        .as_ref()
+                        .map(|b| (b.clone(), tilde_path(&wt.path)))
+                })
+                .collect();
+            let labels: Vec<String> = merged
+                .iter()
+                .map(|b| match wt_map.get(b) {
+                    Some(p) => format!("{b} {}", console::style(format!("({p})")).dim().italic()),
+                    None => b.clone(),
+                })
+                .collect();
+
+            let has_worktrees = merged.iter().any(|b| wt_map.contains_key(b));
+            let prompt = if has_worktrees {
+                format!(
+                    "Select branches {} to delete",
+                    console::style("(worktrees)").dim().italic()
+                )
+            } else {
+                "Select branches to delete".to_string()
+            };
+
             let to_delete = if opts.yes {
                 merged.clone()
             } else {
                 let defaults: Vec<bool> = vec![true; merged.len()];
-                ui.multi_select("Select branches to delete", &merged, &merged, &defaults)?
+                ui.multi_select(&prompt, &merged, &labels, &defaults, &[])?
             };
 
             if !to_delete.is_empty() {
@@ -172,7 +211,13 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 merged.clone()
             } else {
                 let defaults: Vec<bool> = vec![true; merged.len()];
-                ui.multi_select("Select branches to delete", &merged, &display, &defaults)?
+                ui.multi_select(
+                    "Select branches to delete",
+                    &merged,
+                    &display,
+                    &defaults,
+                    &[],
+                )?
             };
 
             let mut remote_deleted = 0usize;
@@ -218,36 +263,49 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             if unlocked.is_empty() {
                 ui.muted("No orphan worktrees to remove.");
             } else {
-                let display: Vec<String> = unlocked
+                let values: Vec<String> = unlocked.iter().map(|wt| wt.path.clone()).collect();
+                let labels: Vec<String> = unlocked.iter().map(|wt| tilde_path(&wt.path)).collect();
+                let hints: Vec<String> = unlocked
                     .iter()
-                    .map(|wt| {
-                        format!(
-                            "{} (branch: {})",
-                            wt.path,
-                            wt.branch.as_deref().unwrap_or("detached")
-                        )
-                    })
+                    .map(|wt| format!("branch: {}", wt.branch.as_deref().unwrap_or("detached")))
                     .collect();
-                ui.heading(&format!("Found {} orphan worktree(s):", unlocked.len()));
-                ui.bullet_list(&display);
 
-                if opts.yes || ui.confirm("Remove orphan worktrees?", false)? {
-                    let mut removed = 0usize;
-                    for wt in &unlocked {
-                        if opts.dry_run {
-                            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
-                        } else {
-                            match remove_worktree(git, wt, opts.use_worktrunk) {
-                                Ok(()) => removed += 1,
-                                Err(e) => {
-                                    ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
-                                }
+                ui.heading(&format!("Found {} orphan worktree(s):", unlocked.len()));
+
+                let to_remove = if opts.yes {
+                    values.clone()
+                } else {
+                    let defaults: Vec<bool> = vec![false; unlocked.len()];
+                    ui.multi_select(
+                        "Select orphan worktrees to remove",
+                        &values,
+                        &labels,
+                        &defaults,
+                        &hints,
+                    )?
+                };
+
+                let mut removed = 0usize;
+                for wt in &unlocked {
+                    if !to_remove.contains(&wt.path) {
+                        continue;
+                    }
+                    if opts.dry_run {
+                        ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                    } else {
+                        match remove_worktree(git, wt, opts.use_worktrunk, true) {
+                            Ok(()) => {
+                                removed += 1;
+                                ui.success(&format!("  '{}' removed.", tilde_path(&wt.path)));
+                            }
+                            Err(e) => {
+                                ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
                             }
                         }
                     }
-                    if !opts.dry_run && removed > 0 {
-                        ui.summary(removed, "worktree", "worktrees", "removed");
-                    }
+                }
+                if !opts.dry_run && removed > 0 {
+                    ui.summary(removed, "worktree", "worktrees", "removed");
                 }
             }
         }
@@ -266,6 +324,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 }
 
 /// Remove worktrees that are associated with branches about to be deleted.
+///
+/// The user has already confirmed the deletion via the branch multiselect
+/// (which shows the worktree path next to each branch), so no additional
+/// prompt is needed here.
 fn remove_worktrees_for_branches(
     git: &Git,
     ui: &Ui,
@@ -290,32 +352,24 @@ fn remove_worktrees_for_branches(
         return Ok(());
     }
 
-    let display: Vec<String> = unlocked
-        .iter()
-        .map(|wt| {
-            format!(
-                "{} (branch: {})",
-                wt.path,
-                wt.branch.as_deref().unwrap_or("detached")
-            )
-        })
-        .collect();
-    ui.heading("Worktrees for branches about to be deleted:");
-    ui.bullet_list(&display);
-
-    if opts.yes || ui.confirm("Remove these worktrees first?", false)? {
-        for wt in &unlocked {
-            if opts.dry_run {
-                ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
-            } else {
-                match remove_worktree(git, wt, opts.use_worktrunk) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
-                    }
+    let mut removed = 0usize;
+    for wt in &unlocked {
+        if opts.dry_run {
+            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+        } else {
+            match remove_worktree(git, wt, opts.use_worktrunk, false) {
+                Ok(()) => {
+                    removed += 1;
+                    ui.success(&format!("  '{}' removed.", tilde_path(&wt.path)));
+                }
+                Err(e) => {
+                    ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
                 }
             }
         }
+    }
+    if !opts.dry_run && removed > 0 {
+        ui.summary(removed, "worktree", "worktrees", "removed");
     }
 
     Ok(())
@@ -349,14 +403,18 @@ fn format_locked_skip_message(wt: &Worktree) -> String {
 }
 
 /// Remove a single worktree, optionally using worktrunk to trigger hooks.
-fn remove_worktree(git: &Git, wt: &Worktree, use_worktrunk: bool) -> Result<()> {
+///
+/// When `force` is true, passes `--force` to `git worktree remove`.
+/// This is needed for orphan worktrees whose branch ref has been deleted,
+/// since Git always considers them dirty without a branch to compare against.
+fn remove_worktree(git: &Git, wt: &Worktree, use_worktrunk: bool, force: bool) -> Result<()> {
     if use_worktrunk {
         match &wt.branch {
             Some(branch) => git.worktrunk_remove(branch),
             None => git.worktrunk_remove_by_path(&wt.path),
         }
     } else {
-        git.worktree_remove(&wt.path)
+        git.worktree_remove(&wt.path, force)
     }
 }
 
@@ -672,6 +730,49 @@ mod tests {
     }
 
     #[test]
+    fn test_run_removes_clean_orphan_worktree() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a branch at the same commit as main (no diverging content)
+        StdCommand::new("git")
+            .args(["branch", "feature/clean-orphan"])
+            .current_dir(path)
+            .output()?;
+
+        let wt_path = path.join("wt-clean-orphan");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/clean-orphan",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        // Delete the branch ref, making the worktree orphaned.
+        // Since the worktree content matches the commit, it is clean
+        // and `git worktree remove` will succeed.
+        StdCommand::new("git")
+            .args(["update-ref", "-d", "refs/heads/feature/clean-orphan"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(wt_path.exists(), "worktree should exist before cleanup");
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let opts = opts_yes_skip_network();
+
+        run(&git, &config, &ui, &opts)?;
+
+        assert!(!wt_path.exists(), "clean orphan worktree should be removed");
+        Ok(())
+    }
+
+    #[test]
     fn test_run_skips_locked_orphan_worktree() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
@@ -733,6 +834,153 @@ mod tests {
         assert!(
             wt_path.exists(),
             "locked orphan worktree should not be removed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tilde_path_replaces_home() {
+        let home = std::env::var("HOME").expect("HOME must be set for this test");
+        assert_eq!(
+            tilde_path(&format!("{home}/projects/repo")),
+            "~/projects/repo"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tilde_path_preserves_non_home_path() {
+        assert_eq!(tilde_path("/tmp/some/path"), "/tmp/some/path");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tilde_path_exact_home() {
+        let home = std::env::var("HOME").expect("HOME must be set for this test");
+        // Exact HOME path (no trailing slash) should become just "~"
+        assert_eq!(tilde_path(&home), "~");
+    }
+
+    #[test]
+    fn test_run_removes_multiple_worktrees_with_merged_branches() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create and merge two branches, each with a worktree
+        for name in &["feature/wt-a", "feature/wt-b"] {
+            StdCommand::new("git")
+                .args(["checkout", "-b", name])
+                .current_dir(path)
+                .output()?;
+            std::fs::write(path.join(format!("{}.txt", name.replace('/', "-"))), name)?;
+            StdCommand::new("git")
+                .args(["add", "."])
+                .current_dir(path)
+                .output()?;
+            StdCommand::new("git")
+                .args(["commit", "-m", &format!("{name} feature")])
+                .current_dir(path)
+                .output()?;
+            StdCommand::new("git")
+                .args(["checkout", "main"])
+                .current_dir(path)
+                .output()?;
+            StdCommand::new("git")
+                .args(["merge", name])
+                .current_dir(path)
+                .output()?;
+        }
+
+        let wt_a = path.join("wt-a");
+        StdCommand::new("git")
+            .args(["worktree", "add", wt_a.to_str().unwrap(), "feature/wt-a"])
+            .current_dir(path)
+            .output()?;
+
+        let wt_b = path.join("wt-b");
+        StdCommand::new("git")
+            .args(["worktree", "add", wt_b.to_str().unwrap(), "feature/wt-b"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let opts = opts_yes_skip_network();
+
+        // Both worktrees and branches should exist before cleanup
+        assert!(wt_a.exists());
+        assert!(wt_b.exists());
+        let branches_before = git.local_branches()?;
+        assert!(branches_before.contains(&"feature/wt-a".to_string()));
+        assert!(branches_before.contains(&"feature/wt-b".to_string()));
+
+        run(&git, &config, &ui, &opts)?;
+
+        // Both worktrees should be removed along with the branches
+        assert!(!wt_a.exists(), "worktree A should be removed");
+        assert!(!wt_b.exists(), "worktree B should be removed");
+        let branches_after = git.local_branches()?;
+        assert!(!branches_after.contains(&"feature/wt-a".to_string()));
+        assert!(!branches_after.contains(&"feature/wt-b".to_string()));
+        assert!(branches_after.contains(&"main".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_dry_run_preserves_worktrees() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create and merge a branch with a worktree
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/wt-dry"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("dry.txt"), "dry run")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "dry run feature"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "feature/wt-dry"])
+            .current_dir(path)
+            .output()?;
+
+        let wt_path = path.join("wt-dry");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/wt-dry",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let mut opts = opts_yes_skip_network();
+        opts.dry_run = true;
+
+        run(&git, &config, &ui, &opts)?;
+
+        // Dry run should preserve both worktree and branch
+        assert!(wt_path.exists(), "worktree should survive dry run");
+        let branches = git.local_branches()?;
+        assert!(
+            branches.contains(&"feature/wt-dry".to_string()),
+            "branch should survive dry run"
         );
         Ok(())
     }
