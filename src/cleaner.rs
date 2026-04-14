@@ -22,6 +22,7 @@ fn tilde_path(abs: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct CleanerOptions {
     pub yes: bool,
+    pub force: bool,
     pub dry_run: bool,
     pub no_fetch: bool,
     pub no_pull: bool,
@@ -234,26 +235,156 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 ui.multi_select(prompt, &values, &labels, &defaults, &hints)?
             };
 
+            // --- Detect risky items among the user's selection ---
+            //
+            // For selected merged branches: their worktree may have
+            // untracked/uncommitted changes (`--force`) and / or the branch
+            // itself may not be strictly merged into a target (`--force-delete`).
+            // For selected orphan worktrees: only the dirty-tree case applies
+            // (they already always pass `--force`, but surface dirtiness so the
+            // user is aware before we delete real work).
+
+            let merge_targets = resolve_merge_targets(git, config)?;
+
+            // (value_key, label, hint, dirty, unmerged)
+            let mut risky: Vec<(String, String, String, bool, bool)> = Vec::new();
+
+            for branch in &merged {
+                let key = format!("branch:{branch}");
+                if !selected.contains(&key) {
+                    continue;
+                }
+                let dirty = if !opts.no_worktrees {
+                    match wt_map.get(branch) {
+                        Some(wt) if !wt.is_locked => git.worktree_is_dirty(&wt.path)?,
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                let unmerged = git.branch_requires_force_delete(branch, &merge_targets)?;
+                if dirty || unmerged {
+                    let label = match wt_map.get(branch) {
+                        Some(wt) if !wt.is_locked && !opts.no_worktrees => format!(
+                            "{branch} {}",
+                            console::style(format!("({})", tilde_path(&wt.path)))
+                                .dim()
+                                .italic()
+                        ),
+                        _ => branch.clone(),
+                    };
+                    let hint = match (dirty, unmerged) {
+                        (true, true) => "untracked + unmerged",
+                        (true, false) => "untracked",
+                        (false, true) => "unmerged",
+                        _ => "",
+                    };
+                    risky.push((key, label, hint.to_string(), dirty, unmerged));
+                }
+            }
+
+            // Orphan worktrees are always removed with `--force` (their
+            // branch ref no longer exists, so Git considers them dirty by
+            // default); they are intentionally not surfaced in the
+            // secondary opt-in prompt.
+
+            // --- Secondary opt-in multiselect for risky items ---
+
+            let mut force_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut force_delete_set: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut dropped: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            if !risky.is_empty() {
+                let risky_values: Vec<String> =
+                    risky.iter().map(|(k, _, _, _, _)| k.clone()).collect();
+                let risky_labels: Vec<String> = risky
+                    .iter()
+                    .map(|(_, l, _, _, _)| format!("{}", console::style(l).yellow()))
+                    .collect();
+                let risky_hints: Vec<String> =
+                    risky.iter().map(|(_, _, h, _, _)| h.clone()).collect();
+                let risky_defaults: Vec<bool> = vec![false; risky.len()];
+
+                ui.warning(
+                    "Some selected items have local changes or unmerged commits and \
+                     cannot be removed safely.",
+                );
+
+                let force_selected: Vec<String> = if opts.yes {
+                    if opts.force {
+                        risky_values.clone()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    ui.multi_select(
+                        "Select the items to force-remove (un-selected items will be skipped)",
+                        &risky_values,
+                        &risky_labels,
+                        &risky_defaults,
+                        &risky_hints,
+                    )?
+                };
+
+                let force_selected_set: std::collections::HashSet<String> =
+                    force_selected.into_iter().collect();
+                for (key, _, _, dirty, unmerged) in &risky {
+                    if force_selected_set.contains(key) {
+                        if *dirty {
+                            force_set.insert(key.clone());
+                        }
+                        if *unmerged {
+                            force_delete_set.insert(key.clone());
+                        }
+                    } else {
+                        dropped.insert(key.clone());
+                    }
+                }
+            }
+
             // --- Process the selections ---
+
+            // Track per-branch worktree-removal outcome so we can decide
+            // whether to still call `branch_delete` afterwards (when using
+            // worktrunk, a successful `wt remove` already deleted the branch).
+            let mut wt_removed_by_wt: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
 
             // 1. Remove worktrees for selected merged branches first.
             if !opts.no_worktrees {
                 let mut wt_removed = 0usize;
                 for branch in &merged {
                     let key = format!("branch:{branch}");
-                    if !selected.contains(&key) {
+                    if !selected.contains(&key) || dropped.contains(&key) {
                         continue;
                     }
                     if let Some(wt) = wt_map.get(branch) {
                         if wt.is_locked {
                             continue; // already reported above
                         }
+                        let force = force_set.contains(&key);
+                        let force_delete = force_delete_set.contains(&key);
                         if opts.dry_run {
-                            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                            let mut suffix = String::new();
+                            if force {
+                                suffix.push_str(" (force)");
+                            }
+                            if force_delete && opts.use_worktrunk {
+                                suffix.push_str(" (force-delete)");
+                            }
+                            ui.muted(&format!(
+                                "  (dry-run) Would remove worktree '{}'{suffix}.",
+                                wt.path
+                            ));
                         } else {
-                            match remove_worktree(git, wt, opts.use_worktrunk, false) {
+                            match remove_worktree(git, wt, opts.use_worktrunk, force, force_delete)
+                            {
                                 Ok(()) => {
                                     wt_removed += 1;
+                                    if opts.use_worktrunk {
+                                        wt_removed_by_wt.insert(branch.clone());
+                                    }
                                     ui.success(&format!(
                                         "{} removed.",
                                         console::style(tilde_path(&wt.path)).cyan(),
@@ -273,13 +404,13 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 // 2. Remove selected orphan worktrees.
                 for wt in &orphan_unlocked {
                     let key = format!("orphan-wt:{}", wt.path);
-                    if !selected.contains(&key) {
+                    if !selected.contains(&key) || dropped.contains(&key) {
                         continue;
                     }
                     if opts.dry_run {
                         ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
                     } else {
-                        match remove_worktree(git, wt, opts.use_worktrunk, true) {
+                        match remove_worktree(git, wt, opts.use_worktrunk, true, false) {
                             Ok(()) => {
                                 wt_removed += 1;
                                 ui.success(&format!(
@@ -302,9 +433,18 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             }
 
             // 3. Delete selected merged branches.
+            //
+            // When using worktrunk and the worktree was successfully removed
+            // above, wt has already deleted the branch — skip to avoid a
+            // "branch not found" error. For all other cases (no worktree,
+            // plain-git path, wt removal failed) we fall back to
+            // `git branch -D`.
             for branch in &merged {
                 let key = format!("branch:{branch}");
-                if !selected.contains(&key) {
+                if !selected.contains(&key) || dropped.contains(&key) {
+                    continue;
+                }
+                if opts.use_worktrunk && wt_removed_by_wt.contains(branch) {
                     continue;
                 }
                 if opts.dry_run {
@@ -321,8 +461,9 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                 }
             }
-            if !opts.dry_run && total_deleted > 0 {
-                ui.summary(total_deleted, "local branch", "local branches", "deleted");
+            if !opts.dry_run && (total_deleted > 0 || !wt_removed_by_wt.is_empty()) {
+                let count = total_deleted + wt_removed_by_wt.len();
+                ui.summary(count, "local branch", "local branches", "deleted");
             }
         }
     }
@@ -425,14 +566,26 @@ fn format_locked_skip_message(wt: &Worktree) -> String {
 
 /// Remove a single worktree, optionally using worktrunk to trigger hooks.
 ///
-/// When `force` is true, passes `--force` to `git worktree remove`.
-/// This is needed for orphan worktrees whose branch ref has been deleted,
-/// since Git always considers them dirty without a branch to compare against.
-fn remove_worktree(git: &Git, wt: &Worktree, use_worktrunk: bool, force: bool) -> Result<()> {
+/// `force` passes `--force` to the underlying remover (needed when the
+/// worktree has untracked / uncommitted content, or for orphan worktrees
+/// whose branch ref has been deleted — Git always considers them dirty
+/// without a branch to compare against).
+///
+/// `force_delete` is only meaningful when using worktrunk: it adds
+/// `--force-delete` so wt also deletes branches with unmerged commits.
+/// In the plain-git path branch deletion is handled separately by the
+/// caller, so this argument is ignored there.
+fn remove_worktree(
+    git: &Git,
+    wt: &Worktree,
+    use_worktrunk: bool,
+    force: bool,
+    force_delete: bool,
+) -> Result<()> {
     if use_worktrunk {
         match &wt.branch {
-            Some(branch) => git.worktrunk_remove(branch),
-            None => git.worktrunk_remove_by_path(&wt.path),
+            Some(branch) => git.worktrunk_remove(branch, force, force_delete),
+            None => git.worktrunk_remove_by_path(&wt.path, force, force_delete),
         }
     } else {
         git.worktree_remove(&wt.path, force)
@@ -455,6 +608,7 @@ mod tests {
     fn opts_yes_skip_network() -> CleanerOptions {
         CleanerOptions {
             yes: true,
+            force: false,
             dry_run: false,
             no_fetch: true,
             no_pull: true,

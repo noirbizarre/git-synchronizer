@@ -347,6 +347,35 @@ impl Git {
         Ok(())
     }
 
+    /// Check whether a worktree's working directory has uncommitted or
+    /// untracked-not-ignored content.
+    ///
+    /// Runs `git -C <path> status --porcelain`. A non-empty output means
+    /// there are modified, staged, or untracked files (excluding ignored
+    /// ones), which is exactly what `wt remove` / `git worktree remove`
+    /// refuse to discard without `--force`.
+    pub fn worktree_is_dirty(&self, path: &str) -> Result<bool> {
+        let out = self.run(&["-C", path, "status", "--porcelain"])?;
+        Ok(!out.trim().is_empty())
+    }
+
+    /// Determine whether deleting `branch` requires `git branch -D` (i.e. the
+    /// "force-delete" / `--force-delete` flag for `wt remove`).
+    ///
+    /// Returns `false` when `branch` is fully reachable from at least one of
+    /// the provided merge `targets` (in which case `git branch -d` would
+    /// succeed). Returns `true` otherwise — typically the case for branches
+    /// detected as merged by content equality (rebase / squash merges) but
+    /// whose tip is not strictly an ancestor of any target.
+    pub fn branch_requires_force_delete(&self, branch: &str, targets: &[String]) -> Result<bool> {
+        for target in targets {
+            if self.run_exit_code(&["merge-base", "--is-ancestor", branch, target])? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     // ── Worktrunk integration ────────────────────────────────────────
 
     /// Check if a worktrunk config section exists in git config.
@@ -359,32 +388,44 @@ impl Git {
 
     /// Remove a worktree via the worktrunk CLI, triggering pre/post-remove hooks.
     ///
-    /// Uses `--foreground` to wait for hooks to complete, `--yes` to skip
-    /// wt's approval prompts (git-sync already confirmed with the user), and
-    /// `--no-delete-branch` because git-sync manages branch deletion separately.
-    pub fn worktrunk_remove(&self, branch: &str) -> Result<()> {
-        self.run_wt(&[
-            "remove",
-            branch,
-            "--foreground",
-            "--yes",
-            "--no-delete-branch",
-        ])?;
+    /// Uses `--foreground` to wait for hooks to complete and `--yes` to skip
+    /// wt's approval prompts (git-sync already confirmed with the user).
+    /// Worktrunk also deletes the branch as part of the removal — when
+    /// `force` is true the worktree is removed even with untracked / dirty
+    /// files; when `force_delete` is true the branch is deleted even if not
+    /// strictly merged into its upstream.
+    pub fn worktrunk_remove(&self, branch: &str, force: bool, force_delete: bool) -> Result<()> {
+        let mut args: Vec<&str> = vec!["remove", branch, "--foreground", "--yes"];
+        if force {
+            args.push("--force");
+        }
+        if force_delete {
+            args.push("--force-delete");
+        }
+        self.run_wt(&args)?;
         Ok(())
     }
 
     /// Remove a worktree via the worktrunk CLI using its path.
     ///
     /// Used for detached HEAD worktrees or orphans where the branch name
-    /// is not available. Falls back to path-based removal.
-    pub fn worktrunk_remove_by_path(&self, path: &str) -> Result<()> {
-        self.run_wt(&[
-            "remove",
-            path,
-            "--foreground",
-            "--yes",
-            "--no-delete-branch",
-        ])?;
+    /// is not available. Falls back to path-based removal. See
+    /// [`worktrunk_remove`](Self::worktrunk_remove) for the meaning of the
+    /// `force` and `force_delete` flags.
+    pub fn worktrunk_remove_by_path(
+        &self,
+        path: &str,
+        force: bool,
+        force_delete: bool,
+    ) -> Result<()> {
+        let mut args: Vec<&str> = vec!["remove", path, "--foreground", "--yes"];
+        if force {
+            args.push("--force");
+        }
+        if force_delete {
+            args.push("--force-delete");
+        }
+        self.run_wt(&args)?;
         Ok(())
     }
 

@@ -20,6 +20,14 @@ pub struct Cli {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
+    /// Force-remove worktrees with untracked/uncommitted changes and
+    /// force-delete branches with unmerged commits.
+    ///
+    /// Only meaningful together with `--yes`: in interactive mode the
+    /// secondary multiselect always asks for confirmation per item.
+    #[arg(short = 'f', long)]
+    pub force: bool,
+
     /// Show what would be done without actually doing it
     #[arg(short = 'n', long)]
     pub dry_run: bool,
@@ -131,6 +139,7 @@ mod tests {
     fn test_cli_default_flags() {
         let cli = Cli::parse_from(["git-sync"]);
         assert!(!cli.yes);
+        assert!(!cli.force);
         assert!(!cli.dry_run);
         assert!(!cli.verbose);
         assert!(!cli.no_fetch);

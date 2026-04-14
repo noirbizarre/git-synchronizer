@@ -165,6 +165,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
 
     let opts = cleaner::CleanerOptions {
         yes: cli.yes,
+        force: cli.force,
         dry_run: cli.dry_run,
         no_fetch: cli.no_fetch,
         no_pull: cli.no_pull,
