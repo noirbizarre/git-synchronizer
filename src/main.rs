@@ -19,6 +19,11 @@ fn main() -> Result<()> {
     let git = git::Git::new(cli.verbose);
     let ui = ui::Ui::new();
 
+    if !git.is_inside_work_tree()? {
+        ui.error("Not a git repository (or any of the parent directories).");
+        std::process::exit(1);
+    }
+
     match cli.command {
         Some(Command::Config { action }) => handle_config_command(&git, &ui, action),
         None => handle_clean(&git, &ui, &cli),
