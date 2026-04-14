@@ -105,8 +105,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     };
 
                     match result {
-                        Ok(()) => ui.success(&format!("  '{branch}' updated.")),
-                        Err(e) => ui.warning(&format!("  '{branch}': {e}")),
+                        Ok(()) => {
+                            ui.success(&format!("{} updated.", console::style(&branch).cyan()))
+                        }
+                        Err(e) => ui.error(&format!("{}: {}", console::style(&branch).red(), e)),
                     }
                 }
             }
@@ -176,7 +178,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     } else {
                         match git.branch_delete(branch) {
                             Ok(()) => total_deleted += 1,
-                            Err(e) => ui.warning(&format!("  Failed to delete '{branch}': {e}")),
+                            Err(e) => ui.error(&format!(
+                                "Failed to delete '{}': {e}",
+                                console::style(&branch).red()
+                            )),
                         }
                     }
                 }
@@ -228,7 +233,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     match git.push_delete(remote, branch) {
                         Ok(()) => remote_deleted += 1,
                         Err(e) => {
-                            ui.warning(&format!("  Failed to delete '{remote}/{branch}': {e}"));
+                            ui.error(&format!("  Failed to delete '{remote}/{branch}': {e}"));
                         }
                     }
                 }
@@ -296,10 +301,16 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         match remove_worktree(git, wt, opts.use_worktrunk, true) {
                             Ok(()) => {
                                 removed += 1;
-                                ui.success(&format!("  '{}' removed.", tilde_path(&wt.path)));
+                                ui.success(&format!(
+                                    "{} removed.",
+                                    console::style(tilde_path(&wt.path)).cyan(),
+                                ));
                             }
                             Err(e) => {
-                                ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
+                                ui.error(&format!(
+                                    "Failed to remove '{}': {e}",
+                                    console::style(tilde_path(&wt.path)).red()
+                                ));
                             }
                         }
                     }
@@ -360,10 +371,16 @@ fn remove_worktrees_for_branches(
             match remove_worktree(git, wt, opts.use_worktrunk, false) {
                 Ok(()) => {
                     removed += 1;
-                    ui.success(&format!("  '{}' removed.", tilde_path(&wt.path)));
+                    ui.success(&format!(
+                        "{} removed.",
+                        console::style(tilde_path(&wt.path)).cyan(),
+                    ));
                 }
                 Err(e) => {
-                    ui.warning(&format!("  Failed to remove '{}': {e}", wt.path));
+                    ui.error(&format!(
+                        "Failed to remove '{}': {e}",
+                        console::style(tilde_path(&wt.path)).red()
+                    ));
                 }
             }
         }
