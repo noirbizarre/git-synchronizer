@@ -9,7 +9,7 @@ orphaned worktree cleanup.
 ## Features
 
 - Delete local and remote branches that have been merged
-- Worktree cleanup: removes worktrees for deleted branches and orphaned worktrees
+- Worktree cleanup: unified prompt for branches with worktrees and orphaned worktrees
 - Respects locked worktrees: skips removal with an informational message
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
@@ -132,7 +132,7 @@ setup wizard runs automatically:
 
 ## How it works
 
-The cleanup runs in five sequential phases, each of which can be skipped via
+The cleanup runs in four sequential phases, each of which can be skipped via
 CLI flags:
 
 1. **Fetch & prune remotes** -- runs `git remote update --prune` to fetch all
@@ -153,9 +153,9 @@ CLI flags:
    and the remaining branches are still processed.
    Skipped with `--no-pull`.
 
-3. **Delete merged local branches** -- identifies branches merged into any
-   protected branch (both glob-pattern and per-branch protected) using
-   several complementary strategies:
+3. **Delete merged local branches & clean worktrees** -- identifies branches
+   merged into any protected branch (both glob-pattern and per-branch
+   protected) using several complementary strategies:
    - *Standard detection*: `git branch --merged <target>` catches fast-forward
      and regular merges.
    - *Rebase-aware detection*: `git cherry <target> <branch>` catches
@@ -168,29 +168,34 @@ CLI flags:
      changes.
 
    Per-branch protected branches also serve as merge targets, so branches
-   merged into them are detected as candidates too. The user selects which
-   branches to delete. Associated worktrees are removed first, then branches
-   are deleted with `git branch -D` (force-delete is safe here because the
-   branch is already verified as merged into a protected target). Locked
-   worktrees (via `git worktree lock`) are automatically skipped with an
-   informational message -- this also prevents their branch from being deleted,
-   since git refuses to delete a branch checked out in any worktree.
-   Skipped with `--remote-only`.
+   merged into them are detected as candidates too.
+
+   All cleanup items are presented in a **single unified multiselect**:
+   merged branches (with their worktree path shown when applicable), and
+   orphan worktrees (worktrees whose branch no longer exists locally).
+   Merged branches default to selected; orphan worktrees default to
+   unselected. The user confirms everything in one pass.
+
+   For selected branches that have worktrees, the worktree is removed first,
+   then the branch is deleted with `git branch -D` (force-delete is safe here
+   because the branch is already verified as merged into a protected target).
+   Selected orphan worktrees are also removed in the same pass. When
+   [worktrunk](https://worktrunk.dev) is enabled (via `--worktrunk` flag,
+   `sync.worktrunk` config, or auto-detection), removal is delegated to
+   `wt remove` so that pre/post-remove hooks are triggered. Otherwise falls
+   back to `git worktree remove`.
+
+   Locked worktrees (via `git worktree lock`) are automatically skipped with
+   an informational message -- this also prevents their branch from being
+   deleted, since git refuses to delete a branch checked out in any worktree.
+   Skipped with `--remote-only`. Worktree cleanup is skipped with
+   `--no-worktrees`.
 
 4. **Delete merged remote branches** -- for each configured remote, identifies
    merged remote-tracking branches with `git branch -r --merged <target>`. The
    user selects which to delete, and they are removed with
    `git push --delete --force-with-lease` for safety.
    Skipped with `--local-only`.
-
-5. **Clean orphan worktrees** -- finds worktrees whose branch no longer exists
-   locally and offers to remove them. Locked worktrees are skipped
-   automatically. When
-   [worktrunk](https://worktrunk.dev) is enabled (via `--worktrunk` flag,
-   `sync.worktrunk` config, or auto-detection), removal is delegated to
-   `wt remove` so that pre/post-remove hooks are triggered. Otherwise falls
-   back to `git worktree remove`.
-   Skipped with `--no-worktrees`.
 
 ```mermaid
 flowchart TD
@@ -216,17 +221,23 @@ flowchart TD
     PullCheck -- Yes --> LocalCheck
 
     LocalCheck{--remote-only?}
-    LocalCheck -- No --> FindLocal[Find merged local branches]
+    LocalCheck -- No --> FindLocal[Find merged local branches\n+ orphan worktrees]
     FindLocal --> Merged[Standard detection\ngit branch --merged]
     FindLocal --> Cherry[Rebase-aware detection\ngit cherry]
     FindLocal --> TreeSHA[Tree SHA comparison]
     FindLocal --> EmptyDiff[Empty-diff detection\ngit diff --quiet]
-    Merged --> SelectLocal[User selects branches]
+    FindLocal --> Orphans[Find orphan worktrees]
+    Merged --> SelectLocal[Unified multiselect:\nbranches + worktrees]
     Cherry --> SelectLocal
     TreeSHA --> SelectLocal
     EmptyDiff --> SelectLocal
-    SelectLocal --> RemoveWT1[Remove associated worktrees]
-    RemoveWT1 --> DeleteLocal[Delete local branches\ngit branch -D]
+    Orphans --> SelectLocal
+    SelectLocal --> RemoveWT[Remove selected worktrees]
+    RemoveWT --> UseWT{Worktrunk\nenabled?}
+    UseWT -- Yes --> WTRemove[wt remove]
+    UseWT -- No --> GitWTRemove[git worktree remove]
+    WTRemove --> DeleteLocal[Delete local branches\ngit branch -D]
+    GitWTRemove --> DeleteLocal
     DeleteLocal --> RemoteCheck
     LocalCheck -- Yes --> RemoteCheck
 
@@ -234,18 +245,8 @@ flowchart TD
     RemoteCheck -- No --> FindRemote[For each remote:\nfind merged remote branches]
     FindRemote --> SelectRemote[User selects branches]
     SelectRemote --> DeleteRemote[Delete remote branches\ngit push --delete --force-with-lease]
-    DeleteRemote --> WTCheck
-    RemoteCheck -- Yes --> WTCheck
-
-    WTCheck{--no-worktrees?}
-    WTCheck -- No --> FindOrphan[Find orphan worktrees]
-    FindOrphan --> ConfirmWT[User confirms removal]
-    ConfirmWT --> UseWT{Worktrunk\nenabled?}
-    UseWT -- Yes --> WTRemove[Remove worktrees\nwt remove]
-    UseWT -- No --> RemoveOrphan[Remove worktrees\ngit worktree remove]
-    WTRemove --> Done
-    RemoveOrphan --> Done
-    WTCheck -- Yes --> Done
+    DeleteRemote --> Done
+    RemoteCheck -- Yes --> Done
 
     Done([Done])
 ```

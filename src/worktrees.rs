@@ -26,6 +26,7 @@ pub fn find_orphan_worktrees(git: &Git) -> Result<Vec<Worktree>> {
 }
 
 /// Find worktrees whose branch is in the list of branches about to be deleted.
+#[cfg(test)]
 pub fn find_worktrees_for_branches(git: &Git, branches: &[String]) -> Result<Vec<Worktree>> {
     let worktrees = git.worktree_list()?;
 

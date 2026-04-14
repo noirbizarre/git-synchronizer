@@ -6,7 +6,7 @@ use crate::branches::{find_merged_local, find_merged_remote, resolve_merge_targe
 use crate::config::Config;
 use crate::git::{Git, Worktree};
 use crate::ui::Ui;
-use crate::worktrees::{find_orphan_worktrees, find_worktrees_for_branches};
+use crate::worktrees::find_orphan_worktrees;
 
 /// Return a display-friendly path with `$HOME` replaced by `~`.
 fn tilde_path(abs: &str) -> String {
@@ -117,77 +117,212 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
     let mut total_deleted = 0usize;
 
-    // ── 3. Local branches ────────────────────────────────────────────
+    // ── 3. Local branches & worktrees ────────────────────────────────
+    //
+    // Merged local branches, their associated worktrees, and orphan
+    // worktrees are presented in a single unified multiselect so the
+    // user confirms everything in one pass.
 
     if !opts.remote_only {
         let merged = find_merged_local(git, config)?;
 
-        if merged.is_empty() {
-            ui.muted("No merged local branches to delete.");
+        // Build a map of branch → worktree for branches that have one.
+        let worktrees = git.worktree_list()?;
+        let wt_map: HashMap<String, Worktree> = worktrees
+            .iter()
+            .filter(|wt| !wt.is_bare)
+            .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), (*wt).clone())))
+            .collect();
+
+        // Collect orphan worktrees (if worktree cleanup is enabled).
+        let (orphan_locked, orphan_unlocked) = if !opts.no_worktrees {
+            let orphans = find_orphan_worktrees(git)?;
+            let (locked, unlocked): (Vec<_>, Vec<_>) =
+                orphans.into_iter().partition(|wt| wt.is_locked);
+            (locked, unlocked)
         } else {
-            ui.heading(&format!("Found {} merged local branch(es):", merged.len()));
-            ui.bullet_list(&merged);
+            (Vec::new(), Vec::new())
+        };
 
-            // Build labels: append the worktree path for branches that have one.
-            let worktrees = git.worktree_list()?;
-            let wt_map: HashMap<String, String> = worktrees
-                .iter()
-                .filter(|wt| !wt.is_bare)
-                .filter_map(|wt| {
-                    wt.branch
-                        .as_ref()
-                        .map(|b| (b.clone(), tilde_path(&wt.path)))
-                })
-                .collect();
-            let labels: Vec<String> = merged
-                .iter()
-                .map(|b| match wt_map.get(b) {
-                    Some(p) => format!("{b} {}", console::style(format!("({p})")).dim().italic()),
-                    None => b.clone(),
-                })
-                .collect();
-
-            let has_worktrees = merged.iter().any(|b| wt_map.contains_key(b));
-            let prompt = if has_worktrees {
-                format!(
-                    "Select branches {} to delete",
-                    console::style("(worktrees)").dim().italic()
-                )
-            } else {
-                "Select branches to delete".to_string()
-            };
-
-            let to_delete = if opts.yes {
-                merged.clone()
-            } else {
-                let defaults: Vec<bool> = vec![true; merged.len()];
-                ui.multi_select(&prompt, &merged, &labels, &defaults, &[])?
-            };
-
-            if !to_delete.is_empty() {
-                // Remove worktrees for these branches first
-                if !opts.no_worktrees {
-                    remove_worktrees_for_branches(git, ui, opts, &to_delete)?;
+        // Report locked worktrees (both branch-associated and orphan).
+        if !opts.no_worktrees {
+            for branch in &merged {
+                if let Some(wt) = wt_map.get(branch)
+                    && wt.is_locked
+                {
+                    ui.muted(&format_locked_skip_message(wt));
                 }
+            }
+            for wt in &orphan_locked {
+                ui.muted(&format_locked_skip_message(wt));
+            }
+        }
 
-                for branch in &to_delete {
-                    if opts.dry_run {
-                        ui.muted(&format!(
-                            "  (dry-run) Would delete local branch '{branch}'."
-                        ));
-                    } else {
-                        match git.branch_delete(branch) {
-                            Ok(()) => total_deleted += 1,
-                            Err(e) => ui.error(&format!(
-                                "Failed to delete '{}': {e}",
-                                console::style(&branch).red()
-                            )),
+        let has_merged = !merged.is_empty();
+        let has_orphans = !orphan_unlocked.is_empty();
+
+        if !has_merged && !has_orphans {
+            ui.muted("No merged local branches to delete.");
+            if !opts.no_worktrees {
+                ui.muted("No orphan worktrees to remove.");
+            }
+        } else {
+            // --- Build the unified multiselect ---
+
+            let mut values: Vec<String> = Vec::new();
+            let mut labels: Vec<String> = Vec::new();
+            let mut defaults: Vec<bool> = Vec::new();
+            let mut hints: Vec<String> = Vec::new();
+
+            // Merged branches (with worktree path shown in label if applicable).
+            for branch in &merged {
+                values.push(format!("branch:{branch}"));
+                let has_unlocked_wt = wt_map.get(branch).is_some_and(|wt| !wt.is_locked);
+                if !opts.no_worktrees && has_unlocked_wt {
+                    let wt = &wt_map[branch];
+                    labels.push(format!(
+                        "{branch} {}",
+                        console::style(format!("({})", tilde_path(&wt.path)))
+                            .dim()
+                            .italic()
+                    ));
+                    hints.push("branch + worktree".to_string());
+                } else {
+                    labels.push(branch.clone());
+                    hints.push(String::new());
+                }
+                defaults.push(true);
+            }
+
+            // Orphan worktrees.
+            for wt in &orphan_unlocked {
+                values.push(format!("orphan-wt:{}", wt.path));
+                labels.push(tilde_path(&wt.path));
+                hints.push(format!(
+                    "orphan worktree, branch: {}",
+                    wt.branch.as_deref().unwrap_or("detached")
+                ));
+                defaults.push(false);
+            }
+
+            // Heading.
+            let heading = match (has_merged, has_orphans) {
+                (true, true) => format!(
+                    "Found {} merged local branch(es) and {} orphan worktree(s):",
+                    merged.len(),
+                    orphan_unlocked.len()
+                ),
+                (true, false) => {
+                    format!("Found {} merged local branch(es):", merged.len())
+                }
+                (false, true) => format!("Found {} orphan worktree(s):", orphan_unlocked.len()),
+                _ => unreachable!(),
+            };
+            ui.heading(&heading);
+
+            let prompt = if has_merged && has_orphans {
+                "Select branches and worktrees to delete"
+            } else if has_orphans {
+                "Select orphan worktrees to remove"
+            } else {
+                "Select branches to delete"
+            };
+
+            let selected = if opts.yes {
+                values.clone()
+            } else {
+                ui.multi_select(prompt, &values, &labels, &defaults, &hints)?
+            };
+
+            // --- Process the selections ---
+
+            // 1. Remove worktrees for selected merged branches first.
+            if !opts.no_worktrees {
+                let mut wt_removed = 0usize;
+                for branch in &merged {
+                    let key = format!("branch:{branch}");
+                    if !selected.contains(&key) {
+                        continue;
+                    }
+                    if let Some(wt) = wt_map.get(branch) {
+                        if wt.is_locked {
+                            continue; // already reported above
+                        }
+                        if opts.dry_run {
+                            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                        } else {
+                            match remove_worktree(git, wt, opts.use_worktrunk, false) {
+                                Ok(()) => {
+                                    wt_removed += 1;
+                                    ui.success(&format!(
+                                        "{} removed.",
+                                        console::style(tilde_path(&wt.path)).cyan(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    ui.error(&format!(
+                                        "Failed to remove '{}': {e}",
+                                        console::style(tilde_path(&wt.path)).red()
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
-                if !opts.dry_run {
-                    ui.summary(total_deleted, "local branch", "local branches", "deleted");
+
+                // 2. Remove selected orphan worktrees.
+                for wt in &orphan_unlocked {
+                    let key = format!("orphan-wt:{}", wt.path);
+                    if !selected.contains(&key) {
+                        continue;
+                    }
+                    if opts.dry_run {
+                        ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                    } else {
+                        match remove_worktree(git, wt, opts.use_worktrunk, true) {
+                            Ok(()) => {
+                                wt_removed += 1;
+                                ui.success(&format!(
+                                    "{} removed.",
+                                    console::style(tilde_path(&wt.path)).cyan(),
+                                ));
+                            }
+                            Err(e) => {
+                                ui.error(&format!(
+                                    "Failed to remove '{}': {e}",
+                                    console::style(tilde_path(&wt.path)).red()
+                                ));
+                            }
+                        }
+                    }
                 }
+                if !opts.dry_run && wt_removed > 0 {
+                    ui.summary(wt_removed, "worktree", "worktrees", "removed");
+                }
+            }
+
+            // 3. Delete selected merged branches.
+            for branch in &merged {
+                let key = format!("branch:{branch}");
+                if !selected.contains(&key) {
+                    continue;
+                }
+                if opts.dry_run {
+                    ui.muted(&format!(
+                        "  (dry-run) Would delete local branch '{branch}'."
+                    ));
+                } else {
+                    match git.branch_delete(branch) {
+                        Ok(()) => total_deleted += 1,
+                        Err(e) => ui.error(&format!(
+                            "Failed to delete '{}': {e}",
+                            console::style(&branch).red()
+                        )),
+                    }
+                }
+            }
+            if !opts.dry_run && total_deleted > 0 {
+                ui.summary(total_deleted, "local branch", "local branches", "deleted");
             }
         }
     }
@@ -249,79 +384,6 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         }
     }
 
-    // ── 5. Orphan worktrees ──────────────────────────────────────────
-
-    if !opts.no_worktrees {
-        let orphans = find_orphan_worktrees(git)?;
-
-        if orphans.is_empty() {
-            ui.muted("No orphan worktrees to remove.");
-        } else {
-            // Partition into locked and unlocked orphan worktrees
-            let (locked, unlocked): (Vec<_>, Vec<_>) = orphans.iter().partition(|wt| wt.is_locked);
-
-            // Report locked worktrees
-            for wt in &locked {
-                ui.muted(&format_locked_skip_message(wt));
-            }
-
-            if unlocked.is_empty() {
-                ui.muted("No orphan worktrees to remove.");
-            } else {
-                let values: Vec<String> = unlocked.iter().map(|wt| wt.path.clone()).collect();
-                let labels: Vec<String> = unlocked.iter().map(|wt| tilde_path(&wt.path)).collect();
-                let hints: Vec<String> = unlocked
-                    .iter()
-                    .map(|wt| format!("branch: {}", wt.branch.as_deref().unwrap_or("detached")))
-                    .collect();
-
-                ui.heading(&format!("Found {} orphan worktree(s):", unlocked.len()));
-
-                let to_remove = if opts.yes {
-                    values.clone()
-                } else {
-                    let defaults: Vec<bool> = vec![false; unlocked.len()];
-                    ui.multi_select(
-                        "Select orphan worktrees to remove",
-                        &values,
-                        &labels,
-                        &defaults,
-                        &hints,
-                    )?
-                };
-
-                let mut removed = 0usize;
-                for wt in &unlocked {
-                    if !to_remove.contains(&wt.path) {
-                        continue;
-                    }
-                    if opts.dry_run {
-                        ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
-                    } else {
-                        match remove_worktree(git, wt, opts.use_worktrunk, true) {
-                            Ok(()) => {
-                                removed += 1;
-                                ui.success(&format!(
-                                    "{} removed.",
-                                    console::style(tilde_path(&wt.path)).cyan(),
-                                ));
-                            }
-                            Err(e) => {
-                                ui.error(&format!(
-                                    "Failed to remove '{}': {e}",
-                                    console::style(tilde_path(&wt.path)).red()
-                                ));
-                            }
-                        }
-                    }
-                }
-                if !opts.dry_run && removed > 0 {
-                    ui.summary(removed, "worktree", "worktrees", "removed");
-                }
-            }
-        }
-    }
-
     // ── Done ─────────────────────────────────────────────────────────
 
     ui.blank();
@@ -329,64 +391,6 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         ui.muted("Dry run complete. No changes were made.");
     } else {
         ui.success("Done.");
-    }
-
-    Ok(())
-}
-
-/// Remove worktrees that are associated with branches about to be deleted.
-///
-/// The user has already confirmed the deletion via the branch multiselect
-/// (which shows the worktree path next to each branch), so no additional
-/// prompt is needed here.
-fn remove_worktrees_for_branches(
-    git: &Git,
-    ui: &Ui,
-    opts: &CleanerOptions,
-    branches: &[String],
-) -> Result<()> {
-    let worktrees = find_worktrees_for_branches(git, branches)?;
-
-    if worktrees.is_empty() {
-        return Ok(());
-    }
-
-    // Partition into locked and unlocked worktrees
-    let (locked, unlocked): (Vec<_>, Vec<_>) = worktrees.iter().partition(|wt| wt.is_locked);
-
-    // Report locked worktrees
-    for wt in &locked {
-        ui.muted(&format_locked_skip_message(wt));
-    }
-
-    if unlocked.is_empty() {
-        return Ok(());
-    }
-
-    let mut removed = 0usize;
-    for wt in &unlocked {
-        if opts.dry_run {
-            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
-        } else {
-            match remove_worktree(git, wt, opts.use_worktrunk, false) {
-                Ok(()) => {
-                    removed += 1;
-                    ui.success(&format!(
-                        "{} removed.",
-                        console::style(tilde_path(&wt.path)).cyan(),
-                    ));
-                }
-                Err(e) => {
-                    ui.error(&format!(
-                        "Failed to remove '{}': {e}",
-                        console::style(tilde_path(&wt.path)).red()
-                    ));
-                }
-            }
-        }
-    }
-    if !opts.dry_run && removed > 0 {
-        ui.summary(removed, "worktree", "worktrees", "removed");
     }
 
     Ok(())
@@ -998,6 +1002,196 @@ mod tests {
         assert!(
             branches.contains(&"feature/wt-dry".to_string()),
             "branch should survive dry run"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_unified_cleanup_branches_and_orphan_worktrees() -> Result<()> {
+        // This test verifies that merged branches (with worktrees) and orphan
+        // worktrees are all cleaned up in a single unified pass (no separate
+        // orphan worktree phase).
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a merged branch with a worktree
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/with-wt"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("with-wt.txt"), "branch with worktree")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "feature with worktree"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "feature/with-wt"])
+            .current_dir(path)
+            .output()?;
+
+        let branch_wt_path = path.join("wt-branch");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                branch_wt_path.to_str().unwrap(),
+                "feature/with-wt",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        // Create a branch with a worktree, then orphan it by deleting the branch ref
+        StdCommand::new("git")
+            .args(["branch", "feature/orphan-wt"])
+            .current_dir(path)
+            .output()?;
+
+        let orphan_wt_path = path.join("wt-orphan");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                orphan_wt_path.to_str().unwrap(),
+                "feature/orphan-wt",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        // Delete the branch ref to make the worktree orphaned
+        StdCommand::new("git")
+            .args(["update-ref", "-d", "refs/heads/feature/orphan-wt"])
+            .current_dir(path)
+            .output()?;
+
+        // Verify setup
+        assert!(branch_wt_path.exists(), "branch worktree should exist");
+        assert!(orphan_wt_path.exists(), "orphan worktree should exist");
+        let branches_before = Git::with_workdir(false, path).local_branches()?;
+        assert!(branches_before.contains(&"feature/with-wt".to_string()));
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let opts = opts_yes_skip_network();
+
+        run(&git, &config, &ui, &opts)?;
+
+        // The merged branch and its worktree should be removed
+        assert!(
+            !branch_wt_path.exists(),
+            "branch worktree should be removed"
+        );
+        let branches_after = git.local_branches()?;
+        assert!(
+            !branches_after.contains(&"feature/with-wt".to_string()),
+            "merged branch should be deleted"
+        );
+
+        // The orphan worktree should also be removed (unified with the branch pass)
+        assert!(
+            !orphan_wt_path.exists(),
+            "orphan worktree should be removed in the unified pass"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_no_worktrees_skips_orphan_cleanup() -> Result<()> {
+        // When --no-worktrees is set, orphan worktrees should not be touched
+        // even though they share the same phase as branch deletion.
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a branch with a worktree, then orphan it
+        StdCommand::new("git")
+            .args(["branch", "feature/orphan-skip"])
+            .current_dir(path)
+            .output()?;
+
+        let orphan_wt_path = path.join("wt-orphan-skip");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                orphan_wt_path.to_str().unwrap(),
+                "feature/orphan-skip",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        StdCommand::new("git")
+            .args(["update-ref", "-d", "refs/heads/feature/orphan-skip"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(orphan_wt_path.exists(), "orphan worktree should exist");
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let mut opts = opts_yes_skip_network();
+        opts.no_worktrees = true;
+
+        run(&git, &config, &ui, &opts)?;
+
+        // Orphan worktree should survive because --no-worktrees was set
+        assert!(
+            orphan_wt_path.exists(),
+            "orphan worktree should survive with --no-worktrees"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_dry_run_preserves_orphan_worktrees() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a branch with a worktree, then orphan it
+        StdCommand::new("git")
+            .args(["branch", "feature/orphan-dry"])
+            .current_dir(path)
+            .output()?;
+
+        let orphan_wt_path = path.join("wt-orphan-dry");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                orphan_wt_path.to_str().unwrap(),
+                "feature/orphan-dry",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        StdCommand::new("git")
+            .args(["update-ref", "-d", "refs/heads/feature/orphan-dry"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(orphan_wt_path.exists());
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let mut opts = opts_yes_skip_network();
+        opts.dry_run = true;
+
+        run(&git, &config, &ui, &opts)?;
+
+        // Dry run should preserve the orphan worktree
+        assert!(
+            orphan_wt_path.exists(),
+            "orphan worktree should survive dry run"
         );
         Ok(())
     }
