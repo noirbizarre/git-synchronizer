@@ -4,8 +4,6 @@ use console::{Style, Term};
 pub struct Ui {
     term: Term,
     pub heading_style: Style,
-    pub success_style: Style,
-    pub warning_style: Style,
     pub muted_style: Style,
     pub bold_style: Style,
 }
@@ -21,8 +19,6 @@ impl Ui {
         Self {
             term: Term::stderr(),
             heading_style: Style::new().cyan().bold(),
-            success_style: Style::new().green(),
-            warning_style: Style::new().yellow(),
             muted_style: Style::new().dim(),
             bold_style: Style::new().bold(),
         }
@@ -40,18 +36,32 @@ impl Ui {
             .write_line(&format!("\n{}", self.heading_style.apply_to(text)));
     }
 
-    /// Print a success message.
+    /// Print a success message with a green checkmark prefix.
+    ///
+    /// The text is printed as-is (not re-colored), so callers can embed
+    /// pre-styled fragments via `console::style()`.
     pub fn success(&self, text: &str) {
         let _ = self
             .term
-            .write_line(&self.success_style.apply_to(text).to_string());
+            .write_line(&format!("{} {text}", console::style("✔").green()));
     }
 
-    /// Print a warning.
+    /// Print a warning with a yellow ⚠ prefix.
+    ///
+    /// The text is printed as-is, so callers can embed pre-styled fragments.
     pub fn warning(&self, text: &str) {
         let _ = self
             .term
-            .write_line(&self.warning_style.apply_to(text).to_string());
+            .write_line(&format!("{} {text}", console::style("⚠").yellow()));
+    }
+
+    /// Print an error with a red ✘ prefix.
+    ///
+    /// The text is printed as-is, so callers can embed pre-styled fragments.
+    pub fn error(&self, text: &str) {
+        let _ = self
+            .term
+            .write_line(&format!("{} {text}", console::style("✘").red()));
     }
 
     /// Print muted/dim text.
@@ -125,10 +135,16 @@ impl Ui {
             .interact::<String>()?)
     }
 
-    /// Print a summary line: "1 branch deleted." or "3 branches deleted."
+    /// Print a summary line: "✔ 1 branch deleted." or "✔ 3 branches deleted."
+    ///
+    /// The count and noun are styled in cyan; the verb and period use the
+    /// terminal's default colour.
     pub fn summary(&self, count: usize, singular: &str, plural: &str, verb: &str) {
         let noun = if count == 1 { singular } else { plural };
-        self.success(&format!("{count} {noun} {verb}."));
+        self.success(&format!(
+            "{} {verb}.",
+            console::style(format!("{count} {noun}")).cyan(),
+        ));
     }
 }
 
@@ -142,5 +158,41 @@ mod tests {
         // Smoke test: styles should be constructable
         let styled = ui.heading_style.apply_to("test");
         assert!(styled.to_string().contains("test"));
+    }
+
+    #[test]
+    fn test_success_does_not_panic() {
+        let ui = Ui::new();
+        ui.success("plain message");
+        ui.success(&format!("with {} styling", console::style("cyan").cyan()));
+    }
+
+    #[test]
+    fn test_warning_does_not_panic() {
+        let ui = Ui::new();
+        ui.warning("plain warning");
+        ui.warning(&format!(
+            "with {} styling",
+            console::style("yellow").yellow()
+        ));
+    }
+
+    #[test]
+    fn test_error_does_not_panic() {
+        let ui = Ui::new();
+        ui.error("plain error");
+        ui.error(&format!("with {} styling", console::style("red").red()));
+    }
+
+    #[test]
+    fn test_summary_singular() {
+        let ui = Ui::new();
+        ui.summary(1, "branch", "branches", "deleted");
+    }
+
+    #[test]
+    fn test_summary_plural() {
+        let ui = Ui::new();
+        ui.summary(5, "branch", "branches", "deleted");
     }
 }

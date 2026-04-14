@@ -88,7 +88,10 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 
         ConfigAction::AddProtected { pattern } => {
             git.config_add(&format!("{}.protected", config::SECTION), &pattern)?;
-            ui.success(&format!("Added protected pattern: {pattern}"));
+            ui.success(&format!(
+                "Added protected pattern: {}",
+                console::style(pattern).cyan()
+            ));
             Ok(())
         }
 
@@ -100,13 +103,16 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
             for p in &protected {
                 git.config_add(&key, p)?;
             }
-            ui.success(&format!("Removed protected pattern: {pattern}"));
+            ui.success(&format!(
+                "Removed protected pattern: {}",
+                console::style(pattern).cyan()
+            ));
             Ok(())
         }
 
         ConfigAction::AddRemote { name } => {
             git.config_add(&format!("{}.remote", config::SECTION), &name)?;
-            ui.success(&format!("Added remote: {name}"));
+            ui.success(&format!("Added remote: {}", console::style(&name).cyan()));
             Ok(())
         }
 
@@ -118,19 +124,25 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
             for r in &remotes {
                 git.config_add(&key, r)?;
             }
-            ui.success(&format!("Removed remote: {name}"));
+            ui.success(&format!("Removed remote: {}", console::style(&name).cyan()));
             Ok(())
         }
 
         ConfigAction::Protect { branch } => {
             git.set_branch_protected(&branch, true)?;
-            ui.success(&format!("Branch '{branch}' marked as protected"));
+            ui.success(&format!(
+                "Branch '{}' marked as protected",
+                console::style(&branch).cyan()
+            ));
             Ok(())
         }
 
         ConfigAction::Unprotect { branch } => {
             git.set_branch_protected(&branch, false)?;
-            ui.success(&format!("Branch '{branch}' is no longer protected"));
+            ui.success(&format!(
+                "Branch '{}' is no longer protected",
+                console::style(&branch).cyan()
+            ));
             Ok(())
         }
 
