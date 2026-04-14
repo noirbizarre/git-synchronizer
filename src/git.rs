@@ -147,6 +147,25 @@ impl Git {
 
     // ── Repository info ──────────────────────────────────────────────
 
+    /// Check whether the current working directory is inside a git work tree.
+    ///
+    /// Returns `Ok(true)` when inside a repository, `Ok(false)` otherwise.
+    /// This intentionally swallows stderr so callers can show a friendly
+    /// error message instead of raw git output.
+    pub fn is_inside_work_tree(&self) -> Result<bool> {
+        let mut cmd = Command::new("git");
+        cmd.args(["rev-parse", "--is-inside-work-tree"]);
+        if let Some(dir) = &self.workdir {
+            cmd.current_dir(dir);
+        }
+
+        let output = cmd
+            .output()
+            .context("failed to execute: git rev-parse --is-inside-work-tree")?;
+
+        Ok(output.status.success())
+    }
+
     /// Return the current branch name.
     pub fn current_branch(&self) -> Result<String> {
         self.run(&["rev-parse", "--abbrev-ref", "HEAD"])

@@ -1236,3 +1236,31 @@ fn pull_dry_run_does_not_update() {
     let after = git_rev_parse(&work_path, "HEAD");
     assert_eq!(before, after, "HEAD should NOT change in dry-run mode");
 }
+
+// ── Not a git repository ────────────────────────────────────────────
+
+#[test]
+fn exits_with_error_when_not_in_a_git_repo() {
+    let dir = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("Not a git repository"));
+}
+
+#[test]
+fn no_stack_trace_when_not_in_a_git_repo() {
+    let dir = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Error:").not())
+        .stderr(predicate::str::contains("stack backtrace").not());
+}
