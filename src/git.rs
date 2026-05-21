@@ -347,6 +347,40 @@ impl Git {
         Ok(())
     }
 
+    /// Check whether the worktree at `path` has untracked or uncommitted changes.
+    ///
+    /// Runs `git -C <path> status --porcelain`; a non-empty output means the
+    /// worktree is dirty.
+    pub fn worktree_dirty(&self, path: &str) -> Result<bool> {
+        let out = run_git(
+            &["-C", path, "status", "--porcelain"],
+            self.verbose,
+            self.workdir.as_deref(),
+        )?;
+        Ok(!out.trim().is_empty())
+    }
+
+    /// Check whether `branch` has at least one commit not present in **any**
+    /// of the given `targets`.
+    ///
+    /// Used to detect branches that would be rejected by `wt remove` (without
+    /// `--force-delete`) or by `git branch -d`. When `targets` is empty the
+    /// branch is considered unmerged.
+    pub fn branch_has_unmerged_commits(&self, branch: &str, targets: &[String]) -> Result<bool> {
+        if targets.is_empty() {
+            return Ok(true);
+        }
+        for t in targets {
+            // `git log -1 --format=%H <target>..<branch>` is empty when the
+            // branch contains no commits absent from `target`.
+            let out = self.run(&["log", "-1", "--format=%H", &format!("{t}..{branch}")])?;
+            if out.trim().is_empty() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     // ── Worktrunk integration ────────────────────────────────────────
 
     /// Check if a worktrunk config section exists in git config.
@@ -359,32 +393,46 @@ impl Git {
 
     /// Remove a worktree via the worktrunk CLI, triggering pre/post-remove hooks.
     ///
-    /// Uses `--foreground` to wait for hooks to complete, `--yes` to skip
-    /// wt's approval prompts (git-sync already confirmed with the user), and
-    /// `--no-delete-branch` because git-sync manages branch deletion separately.
-    pub fn worktrunk_remove(&self, branch: &str) -> Result<()> {
-        self.run_wt(&[
-            "remove",
-            branch,
-            "--foreground",
-            "--yes",
-            "--no-delete-branch",
-        ])?;
+    /// Uses `--foreground` to wait for hooks to complete and `--yes` to skip
+    /// wt's approval prompts (git-sync already confirmed with the user).
+    /// `wt` deletes the associated branch itself; git-sync skips its own
+    /// `git branch -D` for branches removed this way.
+    ///
+    /// When `force` is true, passes `--force` so removal succeeds despite
+    /// untracked/uncommitted changes. When `force_delete` is true, passes
+    /// `--force-delete` so branch deletion succeeds even when the branch has
+    /// commits not merged into a target.
+    pub fn worktrunk_remove(&self, branch: &str, force: bool, force_delete: bool) -> Result<()> {
+        let mut args: Vec<&str> = vec!["remove", branch, "--foreground", "--yes"];
+        if force {
+            args.push("--force");
+        }
+        if force_delete {
+            args.push("--force-delete");
+        }
+        self.run_wt(&args)?;
         Ok(())
     }
 
     /// Remove a worktree via the worktrunk CLI using its path.
     ///
     /// Used for detached HEAD worktrees or orphans where the branch name
-    /// is not available. Falls back to path-based removal.
-    pub fn worktrunk_remove_by_path(&self, path: &str) -> Result<()> {
-        self.run_wt(&[
-            "remove",
-            path,
-            "--foreground",
-            "--yes",
-            "--no-delete-branch",
-        ])?;
+    /// is not available. Falls back to path-based removal. See
+    /// [`worktrunk_remove`](Self::worktrunk_remove) for flag semantics.
+    pub fn worktrunk_remove_by_path(
+        &self,
+        path: &str,
+        force: bool,
+        force_delete: bool,
+    ) -> Result<()> {
+        let mut args: Vec<&str> = vec!["remove", path, "--foreground", "--yes"];
+        if force {
+            args.push("--force");
+        }
+        if force_delete {
+            args.push("--force-delete");
+        }
+        self.run_wt(&args)?;
         Ok(())
     }
 
@@ -1719,6 +1767,67 @@ locked work in progress, do not remove
             "branch ref should have advanced after fetch update"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_worktree_dirty_detects_untracked() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Clean repo → not dirty
+        assert!(!git.worktree_dirty(path.to_str().unwrap())?);
+
+        // Add an untracked file → dirty
+        std::fs::write(path.join("untracked.txt"), "noise")?;
+        assert!(git.worktree_dirty(path.to_str().unwrap())?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_worktree_dirty_detects_modified() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Commit a tracked file
+        std::fs::write(path.join("file.txt"), "v1")?;
+        Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "add file"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(!git.worktree_dirty(path.to_str().unwrap())?);
+
+        // Modify it → dirty
+        std::fs::write(path.join("file.txt"), "v2")?;
+        assert!(git.worktree_dirty(path.to_str().unwrap())?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_branch_has_unmerged_commits() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo_with_branches()?;
+        let path = dir.path();
+
+        let targets = vec!["main".to_string()];
+
+        // feature/done is merged into main → no unmerged commits
+        assert!(!git.branch_has_unmerged_commits("feature/done", &targets)?);
+
+        // feature/wip is NOT merged into main → has unmerged commits
+        assert!(git.branch_has_unmerged_commits("feature/wip", &targets)?);
+
+        // Empty targets → considered unmerged
+        assert!(git.branch_has_unmerged_commits("feature/done", &[])?);
+
+        // Make sure `path` is consumed so the temp dir lives long enough
+        let _ = path;
         Ok(())
     }
 }
