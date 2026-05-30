@@ -305,7 +305,7 @@ impl Git {
     /// Note: this only detects cases where the target tree contains at least
     /// everything the branch tree has. When target advances with unrelated
     /// changes after the squash-merge, the diff will no longer be empty;
-    /// those cases are handled by the simulated merge check (plan 1.3).
+    /// those cases are handled by [`Self::merge_adds_nothing`].
     pub fn diff_empty(&self, target: &str, branch: &str) -> Result<bool> {
         self.run_exit_code(&["diff", "--quiet", target, branch])
     }
@@ -431,6 +431,63 @@ impl Git {
         }
 
         Ok(branch_ids.iter().all(|id| target_ids.contains(id)))
+    }
+
+    /// Simulate merging `branch` into `target` and check the result tree.
+    ///
+    /// Runs `git merge-tree --write-tree <target> <branch>` which performs an
+    /// in-memory three-way merge and prints the resulting tree OID on stdout.
+    /// If that OID matches `target`'s current tree, the merge would add
+    /// nothing — meaning the branch's content is already fully represented in
+    /// target.
+    ///
+    /// This is the strongest squash-merge detector available: unlike
+    /// [`Self::diff_empty`] and [`Self::trees_match`], it still returns
+    /// `true` after the target has advanced with unrelated commits that
+    /// touch different files.
+    ///
+    /// Returns `Ok(false)` when the merge would conflict (non-zero exit) or
+    /// when the resulting tree differs from `target`'s tree. Requires
+    /// `git >= 2.38` for the `--write-tree` option.
+    pub fn merge_adds_nothing(&self, target: &str, branch: &str) -> Result<bool> {
+        let args = ["merge-tree", "--write-tree", target, branch];
+        if self.verbose {
+            eprintln!("  $ git {}", args.join(" "));
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        if let Some(dir) = &self.workdir {
+            cmd.current_dir(dir);
+        }
+
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to execute: git {}", args.join(" ")))?;
+
+        match output.status.code() {
+            Some(0) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let merged_tree = match stdout.lines().next() {
+                    Some(line) => line.trim().to_string(),
+                    None => return Ok(false),
+                };
+                let target_tree = self.run(&["rev-parse", &format!("{target}^{{tree}}")])?;
+                Ok(merged_tree == target_tree.trim())
+            }
+            // Non-zero exit: typically conflicts (exit 1). Treat as "merge
+            // would add something" rather than an error, so callers can keep
+            // probing other strategies.
+            Some(_) => Ok(false),
+            None => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!(
+                    "git {} terminated by signal:\n{}",
+                    args.join(" "),
+                    stderr.trim()
+                );
+            }
+        }
     }
 
     // ── Branch mutations ─────────────────────────────────────────────
@@ -1289,6 +1346,113 @@ locked work in progress, do not remove
             .output()?;
 
         assert!(!git.trees_match("main", "feature/unmerged")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_adds_nothing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        // Create a feature branch that touches a.txt
+        Command::new("git")
+            .args(["checkout", "-b", "feature/squash"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("a.txt"), "feature content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "feature: add a.txt"])
+            .current_dir(path)
+            .output()?;
+
+        // Squash-merge into main
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["merge", "--squash", "feature/squash"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash merge feature/squash"])
+            .current_dir(path)
+            .output()?;
+
+        // Advance main with an unrelated commit touching a different file —
+        // this defeats trees_match and diff_empty.
+        std::fs::write(path.join("b.txt"), "unrelated change")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "main: unrelated b.txt"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // Sanity check: the cheaper detectors no longer fire.
+        assert!(!git.trees_match("main", "feature/squash")?);
+        assert!(!git.diff_empty("main", "feature/squash")?);
+
+        // Simulated merge still catches it: merging feature/squash into main
+        // produces main's current tree (the squashed changes are already
+        // present, the unrelated b.txt is preserved).
+        assert!(git.merge_adds_nothing("main", "feature/squash")?);
+
+        // Negative case: a branch with real new content should not be detected.
+        Command::new("git")
+            .args(["checkout", "-b", "feature/divergent"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("c.txt"), "new content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "feature: c.txt"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(!git.merge_adds_nothing("main", "feature/divergent")?);
 
         Ok(())
     }
