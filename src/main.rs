@@ -8,25 +8,70 @@ mod test_helpers;
 mod ui;
 mod worktrees;
 
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Command, ConfigAction};
+use git::{GitCommandError, GitErrorKind};
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let git = git::Git::new(cli.verbose);
     let ui = ui::Ui::new();
 
-    if !git.is_inside_work_tree()? {
-        ui.error("Not a git repository (or any of the parent directories).");
-        std::process::exit(1);
+    match git.is_inside_work_tree() {
+        Ok(true) => {}
+        Ok(false) => {
+            ui.error("Not a git repository (or any of the parent directories).");
+            return ExitCode::FAILURE;
+        }
+        Err(err) => {
+            report_error(&ui, &err);
+            return ExitCode::FAILURE;
+        }
     }
 
-    match cli.command {
+    let result = match cli.command {
         Some(Command::Config { action }) => handle_config_command(&git, &ui, action),
         None => handle_clean(&git, &ui, &cli),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            report_error(&ui, &err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Render an `anyhow::Error` chain using the same UI styling as the rest of
+/// the CLI, without ever printing a Rust stack backtrace.
+///
+/// When the root cause is a [`GitCommandError`] classified as a network or
+/// auth failure, the headline gets a matching prefix so users can tell at a
+/// glance "this is my network, not a bug".
+fn report_error(ui: &ui::Ui, err: &anyhow::Error) {
+    let headline = if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
+        let cause = gerr.short_cause();
+        match gerr.kind {
+            GitErrorKind::Network => format!("Network error: {cause}"),
+            GitErrorKind::Auth => format!("Authentication error: {cause}"),
+            GitErrorKind::Other => format!("{err}"),
+        }
+    } else {
+        format!("{err}")
+    };
+
+    ui.error(&headline);
+
+    // Print the rest of the causal chain (skipping the headline we already
+    // rendered). Each cause is dimmed for readability.
+    for cause in err.chain().skip(1) {
+        ui.muted(&format!("  caused by: {cause}"));
     }
 }
 
@@ -219,4 +264,54 @@ fn resolve_worktrunk(git: &git::Git, ui: &ui::Ui, cli: &Cli, cfg: &config::Confi
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::{GitCommandError, GitErrorKind};
+
+    fn git_err(kind: GitErrorKind, stderr: &str) -> anyhow::Error {
+        anyhow::Error::new(GitCommandError {
+            program: "git".into(),
+            args: vec!["fetch".into()],
+            exit_code: Some(1),
+            stderr: stderr.into(),
+            kind,
+        })
+    }
+
+    #[test]
+    fn report_error_runs_for_network_kind() {
+        let ui = ui::Ui::new();
+        report_error(
+            &ui,
+            &git_err(
+                GitErrorKind::Network,
+                "ssh: connect to host github.com port 22: No route to host",
+            ),
+        );
+    }
+
+    #[test]
+    fn report_error_runs_for_auth_kind() {
+        let ui = ui::Ui::new();
+        report_error(
+            &ui,
+            &git_err(GitErrorKind::Auth, "Permission denied (publickey)."),
+        );
+    }
+
+    #[test]
+    fn report_error_runs_for_other_kind() {
+        let ui = ui::Ui::new();
+        report_error(&ui, &git_err(GitErrorKind::Other, "fatal: bad refspec"));
+    }
+
+    #[test]
+    fn report_error_runs_for_plain_anyhow() {
+        let ui = ui::Ui::new();
+        let err = anyhow::anyhow!("top").context("inner").context("outer");
+        report_error(&ui, &err);
+    }
 }
