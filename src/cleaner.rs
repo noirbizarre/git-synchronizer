@@ -1635,4 +1635,128 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Helper: stage and commit `path`'s tracked files with the given message.
+    fn commit_all(path: &std::path::Path, msg: &str) {
+        StdCommand::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-m", msg])
+            .current_dir(path)
+            .output()
+            .unwrap();
+    }
+
+    /// Create a squash-merged feature branch + worktree. Returns the
+    /// worktree path. Squash-merge produces a target commit whose SHA
+    /// differs from the feature tip, so `branch_has_unmerged_commits`
+    /// (raw reachability) reports the branch as unmerged, while
+    /// `find_merged_local` still detects it via diff/patch-id.
+    fn make_squash_merged_with_worktree(
+        path: &std::path::Path,
+        branch: &str,
+        wt_dirname: &str,
+    ) -> std::path::PathBuf {
+        StdCommand::new("git")
+            .args(["checkout", "-b", branch])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        std::fs::write(path.join(format!("{wt_dirname}.txt")), "feature work").unwrap();
+        commit_all(path, &format!("{branch}: feature work"));
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["merge", "--squash", branch])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        commit_all(path, &format!("squash {branch}"));
+
+        let wt_path = path.join(wt_dirname);
+        StdCommand::new("git")
+            .args(["worktree", "add", wt_path.to_str().unwrap(), branch])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        wt_path
+    }
+
+    #[test]
+    fn test_run_auto_force_squash_merged_worktree_no_prompt() -> Result<()> {
+        // A squash-merged branch is detected as merged by find_merged_local
+        // but reported as having unmerged commits by branch_has_unmerged_commits.
+        // With use_worktrunk=true and a clean worktree, the cleaner should
+        // auto force-delete (set force_delete=true) without surfacing a second
+        // prompt. Using dry_run=true so no `wt` binary call is attempted.
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Seed an initial commit on main so squash-merge has a parent.
+        std::fs::write(path.join("seed.txt"), "seed")?;
+        commit_all(path, "seed");
+
+        let wt_path = make_squash_merged_with_worktree(path, "feature/squashed", "wt-squashed");
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let mut opts = opts_yes_skip_network();
+        opts.use_worktrunk = true;
+        opts.dry_run = true;
+
+        // Should run without error and exercise the auto_force code path.
+        run(&git, &config, &ui, &opts)?;
+
+        // Dry-run preserves everything.
+        assert!(wt_path.exists(), "worktree should survive dry-run");
+        let branches = git.local_branches()?;
+        assert!(
+            branches.contains(&"feature/squashed".to_string()),
+            "branch should survive dry-run"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_dirty_and_unmerged_goes_to_prompt_not_auto_force() -> Result<()> {
+        // When a worktree is BOTH dirty and unmerged (squash-merged), the
+        // dirty path wins: the entry must reach the second prompt rather
+        // than being auto force-deleted. With opts.yes=true the prompt is
+        // auto-confirmed, which under dry_run leaves everything in place.
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        std::fs::write(path.join("seed.txt"), "seed")?;
+        commit_all(path, "seed");
+
+        let wt_path =
+            make_squash_merged_with_worktree(path, "feature/dirty-squashed", "wt-dirty-squashed");
+        // Make it dirty (untracked file).
+        std::fs::write(wt_path.join("untracked.log"), "noise")?;
+
+        let git = Git::with_workdir(false, path);
+        let config = default_config();
+        let ui = Ui::new();
+        let mut opts = opts_yes_skip_network();
+        opts.use_worktrunk = true;
+        opts.dry_run = true;
+
+        run(&git, &config, &ui, &opts)?;
+
+        // Dry-run: branch and worktree preserved.
+        assert!(wt_path.exists(), "dirty worktree should survive dry-run");
+        let branches = git.local_branches()?;
+        assert!(
+            branches.contains(&"feature/dirty-squashed".to_string()),
+            "branch should survive dry-run"
+        );
+        Ok(())
+    }
 }
