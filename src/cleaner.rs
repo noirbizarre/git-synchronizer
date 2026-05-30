@@ -250,6 +250,11 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
             // (branch, force, force_delete)
             let mut problematic: Vec<(String, bool, bool)> = Vec::new();
+            // Branches that are merged (per find_merged_local) but whose
+            // commit SHAs are not reachable from any merge target (e.g.
+            // squash-merged or cherry-picked). These are auto force-deleted
+            // without a second prompt since merged status is already proven.
+            let mut auto_force: Vec<String> = Vec::new();
             for branch in &merged {
                 let key = format!("branch:{branch}");
                 if !selected.contains(&key) {
@@ -277,8 +282,13 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 } else {
                     false
                 };
-                if dirty || unmerged {
+                if dirty {
+                    // Real data-loss risk: always confirm.
                     problematic.push((branch.clone(), dirty, unmerged));
+                } else if unmerged {
+                    // Merged-detected but commits not reachable from target
+                    // (squash / cherry-pick). Auto force-delete; no prompt.
+                    auto_force.push(branch.clone());
                 }
             }
 
@@ -289,6 +299,17 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // deletion).
             let mut force_map: HashMap<String, (bool, bool)> = HashMap::new();
             let mut skip_set: HashSet<String> = HashSet::new();
+            // Auto force-delete merged-but-unreachable branches: no prompt,
+            // but surface the action so the user can see what's happening.
+            for branch in &auto_force {
+                force_map.insert(branch.clone(), (false, true));
+                let wt = &wt_map[branch];
+                ui.muted(&format!(
+                    "Auto force-deleting '{}' ({}); merged but commits not reachable from target.",
+                    branch,
+                    tilde_path(&wt.path),
+                ));
+            }
             if !problematic.is_empty() {
                 let f_values: Vec<String> = problematic.iter().map(|(b, _, _)| b.clone()).collect();
                 let f_labels: Vec<String> = problematic
