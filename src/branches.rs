@@ -134,6 +134,28 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
         }
     }
 
+    // Simulated merge: in-memory merge yields target's existing tree
+    // (catches squash-merged branches where target has advanced with
+    // unrelated commits touching different files — defeats both
+    // `trees_match` and `diff_empty`). Placed last because it is the most
+    // expensive check.
+    for branch in &all_branches {
+        if seen.contains(branch)
+            || *branch == current
+            || is_protected(branch, &matcher, &branch_protected)
+        {
+            continue;
+        }
+        for target in &targets {
+            if git.merge_adds_nothing(target, branch).unwrap_or(false)
+                && seen.insert(branch.clone())
+            {
+                candidates.push(branch.clone());
+                break;
+            }
+        }
+    }
+
     candidates.sort();
     Ok(candidates)
 }
@@ -465,6 +487,67 @@ mod tests {
         assert!(
             merged.contains(&"feature/patch-id".to_string()),
             "branch with matching patch-id should be detected as merged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_merged_local_detects_simulated_merge_branches() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Create a feature branch that touches a.txt
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/squash-advanced"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("a.txt"), "feature content")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "feature: a.txt"])
+            .current_dir(path)
+            .output()?;
+
+        // Squash-merge onto main
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "--squash", "feature/squash-advanced"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "squash merge"])
+            .current_dir(path)
+            .output()?;
+
+        // Advance main with an unrelated commit touching a different file,
+        // so neither trees_match nor diff_empty would detect the branch.
+        std::fs::write(path.join("b.txt"), "unrelated")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "main: unrelated b.txt"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        let merged = find_merged_local(&git, &config)?;
+        assert!(
+            merged.contains(&"feature/squash-advanced".to_string()),
+            "squash-merged branch with advanced target should be detected via simulated merge"
         );
         Ok(())
     }
