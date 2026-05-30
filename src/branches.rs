@@ -156,6 +156,30 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
         }
     }
 
+    // Squash patch-id: combined patch-id of the branch's full diff matches
+    // the patch-id of a single squash commit on target. Catches squash-
+    // merges that defeat both per-commit `patch_id_match` (N branch commits
+    // collapsed into 1 squash) and textual `merge_adds_nothing` (squash
+    // commit on target was later edited so the in-memory merge re-applies
+    // branch text textually). `git patch-id` ignores whitespace and context
+    // lines, so it survives review-time formatting tweaks.
+    for branch in &all_branches {
+        if seen.contains(branch)
+            || *branch == current
+            || is_protected(branch, &matcher, &branch_protected)
+        {
+            continue;
+        }
+        for target in &targets {
+            if git.squash_patch_id_match(target, branch).unwrap_or(false)
+                && seen.insert(branch.clone())
+            {
+                candidates.push(branch.clone());
+                break;
+            }
+        }
+    }
+
     candidates.sort();
     Ok(candidates)
 }
@@ -548,6 +572,80 @@ mod tests {
         assert!(
             merged.contains(&"feature/squash-advanced".to_string()),
             "squash-merged branch with advanced target should be detected via simulated merge"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_merged_local_detects_multi_commit_squash_via_patch_id() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Feature branch with TWO commits — combined diff is a single
+        // addition to a.txt. This is the canonical case `patch_id_match`
+        // (per-commit) cannot resolve and where `merge_adds_nothing` may
+        // also miss when the squashed commit on target differs textually
+        // from the branch's commits.
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/multi-commit-squash"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("a.txt"), "line1\n")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "feature: line1"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("a.txt"), "line1\nline2\n")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "feature: line2"])
+            .current_dir(path)
+            .output()?;
+
+        // Squash-merge onto main as a single commit.
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "--squash", "feature/multi-commit-squash"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "squash merge"])
+            .current_dir(path)
+            .output()?;
+
+        // Unrelated advance on main (defeats trees_match / diff_empty).
+        std::fs::write(path.join("b.txt"), "unrelated")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "main: unrelated b.txt"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        let merged = find_merged_local(&git, &config)?;
+        assert!(
+            merged.contains(&"feature/multi-commit-squash".to_string()),
+            "multi-commit branch squash-merged into main should be detected \
+             via squash patch-id"
         );
         Ok(())
     }
