@@ -310,6 +310,129 @@ impl Git {
         self.run_exit_code(&["diff", "--quiet", target, branch])
     }
 
+    /// Compute the patch-ids of the commits in `range` (e.g. `"a..b"`).
+    ///
+    /// Pipes `git log -p --no-merges <range>` into `git patch-id --stable`
+    /// and returns the first column (the patch-id) of each output line.
+    /// Merge commits are filtered out — they have no meaningful patch-id.
+    fn patch_ids_for_range(&self, range: &str) -> Result<Vec<String>> {
+        if self.verbose {
+            eprintln!("  $ git log -p --no-merges {range} | git patch-id --stable");
+        }
+
+        let mut log_cmd = Command::new("git");
+        log_cmd.args(["log", "-p", "--no-merges", range]);
+        if let Some(dir) = &self.workdir {
+            log_cmd.current_dir(dir);
+        }
+        log_cmd.stdout(std::process::Stdio::piped());
+        log_cmd.stderr(std::process::Stdio::piped());
+
+        let mut log_child = log_cmd
+            .spawn()
+            .with_context(|| format!("failed to execute: git log {range}"))?;
+
+        let log_stdout = log_child
+            .stdout
+            .take()
+            .context("failed to capture git log stdout")?;
+
+        let mut pid_cmd = Command::new("git");
+        pid_cmd.args(["patch-id", "--stable"]);
+        if let Some(dir) = &self.workdir {
+            pid_cmd.current_dir(dir);
+        }
+        pid_cmd.stdin(log_stdout);
+        pid_cmd.stdout(std::process::Stdio::piped());
+        pid_cmd.stderr(std::process::Stdio::piped());
+
+        let pid_output = pid_cmd
+            .spawn()
+            .with_context(|| "failed to execute: git patch-id --stable".to_string())?
+            .wait_with_output()
+            .with_context(|| "failed to wait for git patch-id".to_string())?;
+
+        let log_status = log_child
+            .wait()
+            .with_context(|| format!("failed to wait for git log {range}"))?;
+
+        if !log_status.success() {
+            // Capturing stderr after wait is tricky; surface a generic error.
+            bail!("git log {range} failed (exit {})", log_status);
+        }
+        if !pid_output.status.success() {
+            let stderr = String::from_utf8_lossy(&pid_output.stderr);
+            bail!(
+                "git patch-id --stable failed (exit {}):\n{}",
+                pid_output.status,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&pid_output.stdout);
+        let ids: Vec<String> = stdout
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
+            .collect();
+        Ok(ids)
+    }
+
+    /// Detect branches whose commits have been re-applied on `target` with
+    /// different SHAs (rebase + conflict resolution, partial cherry-picks,
+    /// history rewrites) by comparing `git patch-id` fingerprints.
+    ///
+    /// For every commit in `target..branch`, computes its patch-id and
+    /// checks that the same patch-id appears in `<merge-base>..<target>`.
+    /// Returns `true` only when every branch commit has a match.
+    ///
+    /// Acts as a fallback when `cherry_merged`, `trees_match` and
+    /// `diff_empty` miss — e.g. a branch that was rebased onto target with
+    /// conflict resolution that altered the diff slightly is **not** caught
+    /// here either (patch-id is content-sensitive), but a rebase that
+    /// preserved the diff while changing commit metadata or parent linkage
+    /// is.
+    ///
+    /// Returns `Ok(false)` (rather than bailing) when the two refs have no
+    /// common merge-base (unrelated histories).
+    pub fn patch_id_match(&self, target: &str, branch: &str) -> Result<bool> {
+        let range = format!("{target}..{branch}");
+        let branch_ids = self.patch_ids_for_range(&range)?;
+        if branch_ids.is_empty() {
+            // Branch has no commits beyond target — already merged.
+            return Ok(true);
+        }
+
+        // Resolve merge-base; if unrelated histories, bail out as "no match".
+        let mut mb_cmd = Command::new("git");
+        mb_cmd.args(["merge-base", target, branch]);
+        if let Some(dir) = &self.workdir {
+            mb_cmd.current_dir(dir);
+        }
+        let mb_output = mb_cmd
+            .output()
+            .with_context(|| format!("failed to execute: git merge-base {target} {branch}"))?;
+        if !mb_output.status.success() {
+            return Ok(false);
+        }
+        let merge_base = String::from_utf8_lossy(&mb_output.stdout)
+            .trim()
+            .to_string();
+        if merge_base.is_empty() {
+            return Ok(false);
+        }
+
+        let target_range = format!("{merge_base}..{target}");
+        let target_ids: std::collections::HashSet<String> = self
+            .patch_ids_for_range(&target_range)?
+            .into_iter()
+            .collect();
+        if target_ids.is_empty() {
+            return Ok(false);
+        }
+
+        Ok(branch_ids.iter().all(|id| target_ids.contains(id)))
+    }
+
     // ── Branch mutations ─────────────────────────────────────────────
 
     /// Delete a local branch (force).
@@ -1828,6 +1951,136 @@ locked work in progress, do not remove
 
         // Make sure `path` is consumed so the temp dir lives long enough
         let _ = path;
+        Ok(())
+    }
+
+    #[test]
+    fn test_patch_id_match() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        // Create feature/patch with a commit
+        Command::new("git")
+            .args(["checkout", "-b", "feature/patch"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("patch.txt"), "patch content\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "patch feature"])
+            .current_dir(path)
+            .output()?;
+        let feature_sha = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .output()?
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Diverge main with an unrelated commit, then cherry-pick + amend so the
+        // SHA differs but the patch-id (diff content) is identical.
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("diverge.txt"), "diverge\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "diverge"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["cherry-pick", &feature_sha])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "--amend", "-m", "patch feature (reworded)"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // Patch-id of the reworded commit on main matches feature/patch.
+        assert!(git.patch_id_match("main", "feature/patch")?);
+
+        // Unmerged branch: brand-new commit, no patch-id on main.
+        Command::new("git")
+            .args(["checkout", "-b", "feature/unmerged"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("new.txt"), "new\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "unmerged"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        assert!(!git.patch_id_match("main", "feature/unmerged")?);
+
+        // Empty branch range (branch tip == target tip) → trivially merged.
+        Command::new("git")
+            .args(["branch", "feature/empty", "main"])
+            .current_dir(path)
+            .output()?;
+        assert!(git.patch_id_match("main", "feature/empty")?);
+
+        // Unrelated histories → false, no bail.
+        Command::new("git")
+            .args(["checkout", "--orphan", "feature/orphan"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["rm", "-rf", "."])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("orphan.txt"), "orphan\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "orphan root"])
+            .current_dir(path)
+            .output()?;
+        assert!(!git.patch_id_match("main", "feature/orphan")?);
+
         Ok(())
     }
 }
