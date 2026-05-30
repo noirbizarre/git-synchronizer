@@ -1,7 +1,130 @@
+use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+/// Classification of a failing git/external command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitErrorKind {
+    /// Network connectivity failure (DNS, route, refused, timed out, …).
+    Network,
+    /// Authentication / authorization failure.
+    Auth,
+    /// Anything else (refspec issues, conflicts, …).
+    Other,
+}
+
+/// Structured error for failing external commands invoked by this module.
+///
+/// Wrapped in `anyhow::Error` by [`run_git`] / [`run_cmd`] so callers can
+/// downcast and react differently to network vs. auth vs. other failures.
+#[derive(Debug, Clone)]
+pub struct GitCommandError {
+    /// Program name, e.g. `git` or `wt`.
+    pub program: String,
+    /// Arguments passed to the program.
+    pub args: Vec<String>,
+    /// Exit code, when one is available (signals yield `None`).
+    pub exit_code: Option<i32>,
+    /// Captured stderr (trimmed).
+    pub stderr: String,
+    /// Classified failure kind.
+    pub kind: GitErrorKind,
+}
+
+impl GitCommandError {
+    /// First non-empty line of stderr, used as a short cause summary.
+    pub fn short_cause(&self) -> &str {
+        self.stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+    }
+}
+
+impl fmt::Display for GitCommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let args = self.args.join(" ");
+        match self.exit_code {
+            Some(code) => write!(
+                f,
+                "{} {} failed (exit status: {}):\n{}",
+                self.program,
+                args,
+                code,
+                self.stderr.trim()
+            ),
+            None => write!(
+                f,
+                "{} {} terminated by signal:\n{}",
+                self.program,
+                args,
+                self.stderr.trim()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GitCommandError {}
+
+/// Classify a stderr blob into a [`GitErrorKind`].
+///
+/// Recognises common network and authentication signatures emitted by
+/// `git`/`ssh`/`curl`. Matching is case-insensitive on the lowered string;
+/// every signature is plain ASCII so locale-translated tail messages (e.g.
+/// French `"Impossible de lire le dépôt distant"`) do not derail the
+/// classifier as long as the underlying tool emits its standard prefix
+/// somewhere in stderr.
+pub fn classify_git_stderr(stderr: &str) -> GitErrorKind {
+    let lower = stderr.to_ascii_lowercase();
+
+    const NETWORK_SIGNATURES: &[&str] = &[
+        "no route to host",
+        "could not resolve host",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "connection timed out",
+        "connection refused",
+        "network is unreachable",
+        "operation timed out",
+        "ssh: connect to host",
+        "ssh: could not resolve hostname",
+        "failed to connect to",
+        "couldn't connect to server",
+        "unable to access",
+    ];
+    if NETWORK_SIGNATURES.iter().any(|sig| lower.contains(sig)) {
+        return GitErrorKind::Network;
+    }
+
+    const AUTH_SIGNATURES: &[&str] = &[
+        "permission denied (publickey)",
+        "permission denied, please try again",
+        "authentication failed",
+        "invalid credentials",
+        "403 forbidden",
+        "access denied",
+    ];
+    if AUTH_SIGNATURES.iter().any(|sig| lower.contains(sig)) {
+        return GitErrorKind::Auth;
+    }
+
+    GitErrorKind::Other
+}
+
+/// Build a [`GitCommandError`] from a finished `std::process::Output`.
+fn command_error(program: &str, args: &[&str], output: &std::process::Output) -> GitCommandError {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    GitCommandError {
+        program: program.to_string(),
+        args: args.iter().map(|s| s.to_string()).collect(),
+        exit_code: output.status.code(),
+        kind: classify_git_stderr(&stderr),
+        stderr,
+    }
+}
 
 /// Run a git command and return its stdout as a trimmed string.
 ///
@@ -22,13 +145,7 @@ fn run_git(args: &[&str], verbose: bool, workdir: Option<&Path>) -> Result<Strin
         .with_context(|| format!("failed to execute: git {}", args.join(" ")))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git {} failed (exit {}):\n{}",
-            args.join(" "),
-            output.status,
-            stderr.trim()
-        );
+        return Err(anyhow::Error::new(command_error("git", args, &output)));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -53,14 +170,7 @@ fn run_cmd(bin: &str, args: &[&str], verbose: bool, workdir: Option<&Path>) -> R
         .with_context(|| format!("failed to execute: {} {}", bin, args.join(" ")))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "{} {} failed (exit {}):\n{}",
-            bin,
-            args.join(" "),
-            output.status,
-            stderr.trim()
-        );
+        return Err(anyhow::Error::new(command_error(bin, args, &output)));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -133,15 +243,7 @@ impl Git {
         match output.status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
-            _ => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!(
-                    "git {} failed (exit {}):\n{}",
-                    args.join(" "),
-                    output.status,
-                    stderr.trim()
-                );
-            }
+            _ => Err(anyhow::Error::new(command_error("git", args, &output))),
         }
     }
 
@@ -179,9 +281,12 @@ impl Git {
 
     // ── Fetch ────────────────────────────────────────────────────────
 
-    /// Fetch all remotes and prune deleted remote-tracking branches.
-    pub fn remote_update_prune(&self) -> Result<()> {
-        self.run(&["remote", "update", "--prune"])?;
+    /// Fetch a single remote and prune deleted remote-tracking branches.
+    ///
+    /// Runs `git fetch --prune <remote>`. Failures are returned to the caller
+    /// so that one unreachable remote does not abort the whole workflow.
+    pub fn fetch_remote_prune(&self, remote: &str) -> Result<()> {
+        self.run(&["fetch", "--prune", remote])?;
         Ok(())
     }
 
@@ -358,15 +463,17 @@ impl Git {
 
         if !log_status.success() {
             // Capturing stderr after wait is tricky; surface a generic error.
-            bail!("git log {range} failed (exit {})", log_status);
+            anyhow::bail!(
+                "git log {range} failed (exit status: {})",
+                log_status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            );
         }
         if !pid_output.status.success() {
-            let stderr = String::from_utf8_lossy(&pid_output.stderr);
-            bail!(
-                "git patch-id --stable failed (exit {}):\n{}",
-                pid_output.status,
-                stderr.trim()
-            );
+            let args = ["patch-id", "--stable"];
+            return Err(anyhow::Error::new(command_error("git", &args, &pid_output)));
         }
 
         let stdout = String::from_utf8_lossy(&pid_output.stdout);
@@ -479,14 +586,7 @@ impl Git {
             // would add something" rather than an error, so callers can keep
             // probing other strategies.
             Some(_) => Ok(false),
-            None => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!(
-                    "git {} terminated by signal:\n{}",
-                    args.join(" "),
-                    stderr.trim()
-                );
-            }
+            None => Err(anyhow::Error::new(command_error("git", &args, &output))),
         }
     }
 
@@ -538,15 +638,17 @@ impl Git {
             .with_context(|| format!("failed to wait for git diff {base} {branch}"))?;
 
         if !diff_status.success() {
-            bail!("git diff {base} {branch} failed (exit {})", diff_status);
+            anyhow::bail!(
+                "git diff {base} {branch} failed (exit status: {})",
+                diff_status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            );
         }
         if !pid_output.status.success() {
-            let stderr = String::from_utf8_lossy(&pid_output.stderr);
-            bail!(
-                "git patch-id --stable failed (exit {}):\n{}",
-                pid_output.status,
-                stderr.trim()
-            );
+            let args = ["patch-id", "--stable"];
+            return Err(anyhow::Error::new(command_error("git", &args, &pid_output)));
         }
 
         let stdout = String::from_utf8_lossy(&pid_output.stdout);
@@ -923,6 +1025,97 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_classify_network_signatures() {
+        let cases = [
+            "ssh: connect to host github.com port 22: No route to host\nfatal: Could not read from remote repository.",
+            "ssh: Could not resolve hostname github.com: Temporary failure in name resolution",
+            "fatal: unable to access 'https://github.com/foo/bar.git/': Failed to connect to github.com port 443: Connection timed out",
+            "Connection refused",
+            "Network is unreachable",
+        ];
+        for stderr in cases {
+            assert_eq!(
+                classify_git_stderr(stderr),
+                GitErrorKind::Network,
+                "expected Network for: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_auth_signatures() {
+        let cases = [
+            "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+            "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://example.com/foo.git/'",
+        ];
+        for stderr in cases {
+            assert_eq!(
+                classify_git_stderr(stderr),
+                GitErrorKind::Auth,
+                "expected Auth for: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_other() {
+        let cases = [
+            "",
+            "fatal: ambiguous argument 'HEAD~10': unknown revision",
+            "error: failed to push some refs",
+        ];
+        for stderr in cases {
+            assert_eq!(
+                classify_git_stderr(stderr),
+                GitErrorKind::Other,
+                "expected Other for: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_git_command_error_display_has_no_double_exit() {
+        let err = GitCommandError {
+            program: "git".into(),
+            args: vec!["fetch".into(), "origin".into()],
+            exit_code: Some(1),
+            stderr: "boom".into(),
+            kind: GitErrorKind::Other,
+        };
+        let s = err.to_string();
+        assert!(s.contains("(exit status: 1)"), "got: {s}");
+        assert!(!s.contains("exit exit"), "got: {s}");
+    }
+
+    #[test]
+    fn test_git_command_error_short_cause_skips_blank_lines() {
+        let err = GitCommandError {
+            program: "git".into(),
+            args: vec!["fetch".into()],
+            exit_code: Some(1),
+            stderr: "\n   \nssh: connect to host github.com port 22: No route to host\nfatal: …"
+                .into(),
+            kind: GitErrorKind::Network,
+        };
+        assert_eq!(
+            err.short_cause(),
+            "ssh: connect to host github.com port 22: No route to host"
+        );
+    }
+
+    #[test]
+    fn test_run_git_failure_returns_command_error() {
+        // Run `git` against a non-existent option to provoke a guaranteed
+        // non-zero exit without depending on a workdir.
+        let err = run_git(&["--definitely-not-a-real-flag"], false, None).unwrap_err();
+        let gerr = err
+            .downcast_ref::<GitCommandError>()
+            .expect("expected GitCommandError");
+        assert_eq!(gerr.program, "git");
+        assert!(!gerr.stderr.is_empty());
+    }
 
     #[test]
     fn test_parse_branch_list() {
@@ -2138,7 +2331,7 @@ locked work in progress, do not remove
 
         // Fetch so we have the remote ref
         let git = Git::with_workdir(false, &work_path);
-        git.remote_update_prune()?;
+        git.fetch_remote_prune("origin")?;
 
         // Record the commit before pulling
         let before = git.run(&["rev-parse", "HEAD"])?;

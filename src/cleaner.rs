@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::branches::{find_merged_local, find_merged_remote, resolve_merge_targets};
 use crate::config::Config;
-use crate::git::{Git, Worktree};
+use crate::git::{Git, GitCommandError, GitErrorKind, Worktree};
 use crate::ui::Ui;
 use crate::worktrees::find_orphan_worktrees;
 
@@ -16,6 +16,46 @@ fn tilde_path(abs: &str) -> String {
         return format!("~{rest}");
     }
     abs.to_string()
+}
+
+/// Render a per-remote operation failure with a friendly classification.
+///
+/// Emits a single coloured line via `ui.error` plus a dimmed short cause when
+/// available. When the underlying failure is a [`GitCommandError`], its
+/// [`GitErrorKind`] selects the message prefix (network / auth / generic).
+/// Returns the detected kind so callers can decide whether to surface a
+/// follow-up warning (e.g. "detection may be stale").
+fn report_remote_failure(ui: &Ui, action: &str, target: &str, err: &anyhow::Error) -> GitErrorKind {
+    if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
+        let cause = gerr.short_cause();
+        match gerr.kind {
+            GitErrorKind::Network => {
+                ui.error(&format!(
+                    "Network error: cannot {action} '{}' ({cause}).",
+                    console::style(target).red()
+                ));
+            }
+            GitErrorKind::Auth => {
+                ui.error(&format!(
+                    "Authentication failed while trying to {action} '{}': {cause}",
+                    console::style(target).red()
+                ));
+            }
+            GitErrorKind::Other => {
+                ui.error(&format!(
+                    "Failed to {action} '{}': {cause}",
+                    console::style(target).red()
+                ));
+            }
+        }
+        gerr.kind
+    } else {
+        ui.error(&format!(
+            "Failed to {action} '{}': {err}",
+            console::style(target).red()
+        ));
+        GitErrorKind::Other
+    }
 }
 
 /// Options controlling cleaner behaviour, derived from CLI flags.
@@ -46,8 +86,29 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             if opts.dry_run {
                 ui.muted("  (dry-run) Skipping remote update.");
             } else {
-                git.remote_update_prune()?;
-                ui.success("Remotes updated.");
+                let mut failed: Vec<String> = Vec::new();
+                let mut succeeded = 0usize;
+                for remote in &remotes {
+                    match git.fetch_remote_prune(remote) {
+                        Ok(()) => {
+                            succeeded += 1;
+                            ui.success(&format!("{} updated.", console::style(remote).cyan()));
+                        }
+                        Err(e) => {
+                            report_remote_failure(ui, "fetch from", remote, &e);
+                            failed.push(remote.clone());
+                        }
+                    }
+                }
+                if !failed.is_empty() {
+                    ui.warning(&format!(
+                        "Continuing without {} remote(s); detection results for {} may be stale.",
+                        failed.len(),
+                        failed.join(", ")
+                    ));
+                } else if succeeded > 0 {
+                    ui.success("Remotes updated.");
+                }
             }
         }
     }
@@ -108,7 +169,9 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         Ok(()) => {
                             ui.success(&format!("{} updated.", console::style(&branch).cyan()))
                         }
-                        Err(e) => ui.error(&format!("{}: {}", console::style(&branch).red(), e)),
+                        Err(e) => {
+                            report_remote_failure(ui, "pull", branch, &e);
+                        }
                     }
                 }
             }
@@ -527,7 +590,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     match git.push_delete(remote, branch) {
                         Ok(()) => remote_deleted += 1,
                         Err(e) => {
-                            ui.error(&format!("  Failed to delete '{remote}/{branch}': {e}"));
+                            report_remote_failure(ui, "delete", &format!("{remote}/{branch}"), &e);
                         }
                     }
                 }
@@ -614,6 +677,59 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
 
+    fn git_err(kind: GitErrorKind, stderr: &str) -> anyhow::Error {
+        anyhow::Error::new(GitCommandError {
+            program: "git".into(),
+            args: vec!["fetch".into(), "--prune".into(), "origin".into()],
+            exit_code: Some(1),
+            stderr: stderr.into(),
+            kind,
+        })
+    }
+
+    #[test]
+    fn report_remote_failure_classifies_network() {
+        let ui = Ui::new();
+        let err = git_err(
+            GitErrorKind::Network,
+            "ssh: connect to host github.com port 22: No route to host",
+        );
+        assert_eq!(
+            report_remote_failure(&ui, "fetch from", "origin", &err),
+            GitErrorKind::Network
+        );
+    }
+
+    #[test]
+    fn report_remote_failure_classifies_auth() {
+        let ui = Ui::new();
+        let err = git_err(GitErrorKind::Auth, "Permission denied (publickey).");
+        assert_eq!(
+            report_remote_failure(&ui, "fetch from", "origin", &err),
+            GitErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn report_remote_failure_classifies_other() {
+        let ui = Ui::new();
+        let err = git_err(GitErrorKind::Other, "fatal: refusing to fetch");
+        assert_eq!(
+            report_remote_failure(&ui, "fetch from", "origin", &err),
+            GitErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn report_remote_failure_handles_non_git_error() {
+        let ui = Ui::new();
+        let err = anyhow::anyhow!("something went wrong");
+        assert_eq!(
+            report_remote_failure(&ui, "pull", "feature", &err),
+            GitErrorKind::Other
+        );
+    }
+
     fn default_config() -> Config {
         Config {
             protected: vec!["main".to_string()],
@@ -679,6 +795,43 @@ mod tests {
         let ui = Ui::new();
         let opts = opts_yes_skip_network();
 
+        run(&git, &config, &ui, &opts)?;
+        Ok(())
+    }
+
+    /// Exercise the per-remote fetch loop with a remote that cannot be
+    /// reached (its URL points to a non-existent path). The fetch must
+    /// fail, but the cleaner workflow must continue and return Ok.
+    #[test]
+    fn test_run_continues_when_a_remote_fetch_fails() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        // Add a bogus remote whose URL cannot resolve. Fetching it will
+        // fail with a non-network "Other" error, which is what we want
+        // to exercise the failure branch of the loop.
+        StdCommand::new("git")
+            .args(["remote", "add", "broken", "/this/path/does/not/exist.git"])
+            .current_dir(_dir.path())
+            .output()?;
+
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: Some(vec!["broken".to_string()]),
+            worktrunk: None,
+        };
+        let ui = Ui::new();
+        let opts = CleanerOptions {
+            yes: true,
+            dry_run: false,
+            no_fetch: false,
+            no_pull: true,
+            local_only: true, // skip the remote-deletion phase
+            remote_only: false,
+            no_worktrees: true,
+            use_worktrunk: false,
+        };
+
+        // The fetch will fail but the cleaner should not bail out.
         run(&git, &config, &ui, &opts)?;
         Ok(())
     }
