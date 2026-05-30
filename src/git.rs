@@ -490,6 +490,120 @@ impl Git {
         }
     }
 
+    /// Compute the combined patch-id of `git diff <base> <branch>` — i.e. the
+    /// single patch-id of the branch's cumulative diff (as if it had been
+    /// squashed into one commit).
+    ///
+    /// Returns `Ok(None)` when the diff is empty (branch is identical to
+    /// `base`).
+    fn squash_patch_id(&self, base: &str, branch: &str) -> Result<Option<String>> {
+        if self.verbose {
+            eprintln!("  $ git diff {base} {branch} | git patch-id --stable");
+        }
+
+        let mut diff_cmd = Command::new("git");
+        diff_cmd.args(["diff", base, branch]);
+        if let Some(dir) = &self.workdir {
+            diff_cmd.current_dir(dir);
+        }
+        diff_cmd.stdout(std::process::Stdio::piped());
+        diff_cmd.stderr(std::process::Stdio::piped());
+
+        let mut diff_child = diff_cmd
+            .spawn()
+            .with_context(|| format!("failed to execute: git diff {base} {branch}"))?;
+
+        let diff_stdout = diff_child
+            .stdout
+            .take()
+            .context("failed to capture git diff stdout")?;
+
+        let mut pid_cmd = Command::new("git");
+        pid_cmd.args(["patch-id", "--stable"]);
+        if let Some(dir) = &self.workdir {
+            pid_cmd.current_dir(dir);
+        }
+        pid_cmd.stdin(diff_stdout);
+        pid_cmd.stdout(std::process::Stdio::piped());
+        pid_cmd.stderr(std::process::Stdio::piped());
+
+        let pid_output = pid_cmd
+            .spawn()
+            .with_context(|| "failed to execute: git patch-id --stable".to_string())?
+            .wait_with_output()
+            .with_context(|| "failed to wait for git patch-id".to_string())?;
+
+        let diff_status = diff_child
+            .wait()
+            .with_context(|| format!("failed to wait for git diff {base} {branch}"))?;
+
+        if !diff_status.success() {
+            bail!("git diff {base} {branch} failed (exit {})", diff_status);
+        }
+        if !pid_output.status.success() {
+            let stderr = String::from_utf8_lossy(&pid_output.stderr);
+            bail!(
+                "git patch-id --stable failed (exit {}):\n{}",
+                pid_output.status,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&pid_output.stdout);
+        let id = stdout
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().next().map(|s| s.to_string()));
+        Ok(id)
+    }
+
+    /// Detect squash-merged branches by matching the combined patch-id of the
+    /// branch's full diff (vs the merge-base) against the patch-id of any
+    /// single commit in `<merge-base>..<target>`.
+    ///
+    /// Complements [`Self::patch_id_match`] (which compares per-commit
+    /// patch-ids and therefore cannot relate N branch commits to 1 squash
+    /// commit) and [`Self::merge_adds_nothing`] (which performs a textual
+    /// in-memory merge and is defeated when the squash commit on `target`
+    /// was later edited — e.g. PR review changes, formatting tweaks).
+    ///
+    /// Returns `Ok(false)` when the two refs have no common merge-base
+    /// (unrelated histories).
+    pub fn squash_patch_id_match(&self, target: &str, branch: &str) -> Result<bool> {
+        // Resolve merge-base; unrelated histories ⇒ no match.
+        let mut mb_cmd = Command::new("git");
+        mb_cmd.args(["merge-base", target, branch]);
+        if let Some(dir) = &self.workdir {
+            mb_cmd.current_dir(dir);
+        }
+        let mb_output = mb_cmd
+            .output()
+            .with_context(|| format!("failed to execute: git merge-base {target} {branch}"))?;
+        if !mb_output.status.success() {
+            return Ok(false);
+        }
+        let merge_base = String::from_utf8_lossy(&mb_output.stdout)
+            .trim()
+            .to_string();
+        if merge_base.is_empty() {
+            return Ok(false);
+        }
+
+        // Combined patch-id of the whole branch as a single squashed diff.
+        let branch_pid = match self.squash_patch_id(&merge_base, branch)? {
+            Some(id) => id,
+            // Empty diff: branch is already at merge-base ⇒ fully merged.
+            None => return Ok(true),
+        };
+
+        // Per-commit patch-ids on target since merge-base. A squash-merge
+        // produces exactly one commit on target whose patch-id equals the
+        // combined patch-id of the branch.
+        let target_range = format!("{merge_base}..{target}");
+        let target_ids = self.patch_ids_for_range(&target_range)?;
+        Ok(target_ids.contains(&branch_pid))
+    }
+
     // ── Branch mutations ─────────────────────────────────────────────
 
     /// Delete a local branch (force).
@@ -1453,6 +1567,130 @@ locked work in progress, do not remove
             .output()?;
 
         assert!(!git.merge_adds_nothing("main", "feature/divergent")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_squash_patch_id_match() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        // Feature branch with TWO commits — combined diff = "line1\nline2\n"
+        // on a.txt. This is the canonical case `patch_id_match` per-commit
+        // cannot resolve: 2 branch patch-ids ≠ 1 squash patch-id on target.
+        Command::new("git")
+            .args(["checkout", "-b", "feature/multi-squash"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("a.txt"), "line1\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "feature: line1"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("a.txt"), "line1\nline2\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "feature: line2"])
+            .current_dir(path)
+            .output()?;
+
+        // Squash-merge into main as a single commit, then advance main with
+        // an unrelated commit (defeats trees_match / diff_empty).
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["merge", "--squash", "feature/multi-squash"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash merge feature/multi-squash"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("b.txt"), "unrelated\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "main: unrelated b.txt"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // Sanity: textual detectors that compare per-commit fail here.
+        // (Two branch patch-ids cannot all be found among target's
+        // single squash patch-id.)
+        assert!(
+            !git.patch_id_match("main", "feature/multi-squash")?,
+            "per-commit patch_id_match cannot relate 2 branch commits to 1 squash commit"
+        );
+
+        // The new strategy resolves the gap.
+        assert!(
+            git.squash_patch_id_match("main", "feature/multi-squash")?,
+            "combined branch patch-id must match the single squash commit on main"
+        );
+
+        // Negative case: a branch with no matching squash commit on main.
+        Command::new("git")
+            .args(["checkout", "-b", "feature/divergent"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("d.txt"), "divergent\n")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "feature: d.txt"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(!git.squash_patch_id_match("main", "feature/divergent")?);
+
+        // Empty-diff branch (no commits beyond merge-base) is trivially merged.
+        Command::new("git")
+            .args(["branch", "feature/empty", "main"])
+            .current_dir(path)
+            .output()?;
+        assert!(git.squash_patch_id_match("main", "feature/empty")?);
 
         Ok(())
     }
