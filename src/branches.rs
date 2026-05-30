@@ -116,6 +116,24 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
         }
     }
 
+    // Patch-ID comparison: catches branches whose commits were re-applied
+    // on target with different SHAs (rebase + reword, partial cherry-pick,
+    // history rewrite). Fallback when cherry / tree / diff strategies miss.
+    for branch in &all_branches {
+        if seen.contains(branch)
+            || *branch == current
+            || is_protected(branch, &matcher, &branch_protected)
+        {
+            continue;
+        }
+        for target in &targets {
+            if git.patch_id_match(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
+                candidates.push(branch.clone());
+                break;
+            }
+        }
+    }
+
     candidates.sort();
     Ok(candidates)
 }
@@ -378,6 +396,75 @@ mod tests {
         assert!(
             merged.contains(&"feature/tree-match".to_string()),
             "branch with matching tree SHA should be detected as merged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_merged_local_detects_patch_id_branches() -> Result<()> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // Feature branch with one commit.
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/patch-id"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("patch.txt"), "patch content\n")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "patch-id feature"])
+            .current_dir(path)
+            .output()?;
+        let sha = String::from_utf8_lossy(
+            &StdCommand::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .output()?
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        // Diverge main, then cherry-pick + amend so the SHA changes but
+        // the diff (and therefore the patch-id) is preserved. `git cherry`
+        // should miss it (different author/committer date after amend may
+        // still be matched, so we also tweak the message).
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("diverge.txt"), "diverge\n")?;
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "-m", "diverge"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["cherry-pick", &sha])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["commit", "--amend", "-m", "patch-id feature (reworded)"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        let merged = find_merged_local(&git, &config)?;
+        assert!(
+            merged.contains(&"feature/patch-id".to_string()),
+            "branch with matching patch-id should be detected as merged"
         );
         Ok(())
     }
