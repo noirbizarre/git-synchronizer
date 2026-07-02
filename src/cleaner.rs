@@ -514,9 +514,14 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
             // 3. Delete selected merged branches.
             //
-            // Branches whose worktree was removed via worktrunk are skipped
-            // because `wt remove` already deleted the branch. Branches whose
-            // worktree the user chose not to force-remove are also skipped.
+            // Branches whose worktree was removed via worktrunk are normally
+            // deleted by `wt remove` itself. However, `wt`'s merge check is
+            // narrower than git-sync's (it only considers the local default
+            // branch / its upstream and caps its walk for speed), so it may
+            // leave behind a branch git-sync considers merged. For such
+            // branches we verify the ref is actually gone and delete it
+            // ourselves if it survived. Branches whose worktree the user chose
+            // not to force-remove are skipped.
             for branch in &merged {
                 let key = format!("branch:{branch}");
                 if !selected.contains(&key) {
@@ -526,7 +531,27 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     continue;
                 }
                 if wt_handled_branches.contains(branch) {
-                    total_deleted += 1;
+                    // `wt remove` was responsible for deleting this branch.
+                    // Confirm it actually did; if the branch survives, delete
+                    // it ourselves (branch_delete uses -D, and the branch is
+                    // already proven merged by git-sync).
+                    match git.branch_exists(branch) {
+                        Ok(false) => {
+                            total_deleted += 1;
+                            continue;
+                        }
+                        Ok(true) => match git.branch_delete(branch) {
+                            Ok(()) => total_deleted += 1,
+                            Err(e) => ui.error(&format!(
+                                "Failed to delete '{}': {e}",
+                                console::style(&branch).red()
+                            )),
+                        },
+                        Err(e) => ui.error(&format!(
+                            "Could not verify whether '{}' still exists: {e}",
+                            console::style(&branch).red()
+                        )),
+                    }
                     continue;
                 }
                 if opts.dry_run {
@@ -1909,6 +1934,91 @@ mod tests {
         assert!(
             branches.contains(&"feature/dirty-squashed".to_string()),
             "branch should survive dry-run"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_worktrunk_deletes_branch_wt_leaves_behind() -> Result<()> {
+        // Regression test: when worktrunk removes a worktree but leaves the
+        // branch behind (because `wt`'s merge check is narrower than
+        // git-sync's), git-sync must delete the surviving branch itself.
+        //
+        // Reproduced by merging the feature into a non-default protected
+        // target ("develop"). git-sync detects it as merged (develop is
+        // protected), but `wt remove` checks only the default branch ("main")
+        // and so refuses to delete the branch without `-D`.
+        //
+        // Requires the real `wt` binary; skipped otherwise.
+        if !crate::git::worktrunk_available() {
+            eprintln!("skipping: worktrunk (`wt`) not available on PATH");
+            return Ok(());
+        }
+
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        std::fs::write(path.join("seed.txt"), "seed")?;
+        commit_all(path, "seed");
+
+        // Second protected target the feature will be merged into.
+        StdCommand::new("git")
+            .args(["branch", "develop"])
+            .current_dir(path)
+            .output()?;
+
+        // Feature branch with one commit, merged into develop (not main).
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/wt-leftover"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("work.txt"), "work")?;
+        commit_all(path, "feature work");
+        StdCommand::new("git")
+            .args(["checkout", "develop"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "feature/wt-leftover"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+
+        // Worktree for the merged feature branch.
+        let wt_path = path.join("wt-leftover");
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/wt-leftover",
+            ])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let config = Config {
+            protected: vec!["main".to_string(), "develop".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        let ui = Ui::new();
+        let mut opts = opts_yes_skip_network();
+        opts.use_worktrunk = true;
+
+        run(&git, &config, &ui, &opts)?;
+
+        // Worktree removed by `wt`, and the surviving branch deleted by git-sync.
+        assert!(
+            !wt_path.exists(),
+            "worktree should be removed via worktrunk"
+        );
+        assert!(
+            !git.branch_exists("feature/wt-leftover")?,
+            "branch left behind by `wt remove` should be deleted by git-sync"
         );
         Ok(())
     }
