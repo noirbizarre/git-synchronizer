@@ -32,6 +32,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
+      # worktrunk (`wt`) is required by the worktrunk integration tests;
+      # without it they skip and leave the code paths uncovered.
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm worktrunk
       - run: cargo llvm-cov nextest --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v5
         with:

@@ -719,6 +719,20 @@ impl Git {
         Ok(())
     }
 
+    /// Return true if a local branch ref exists.
+    ///
+    /// Used to verify whether `wt remove` actually deleted the associated
+    /// branch; `wt`'s own merge check is narrower than git-sync's, so it may
+    /// leave behind a branch git-sync considers merged.
+    pub fn branch_exists(&self, branch: &str) -> Result<bool> {
+        self.run_exit_code(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+    }
+
     /// Delete a branch on a remote (with --force-with-lease for safety).
     pub fn push_delete(&self, remote: &str, branch: &str) -> Result<()> {
         self.run(&["push", "--delete", "--force-with-lease", remote, branch])?;
@@ -740,6 +754,18 @@ impl Git {
         } else {
             self.run(&["worktree", "remove", path])?;
         }
+        Ok(())
+    }
+
+    /// Prune stale worktree administrative entries.
+    ///
+    /// `wt remove` may fall back to `git worktree remove` on cross-filesystem
+    /// worktrees and can leave the worktree's git metadata registered even
+    /// after its directory is gone. A stale registration makes `git branch -D`
+    /// fail with "cannot delete branch used by worktree", so prune before
+    /// deleting a branch whose worktree `wt` claims to have removed.
+    pub fn worktree_prune(&self) -> Result<()> {
+        self.run(&["worktree", "prune"])?;
         Ok(())
     }
 
