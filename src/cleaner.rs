@@ -545,7 +545,8 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             // its cross-filesystem `git worktree remove`
                             // fallback), which blocks branch deletion with
                             // "cannot delete branch used by worktree". Prune
-                            // first so the -D can succeed.
+                            // any now-missing worktree registrations first so
+                            // the -D can succeed.
                             let _ = git.worktree_prune();
                             match git.branch_delete(branch) {
                                 Ok(()) => total_deleted += 1,
@@ -1946,6 +1947,12 @@ mod tests {
         Ok(())
     }
 
+    // Gated to Unix: `wt`'s worktree removal on Windows CI uses a
+    // cross-filesystem fallback that leaves the worktree directory (and thus
+    // the in-use branch) in place, so the scenario this test relies on can't
+    // be reproduced there. The branch-deletion logic itself is
+    // platform-independent.
+    #[cfg(unix)]
     #[test]
     fn test_run_worktrunk_deletes_branch_wt_leaves_behind() -> Result<()> {
         // Regression test: when worktrunk removes a worktree but leaves the
