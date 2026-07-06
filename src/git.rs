@@ -757,6 +757,18 @@ impl Git {
         Ok(())
     }
 
+    /// Prune stale worktree administrative entries.
+    ///
+    /// `wt remove` may fall back to `git worktree remove` on cross-filesystem
+    /// worktrees and can leave the worktree's git metadata registered even
+    /// after its directory is gone. A stale registration makes `git branch -D`
+    /// fail with "cannot delete branch used by worktree", so prune before
+    /// deleting a branch whose worktree `wt` claims to have removed.
+    pub fn worktree_prune(&self) -> Result<()> {
+        self.run(&["worktree", "prune"])?;
+        Ok(())
+    }
+
     /// Check whether the worktree at `path` has untracked or uncommitted changes.
     ///
     /// Runs `git -C <path> status --porcelain`; a non-empty output means the

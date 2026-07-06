@@ -540,13 +540,21 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             total_deleted += 1;
                             continue;
                         }
-                        Ok(true) => match git.branch_delete(branch) {
-                            Ok(()) => total_deleted += 1,
-                            Err(e) => ui.error(&format!(
-                                "Failed to delete '{}': {e}",
-                                console::style(&branch).red()
-                            )),
-                        },
+                        Ok(true) => {
+                            // `wt` may have left stale worktree metadata (e.g.
+                            // its cross-filesystem `git worktree remove`
+                            // fallback), which blocks branch deletion with
+                            // "cannot delete branch used by worktree". Prune
+                            // first so the -D can succeed.
+                            let _ = git.worktree_prune();
+                            match git.branch_delete(branch) {
+                                Ok(()) => total_deleted += 1,
+                                Err(e) => ui.error(&format!(
+                                    "Failed to delete '{}': {e}",
+                                    console::style(&branch).red()
+                                )),
+                            }
+                        }
                         Err(e) => ui.error(&format!(
                             "Could not verify whether '{}' still exists: {e}",
                             console::style(&branch).red()
@@ -2011,11 +2019,19 @@ mod tests {
 
         run(&git, &config, &ui, &opts)?;
 
-        // Worktree removed by `wt`, and the surviving branch deleted by git-sync.
+        // The worktree registration is gone: `wt` removed the worktree and
+        // git-sync pruned any stale metadata. (The directory itself may linger
+        // briefly depending on `wt`'s platform-specific cleanup — e.g. its
+        // trash/background rm — so assert on git's view rather than the path.)
+        let still_registered = git
+            .worktree_list()?
+            .iter()
+            .any(|wt| wt.branch.as_deref() == Some("feature/wt-leftover"));
         assert!(
-            !wt_path.exists(),
-            "worktree should be removed via worktrunk"
+            !still_registered,
+            "worktree should no longer be registered after worktrunk removal"
         );
+        // The branch `wt remove` left behind must be deleted by git-sync.
         assert!(
             !git.branch_exists("feature/wt-leftover")?,
             "branch left behind by `wt remove` should be deleted by git-sync"
