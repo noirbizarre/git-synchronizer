@@ -330,4 +330,34 @@ mod tests {
         let err = anyhow::anyhow!("top").context("inner").context("outer");
         report_error(&ui, &err);
     }
+
+    #[test]
+    fn is_cancelled_detects_interrupted_io_error() {
+        let err = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        assert!(is_cancelled(&err));
+    }
+
+    #[test]
+    fn is_cancelled_detects_interrupted_deep_in_chain() {
+        let err = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            .context("selecting branches")
+            .context("running cleanup");
+        assert!(is_cancelled(&err));
+    }
+
+    #[test]
+    fn is_cancelled_ignores_other_io_errors() {
+        let err = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(!is_cancelled(&err));
+    }
+
+    #[test]
+    fn is_cancelled_ignores_non_io_errors() {
+        let err = anyhow::anyhow!("plain error");
+        assert!(!is_cancelled(&err));
+        assert!(!is_cancelled(&git_err(
+            GitErrorKind::Other,
+            "fatal: bad refspec"
+        )));
+    }
 }
