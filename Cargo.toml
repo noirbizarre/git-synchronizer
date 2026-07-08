@@ -17,8 +17,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-cliclack = "0.4"
 console = "0.16"
+demand = "2"
 globset = "0.4"
 
 [dev-dependencies]

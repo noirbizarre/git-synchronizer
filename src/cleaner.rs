@@ -243,12 +243,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 let has_unlocked_wt = wt_map.get(branch).is_some_and(|wt| !wt.is_locked);
                 if !opts.no_worktrees && has_unlocked_wt {
                     let wt = &wt_map[branch];
-                    labels.push(format!(
-                        "{branch} {}",
-                        console::style(format!("({})", tilde_path(&wt.path)))
-                            .dim()
-                            .italic()
-                    ));
+                    labels.push(format!("{branch} ({})", tilde_path(&wt.path)));
                     hints.push("branch + worktree".to_string());
                 } else {
                     labels.push(branch.clone());
@@ -379,12 +374,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     .iter()
                     .map(|(b, _, _)| {
                         let wt = &wt_map[b];
-                        format!(
-                            "{b} {}",
-                            console::style(format!("({})", tilde_path(&wt.path)))
-                                .dim()
-                                .italic()
-                        )
+                        format!("{b} ({})", tilde_path(&wt.path))
                     })
                     .collect();
                 let f_hints: Vec<String> = problematic
