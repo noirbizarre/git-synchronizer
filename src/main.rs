@@ -41,11 +41,27 @@ fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(err) if is_cancelled(&err) => {
+            ui.muted("Cancelled.");
+            ExitCode::FAILURE
+        }
         Err(err) => {
             report_error(&ui, &err);
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether an error chain represents a user-cancelled prompt (Esc / Ctrl-C).
+///
+/// Interactive prompts surface cancellation as an `io::ErrorKind::Interrupted`
+/// error; we treat it as a clean abort rather than a failure to report.
+fn is_cancelled(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::Interrupted)
+    })
 }
 
 /// Render an `anyhow::Error` chain using the same UI styling as the rest of
@@ -313,5 +329,35 @@ mod tests {
         let ui = ui::Ui::new();
         let err = anyhow::anyhow!("top").context("inner").context("outer");
         report_error(&ui, &err);
+    }
+
+    #[test]
+    fn is_cancelled_detects_interrupted_io_error() {
+        let err = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        assert!(is_cancelled(&err));
+    }
+
+    #[test]
+    fn is_cancelled_detects_interrupted_deep_in_chain() {
+        let err = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            .context("selecting branches")
+            .context("running cleanup");
+        assert!(is_cancelled(&err));
+    }
+
+    #[test]
+    fn is_cancelled_ignores_other_io_errors() {
+        let err = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(!is_cancelled(&err));
+    }
+
+    #[test]
+    fn is_cancelled_ignores_non_io_errors() {
+        let err = anyhow::anyhow!("plain error");
+        assert!(!is_cancelled(&err));
+        assert!(!is_cancelled(&git_err(
+            GitErrorKind::Other,
+            "fatal: bad refspec"
+        )));
     }
 }

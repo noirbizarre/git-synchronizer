@@ -1,4 +1,5 @@
 use console::{Style, Term};
+use demand::{Confirm, DemandOption, Input, MultiSelect};
 
 /// Terminal handle and style presets for consistent output.
 pub struct Ui {
@@ -92,9 +93,7 @@ impl Ui {
 
     /// Ask for confirmation, defaulting to "no" for safety.
     pub fn confirm(&self, prompt: &str, default: bool) -> anyhow::Result<bool> {
-        Ok(cliclack::confirm(prompt)
-            .initial_value(default)
-            .interact()?)
+        Ok(Confirm::new(prompt).selected(default).run()?)
     }
 
     /// Present a multi-select list. Returns the selected values.
@@ -102,6 +101,9 @@ impl Ui {
     /// `values` are the returned items; `labels` are what the user sees;
     /// `hints` are optional secondary text rendered next to each item
     /// (pass an empty slice to omit hints).
+    /// The `a` key inverts the whole selection (select all, or deselect all
+    /// when everything is already selected), and demand renders a keymap hint
+    /// in the footer so the shortcut is discoverable.
     pub fn multi_select(
         &self,
         prompt: &str,
@@ -110,29 +112,23 @@ impl Ui {
         defaults: &[bool],
         hints: &[String],
     ) -> anyhow::Result<Vec<String>> {
-        let initial_values: Vec<String> = values
-            .iter()
-            .zip(defaults.iter())
-            .filter_map(|(val, &selected)| if selected { Some(val.clone()) } else { None })
-            .collect();
-
-        let empty = String::new();
-        let mut ms = cliclack::multiselect(prompt);
-        for (i, (val, label)) in values.iter().zip(labels.iter()).enumerate() {
-            let hint = hints.get(i).unwrap_or(&empty);
-            ms = ms.item(val.clone(), label, hint.as_str());
+        let mut ms = MultiSelect::new(prompt).min(0);
+        for (i, val) in values.iter().enumerate() {
+            let label = labels.get(i).unwrap_or(val);
+            let mut option = DemandOption::new(val.clone())
+                .label(label)
+                .selected(defaults.get(i).copied().unwrap_or(false));
+            if let Some(hint) = hints.get(i).filter(|h| !h.is_empty()) {
+                option = option.description(hint);
+            }
+            ms = ms.option(option);
         }
-        ms = ms.initial_values(initial_values);
-        ms = ms.required(false);
-        Ok(ms.interact()?)
+        Ok(ms.run()?)
     }
 
     /// Ask for a text input.
     pub fn input(&self, prompt: &str, default: &str) -> anyhow::Result<String> {
-        Ok(cliclack::input(prompt)
-            .default_input(default)
-            .required(false)
-            .interact::<String>()?)
+        Ok(Input::new(prompt).default_value(default).run()?)
     }
 
     /// Print a summary line: "✔ 1 branch deleted." or "✔ 3 branches deleted."
