@@ -1,5 +1,5 @@
 use console::{Style, Term};
-use demand::{Confirm, DemandOption, Input, MultiSelect};
+use demand::{Confirm, DemandOption, Input, MultiSelect, Spinner, SpinnerStyle};
 
 /// Terminal handle and style presets for consistent output.
 pub struct Ui {
@@ -131,6 +131,30 @@ impl Ui {
         Ok(Input::new(prompt).default_value(default).run()?)
     }
 
+    /// Run `op` while showing a spinner labelled `title` on stderr.
+    ///
+    /// Only renders on a TTY. On non-TTY stderr (pipes, CI, tests) it runs
+    /// `op` directly — no background thread and no Ctrl-C handler installed.
+    /// On a TTY, demand's spinner installs its own Ctrl-C handler that exits
+    /// with code 130; a mid-spinner interrupt therefore does not print
+    /// "Cancelled." (by design — 130 is the conventional SIGINT exit code).
+    ///
+    /// The spinner clears its own line before returning, so callers must
+    /// print any success/error line *after* this returns, never inside `op`.
+    pub fn spinner<T, F>(&self, title: &str, op: F) -> T
+    where
+        F: FnOnce() -> T + Send,
+        T: Send,
+    {
+        if !self.term.is_term() {
+            return op();
+        }
+        Spinner::new(title.to_string())
+            .style(&SpinnerStyle::minidots())
+            .run(|_action| op())
+            .expect("spinner render failed on a TTY")
+    }
+
     /// Print a summary line: "✔ 1 branch deleted." or "✔ 3 branches deleted."
     ///
     /// The count and noun are styled in cyan; the verb and period use the
@@ -190,5 +214,18 @@ mod tests {
     fn test_summary_plural() {
         let ui = Ui::new();
         ui.summary(5, "branch", "branches", "deleted");
+    }
+
+    #[test]
+    fn spinner_is_noop_and_returns_value_when_not_a_tty() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ui = Ui::new(); // stderr not a TTY under tests
+        let ran = AtomicBool::new(false);
+        let out: i32 = ui.spinner("work", || {
+            ran.store(true, Ordering::SeqCst);
+            42
+        });
+        assert!(ran.load(Ordering::SeqCst));
+        assert_eq!(out, 42);
     }
 }
