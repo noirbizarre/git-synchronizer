@@ -89,7 +89,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 let mut failed: Vec<String> = Vec::new();
                 let mut succeeded = 0usize;
                 for remote in &remotes {
-                    match git.fetch_remote_prune(remote) {
+                    let result = ui.spinner(&format!("Fetching {remote}…"), || {
+                        git.fetch_remote_prune(remote)
+                    });
+                    match result {
                         Ok(()) => {
                             succeeded += 1;
                             ui.success(&format!("{} updated.", console::style(remote).cyan()));
@@ -154,16 +157,18 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         continue;
                     }
 
-                    let result = if *branch == current {
-                        // Checked out in the current working directory
-                        git.pull_ff_only()
-                    } else if let Some(wt_path) = wt_map.get(branch) {
-                        // Checked out in another worktree
-                        git.pull_ff_only_in(wt_path)
-                    } else {
-                        // Not checked out anywhere — fast-forward via fetch
-                        git.fetch_update_branch(remote, upstream_branch, branch)
-                    };
+                    let result = ui.spinner(&format!("Pulling {branch}…"), || {
+                        if *branch == current {
+                            // Checked out in the current working directory
+                            git.pull_ff_only()
+                        } else if let Some(wt_path) = wt_map.get(branch) {
+                            // Checked out in another worktree
+                            git.pull_ff_only_in(wt_path)
+                        } else {
+                            // Not checked out anywhere — fast-forward via fetch
+                            git.fetch_update_branch(remote, upstream_branch, branch)
+                        }
+                    });
 
                     match result {
                         Ok(()) => {
@@ -187,7 +192,9 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
     // user confirms everything in one pass.
 
     if !opts.remote_only {
-        let merged = find_merged_local(git, config)?;
+        let merged = ui.spinner("Scanning local branches…", || {
+            find_merged_local(git, config)
+        })?;
 
         // Build a map of branch → worktree for branches that have one.
         let worktrees = git.worktree_list()?;
@@ -448,8 +455,19 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                 wt_handled_branches.insert(branch.clone());
                             }
                         } else {
-                            match remove_worktree(git, wt, opts.use_worktrunk, force, force_delete)
-                            {
+                            let result = ui.spinner(
+                                &format!("Removing worktree {}…", tilde_path(&wt.path)),
+                                || {
+                                    remove_worktree(
+                                        git,
+                                        wt,
+                                        opts.use_worktrunk,
+                                        force,
+                                        force_delete,
+                                    )
+                                },
+                            );
+                            match result {
                                 Ok(()) => {
                                     wt_removed += 1;
                                     if opts.use_worktrunk {
@@ -480,7 +498,11 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     if opts.dry_run {
                         ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
                     } else {
-                        match remove_worktree(git, wt, opts.use_worktrunk, true, false) {
+                        let result = ui.spinner(
+                            &format!("Removing worktree {}…", tilde_path(&wt.path)),
+                            || remove_worktree(git, wt, opts.use_worktrunk, true, false),
+                        );
+                        match result {
                             Ok(()) => {
                                 wt_removed += 1;
                                 ui.success(&format!(
@@ -579,7 +601,9 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         let remotes = effective_remotes(git, config)?;
 
         for remote in &remotes {
-            let merged = find_merged_remote(git, config, remote)?;
+            let merged = ui.spinner(&format!("Scanning {remote}…"), || {
+                find_merged_remote(git, config, remote)
+            })?;
 
             if merged.is_empty() {
                 ui.muted(&format!("No merged remote branches on '{remote}'."));
@@ -611,7 +635,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 if opts.dry_run {
                     ui.muted(&format!("  (dry-run) Would delete '{remote}/{branch}'."));
                 } else {
-                    match git.push_delete(remote, branch) {
+                    let result = ui.spinner(&format!("Deleting {remote}/{branch}…"), || {
+                        git.push_delete(remote, branch)
+                    });
+                    match result {
                         Ok(()) => remote_deleted += 1,
                         Err(e) => {
                             report_remote_failure(ui, "delete", &format!("{remote}/{branch}"), &e);
