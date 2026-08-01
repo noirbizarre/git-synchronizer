@@ -542,6 +542,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 if skip_set.contains(branch) {
                     continue;
                 }
+                if opts.dry_run {
+                    ui.muted(&format!(
+                        "  (dry-run) Would delete local branch '{branch}'."
+                    ));
+                    continue;
+                }
                 if wt_handled_branches.contains(branch) {
                     // `wt remove` was responsible for deleting this branch.
                     // Confirm it actually did; if the branch survives, delete
@@ -575,18 +581,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                     continue;
                 }
-                if opts.dry_run {
-                    ui.muted(&format!(
-                        "  (dry-run) Would delete local branch '{branch}'."
-                    ));
-                } else {
-                    match git.branch_delete(branch) {
-                        Ok(()) => total_deleted += 1,
-                        Err(e) => ui.error(&format!(
-                            "Failed to delete '{}': {e}",
-                            console::style(&branch).red()
-                        )),
-                    }
+                match git.branch_delete(branch) {
+                    Ok(()) => total_deleted += 1,
+                    Err(e) => ui.error(&format!(
+                        "Failed to delete '{}': {e}",
+                        console::style(&branch).red()
+                    )),
                 }
             }
             if !opts.dry_run && total_deleted > 0 {
@@ -2059,6 +2059,58 @@ mod tests {
         assert!(
             !git.branch_exists("feature/wt-leftover")?,
             "branch left behind by `wt remove` should be deleted by git-sync"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_dry_run_with_worktrunk_touches_nothing() -> Result<()> {
+        // Regression test: under worktrunk, branches recorded as
+        // `wt_handled_branches` used to bypass the dry-run guard entirely and
+        // were really passed to `git worktree prune` + `git branch -D`.
+        //
+        // Requires the real `wt` binary; skipped otherwise.
+        if !crate::git::worktrunk_available() {
+            eprintln!("skipping: worktrunk (`wt`) not available on PATH");
+            return Ok(());
+        }
+
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/dry"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("dry.txt"), "dry")?;
+        commit_all(path, "feature dry");
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "feature/dry"])
+            .current_dir(path)
+            .output()?;
+
+        let wt_path = path.join("wt-dry");
+        StdCommand::new("git")
+            .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/dry"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let mut opts = opts_yes_skip_network();
+        opts.use_worktrunk = true;
+        opts.dry_run = true;
+
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(wt_path.exists(), "dry run must not remove the worktree");
+        assert!(
+            git.branch_exists("feature/dry")?,
+            "dry run must not delete the branch"
         );
         Ok(())
     }
