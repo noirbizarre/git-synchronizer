@@ -13,7 +13,7 @@ orphaned worktree cleanup.
 - Respects locked worktrees: skips removal with an informational message
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
-- Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, and empty-diff detection for squash merges)
+- Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, empty-diff detection for squash merges, and deleted-upstream detection)
 - Automatic fast-forward of target branches before detection (with `--no-pull` to skip)
 - Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
 - Interactive setup wizard on first run
@@ -56,6 +56,9 @@ git sync --remote-only
 
 # Skip worktree cleanup
 git sync --no-worktrees
+
+# With -y, also delete branches whose upstream branch was deleted
+git sync -y --delete-gone
 
 # Use worktrunk for worktree removal (triggers pre/post-remove hooks)
 git sync --worktrunk
@@ -170,11 +173,24 @@ CLI flags:
    Per-branch protected branches also serve as merge targets, so branches
    merged into them are detected as candidates too.
 
+   In addition, branches whose **upstream tracking branch no longer exists**
+   are reported as a separate category. This is the footprint left by a merged
+   pull request whose remote branch was deleted, and it is often the only
+   remaining signal for branches squash-merged into a target that has since
+   advanced far enough for the content-based strategies above to lose the
+   trail. Because a deleted upstream does *not* prove the branch was merged
+   (someone may simply have deleted an unmerged remote branch), these entries
+   are **listed unchecked** in the multiselect and are never auto-selected by
+   `--yes` unless you also pass `--delete-gone`. Detection requires up-to-date
+   remote-tracking refs, so it only runs after a successful `fetch --prune`,
+   or in `--dry-run` where a warning notes the results may be stale.
+
    All cleanup items are presented in a **single unified multiselect**:
-   merged branches (with their worktree path shown when applicable), and
-   orphan worktrees (worktrees whose branch no longer exists locally).
-   Merged branches default to selected; orphan worktrees default to
-   unselected. The user confirms everything in one pass.
+   merged branches (with their worktree path shown when applicable), branches
+   with a deleted upstream, and orphan worktrees (worktrees whose branch no
+   longer exists locally). Merged branches default to selected;
+   deleted-upstream branches and orphan worktrees default to unselected.
+   The user confirms everything in one pass.
 
    For selected branches that have worktrees, the worktree is removed first,
    then the branch is deleted with `git branch -D` (force-delete is safe here
@@ -226,11 +242,13 @@ flowchart TD
     FindLocal --> Cherry[Rebase-aware detection\ngit cherry]
     FindLocal --> TreeSHA[Tree SHA comparison]
     FindLocal --> EmptyDiff[Empty-diff detection\ngit diff --quiet]
+    FindLocal --> GoneUpstream[Deleted-upstream detection\nrequires a fetch]
     FindLocal --> Orphans[Find orphan worktrees]
     Merged --> SelectLocal[Unified multiselect:\nbranches + worktrees]
     Cherry --> SelectLocal
     TreeSHA --> SelectLocal
     EmptyDiff --> SelectLocal
+    GoneUpstream --> SelectLocal
     Orphans --> SelectLocal
     SelectLocal --> RemoveWT[Remove selected worktrees]
     RemoveWT --> UseWT{Worktrunk\nenabled?}

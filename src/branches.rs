@@ -184,6 +184,40 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
     Ok(candidates)
 }
 
+/// Return local branches whose upstream tracking branch no longer exists.
+///
+/// A deleted upstream is the footprint left by a merged pull request whose
+/// remote branch was removed. It is the only reliable signal for branches that
+/// were squash-merged into a target which has since advanced far enough for the
+/// content-based strategies in [`find_merged_local`] to lose the trail.
+///
+/// Because the signal is weaker (an upstream can also vanish because someone
+/// deleted an *unmerged* remote branch), these branches are reported as their
+/// own category and are not pre-selected for deletion. Callers must also ensure
+/// remote-tracking refs were refreshed with `git fetch --prune` beforehand,
+/// otherwise the result is meaningless.
+///
+/// Protected branches, the current branch, and anything already reported by
+/// [`find_merged_local`] (passed as `merged`) are excluded.
+pub fn find_gone_local(git: &Git, config: &Config, merged: &[String]) -> Result<Vec<String>> {
+    let matcher = build_protected_matcher(config)?;
+    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
+    let current = git.current_branch()?;
+    let already: HashSet<&String> = merged.iter().collect();
+
+    let mut candidates: Vec<String> = git
+        .branches_with_gone_upstream()?
+        .into_iter()
+        .filter(|b| {
+            *b != current && !already.contains(b) && !is_protected(b, &matcher, &branch_protected)
+        })
+        .collect();
+
+    candidates.sort();
+    candidates.dedup();
+    Ok(candidates)
+}
+
 /// Return remote branches that are merged into *any* of the protected branches
 /// and are not themselves protected, for the given remote.
 pub fn find_merged_remote(git: &Git, config: &Config, remote: &str) -> Result<Vec<String>> {
@@ -265,6 +299,70 @@ mod tests {
         assert!(!merged.contains(&"main".to_string()));
         // release/1.0 matches the release/* pattern
         assert!(!merged.contains(&"release/1.0".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_gone_local() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+
+        let merged = find_merged_local(&git, &config)?;
+        let gone = find_gone_local(&git, &config, &merged)?;
+
+        // Upstream was deleted and pruned.
+        assert_eq!(gone, vec!["feature/gone".to_string()]);
+        // Upstream still exists.
+        assert!(!gone.contains(&"feature/alive".to_string()));
+        // No upstream at all carries no signal.
+        assert!(!gone.contains(&"feature/done".to_string()));
+        // Protected target is never a candidate.
+        assert!(!gone.contains(&"main".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_gone_local_excludes_already_merged() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+
+        // Pretend the content-based strategies already caught it.
+        let merged = vec!["feature/gone".to_string()];
+        assert!(find_gone_local(&git, &config, &merged)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_gone_local_excludes_current_and_protected() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+
+        // Protected by pattern.
+        let config = Config {
+            protected: vec!["main".to_string(), "feature/*".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        assert!(find_gone_local(&git, &config, &[])?.is_empty());
+
+        // Checked out: never proposed for deletion.
+        StdCommand::new("git")
+            .args(["checkout", "feature/gone"])
+            .current_dir(dir.path().join("work"))
+            .output()?;
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        assert!(find_gone_local(&git, &config, &[])?.is_empty());
         Ok(())
     }
 
