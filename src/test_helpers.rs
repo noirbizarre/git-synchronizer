@@ -147,10 +147,8 @@ pub fn init_repo_with_gone_upstream() -> Result<(TempDir, Git)> {
 
     for branch in ["feature/gone", "feature/alive"] {
         git_in(&work, &["checkout", "-b", branch, "main"])?;
-        std::fs::write(
-            work.join(format!("{}.txt", branch.replace('/', "-"))),
-            branch,
-        )?;
+        let file = format!("{}.txt", branch.replace('/', "-"));
+        std::fs::write(work.join(file), branch)?;
         git_in(&work, &["add", "."])?;
         git_in(&work, &["commit", "-m", branch])?;
         git_in(&work, &["push", "-u", "origin", branch])?;

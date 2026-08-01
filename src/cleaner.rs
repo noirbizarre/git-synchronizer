@@ -334,18 +334,16 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             ui.heading(&format!("Found {}:", join_with_and(&found)));
 
             let has_branches = has_merged || has_gone;
-            let prompt = if has_branches && has_orphans {
-                "Select branches and worktrees to delete"
+            let mut prompt = if has_branches && has_orphans {
+                "Select branches and worktrees to delete".to_string()
             } else if has_orphans {
-                "Select orphan worktrees to remove"
+                "Select orphan worktrees to remove".to_string()
             } else {
-                "Select branches to delete"
+                "Select branches to delete".to_string()
             };
-            if has_gone && !opts.yes {
-                ui.muted(
-                    "Branches with a deleted upstream are unchecked; \
-                     a deleted upstream does not prove the branch was merged.",
-                );
+            if has_gone {
+                // Explain the unchecked entries where the user reads them.
+                prompt.push_str(" (deleted upstreams unchecked: not proof of a merge)");
             }
 
             let selected = if opts.yes {
@@ -362,7 +360,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     .cloned()
                     .collect()
             } else {
-                ui.multi_select(prompt, &values, &labels, &defaults, &hints)?
+                ui.multi_select(&prompt, &values, &labels, &defaults, &hints)?
             };
 
             // --- Detect worktrees that would fail a plain removal ---
@@ -437,13 +435,8 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             for branch in &auto_force {
                 force_map.insert(branch.clone(), (false, true));
                 let wt = &wt_map[branch];
-                let why = if gone_set.contains(branch) {
-                    "upstream deleted"
-                } else {
-                    "merged"
-                };
                 ui.muted(&format!(
-                    "Auto force-deleting '{}' ({}); {why} but commits not reachable from target.",
+                    "Auto force-deleting '{}' ({}); commits not reachable from any merge target.",
                     branch,
                     tilde_path(&wt.path),
                 ));
@@ -852,6 +845,18 @@ mod tests {
             report_remote_failure(&ui, "pull", "feature", &err),
             GitErrorKind::Other
         );
+    }
+
+    /// Whether the real `wt` binary is available.
+    ///
+    /// Tests exercising the worktrunk code path cannot be faked, so they opt
+    /// out when it is not installed (notably in CI).
+    fn worktrunk_installed() -> bool {
+        let available = crate::git::worktrunk_available();
+        if !available {
+            eprintln!("skipping: worktrunk (`wt`) not available on PATH");
+        }
+        available
     }
 
     fn default_config() -> Config {
@@ -2158,8 +2163,7 @@ mod tests {
         // and so refuses to delete the branch without `-D`.
         //
         // Requires the real `wt` binary; skipped otherwise.
-        if !crate::git::worktrunk_available() {
-            eprintln!("skipping: worktrunk (`wt`) not available on PATH");
+        if !worktrunk_installed() {
             return Ok(());
         }
 
@@ -2247,8 +2251,7 @@ mod tests {
         // were really passed to `git worktree prune` + `git branch -D`.
         //
         // Requires the real `wt` binary; skipped otherwise.
-        if !crate::git::worktrunk_available() {
-            eprintln!("skipping: worktrunk (`wt`) not available on PATH");
+        if !worktrunk_installed() {
             return Ok(());
         }
 
