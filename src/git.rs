@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
@@ -365,6 +366,26 @@ impl Git {
             .filter(|l| !l.is_empty())
             .map(|l| l.to_string())
             .collect())
+    }
+
+    /// Return local branches configured with an upstream whose remote-tracking
+    /// ref no longer exists.
+    ///
+    /// This is the state `git branch -vv` renders as `[origin/x: gone]`, and is
+    /// the typical footprint of a branch whose pull request was merged and whose
+    /// remote branch was deleted, followed by `git fetch --prune`.
+    ///
+    /// Existence is resolved by set-difference against `refs/remotes` rather
+    /// than by reading `%(upstream:track)`, so the result does not depend on
+    /// git's output locale.
+    pub fn branches_with_gone_upstream(&self) -> Result<Vec<String>> {
+        let heads = self.run(&[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(upstream)",
+            "refs/heads",
+        ])?;
+        let remotes = self.run(&["for-each-ref", "--format=%(refname)", "refs/remotes"])?;
+        Ok(parse_gone_upstreams(&heads, &remotes))
     }
 
     /// Return remote-tracking branches merged into `target` for the given remote.
@@ -993,6 +1014,33 @@ fn parse_branch_list(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Determine which local branches have a configured upstream that no longer
+/// exists.
+///
+/// `heads` is the output of
+/// `git for-each-ref --format=%(refname:short)%00%(upstream) refs/heads` and
+/// `remotes` the output of `git for-each-ref --format=%(refname) refs/remotes`.
+/// Branches without an upstream are ignored: absence of tracking information
+/// carries no signal about whether the branch was merged.
+fn parse_gone_upstreams(heads: &str, remotes: &str) -> Vec<String> {
+    let existing: HashSet<&str> = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    heads
+        .lines()
+        .filter_map(|line| {
+            let (branch, upstream) = line.split_once('\0')?;
+            if branch.is_empty() || upstream.is_empty() || existing.contains(upstream) {
+                return None;
+            }
+            Some(branch.to_string())
+        })
+        .collect()
+}
+
 /// Parse `git worktree list --porcelain` output.
 fn parse_worktree_list(output: &str) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
@@ -1161,6 +1209,45 @@ mod tests {
     fn test_parse_branch_list_empty() {
         let branches = parse_branch_list("");
         assert!(branches.is_empty());
+    }
+
+    #[test]
+    fn test_parse_gone_upstreams() {
+        let heads = "\
+main\0refs/remotes/origin/main
+feature/gone\0refs/remotes/origin/feature/gone
+feature/alive\0refs/remotes/origin/feature/alive
+local-only\0";
+        let remotes = "refs/remotes/origin/main\nrefs/remotes/origin/feature/alive\n";
+        assert_eq!(
+            parse_gone_upstreams(heads, remotes),
+            vec!["feature/gone".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_gone_upstreams_ignores_branches_without_upstream() {
+        let heads = "solo\0\nother\0";
+        assert_eq!(parse_gone_upstreams(heads, ""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_parse_gone_upstreams_all_gone_when_no_remote_refs() {
+        let heads = "a\0refs/remotes/origin/a\nb\0refs/remotes/origin/b";
+        assert_eq!(
+            parse_gone_upstreams(heads, ""),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_gone_upstreams_handles_slashed_names_and_empty_input() {
+        let heads = "feat/a/b/c\0refs/remotes/upstream/feat/a/b/c";
+        assert_eq!(
+            parse_gone_upstreams(heads, "refs/remotes/origin/feat/a/b/c"),
+            vec!["feat/a/b/c".to_string()]
+        );
+        assert!(parse_gone_upstreams("", "").is_empty());
     }
 
     #[test]

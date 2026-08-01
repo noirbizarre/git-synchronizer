@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::branches::{find_merged_local, find_merged_remote, resolve_merge_targets};
+use crate::branches::{
+    find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
+};
 use crate::config::Config;
 use crate::git::{Git, GitCommandError, GitErrorKind, Worktree};
 use crate::ui::Ui;
@@ -16,6 +18,15 @@ fn tilde_path(abs: &str) -> String {
         return format!("~{rest}");
     }
     abs.to_string()
+}
+
+/// Join fragments as `a`, `a and b`, or `a, b and c`.
+fn join_with_and(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Render a per-remote operation failure with a friendly classification.
@@ -68,12 +79,17 @@ pub struct CleanerOptions {
     pub local_only: bool,
     pub remote_only: bool,
     pub no_worktrees: bool,
+    pub delete_gone: bool,
     pub use_worktrunk: bool,
 }
 
 /// Run the full clean-up workflow.
 pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result<()> {
     // ── 1. Fetch & prune ─────────────────────────────────────────────
+
+    // Whether every configured remote was refreshed this run. Deleted-upstream
+    // detection is only trustworthy when remote-tracking refs are up to date.
+    let mut fetch_succeeded = false;
 
     if !opts.no_fetch {
         let remotes = effective_remotes(git, config)?;
@@ -110,6 +126,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         failed.join(", ")
                     ));
                 } else if succeeded > 0 {
+                    fetch_succeeded = true;
                     ui.success("Remotes updated.");
                 }
             }
@@ -196,6 +213,27 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             find_merged_local(git, config)
         })?;
 
+        // Branches whose upstream was deleted. Only meaningful with fresh
+        // remote-tracking refs, so this requires a successful fetch — except in
+        // --dry-run, where nothing is deleted and an empty preview would be
+        // useless.
+        let gone = if fetch_succeeded || opts.dry_run {
+            let gone = ui.spinner("Scanning for deleted upstreams…", || {
+                find_gone_local(git, config, &merged)
+            })?;
+            if !gone.is_empty() && !fetch_succeeded {
+                ui.warning("Remotes were not fetched; deleted-upstream detection may be stale.");
+            }
+            gone
+        } else {
+            Vec::new()
+        };
+        let gone_set: HashSet<String> = gone.iter().cloned().collect();
+
+        // Everything the user may act on, in display order: content-merged
+        // branches first, deleted-upstream ones after.
+        let candidates: Vec<String> = merged.iter().chain(gone.iter()).cloned().collect();
+
         // Build a map of branch → worktree for branches that have one.
         let worktrees = git.worktree_list()?;
         let wt_map: HashMap<String, Worktree> = worktrees
@@ -216,7 +254,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
         // Report locked worktrees (both branch-associated and orphan).
         if !opts.no_worktrees {
-            for branch in &merged {
+            for branch in &candidates {
                 if let Some(wt) = wt_map.get(branch)
                     && wt.is_locked
                 {
@@ -229,9 +267,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         }
 
         let has_merged = !merged.is_empty();
+        let has_gone = !gone.is_empty();
         let has_orphans = !orphan_unlocked.is_empty();
 
-        if !has_merged && !has_orphans {
+        if !has_merged && !has_gone && !has_orphans {
             ui.muted("No merged local branches to delete.");
             if !opts.no_worktrees {
                 ui.muted("No orphan worktrees to remove.");
@@ -244,19 +283,30 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             let mut defaults: Vec<bool> = Vec::new();
             let mut hints: Vec<String> = Vec::new();
 
-            // Merged branches (with worktree path shown in label if applicable).
-            for branch in &merged {
+            // Branch candidates (with worktree path shown in label if
+            // applicable). Deleted-upstream branches are listed but left
+            // unchecked: the signal does not prove they were merged.
+            for branch in &candidates {
                 values.push(format!("branch:{branch}"));
+                let is_gone = gone_set.contains(branch);
                 let has_unlocked_wt = wt_map.get(branch).is_some_and(|wt| !wt.is_locked);
                 if !opts.no_worktrees && has_unlocked_wt {
                     let wt = &wt_map[branch];
                     labels.push(format!("{branch} ({})", tilde_path(&wt.path)));
-                    hints.push("branch + worktree".to_string());
+                    hints.push(if is_gone {
+                        "upstream gone + worktree".to_string()
+                    } else {
+                        "branch + worktree".to_string()
+                    });
                 } else {
                     labels.push(branch.clone());
-                    hints.push(String::new());
+                    hints.push(if is_gone {
+                        "upstream gone".to_string()
+                    } else {
+                        String::new()
+                    });
                 }
-                defaults.push(true);
+                defaults.push(!is_gone);
             }
 
             // Orphan worktrees.
@@ -271,32 +321,46 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             }
 
             // Heading.
-            let heading = match (has_merged, has_orphans) {
-                (true, true) => format!(
-                    "Found {} merged local branch(es) and {} orphan worktree(s):",
-                    merged.len(),
-                    orphan_unlocked.len()
-                ),
-                (true, false) => {
-                    format!("Found {} merged local branch(es):", merged.len())
-                }
-                (false, true) => format!("Found {} orphan worktree(s):", orphan_unlocked.len()),
-                _ => unreachable!(),
-            };
-            ui.heading(&heading);
+            let mut found: Vec<String> = Vec::new();
+            if has_merged {
+                found.push(format!("{} merged local branch(es)", merged.len()));
+            }
+            if has_gone {
+                found.push(format!("{} with a deleted upstream", gone.len()));
+            }
+            if has_orphans {
+                found.push(format!("{} orphan worktree(s)", orphan_unlocked.len()));
+            }
+            ui.heading(&format!("Found {}:", join_with_and(&found)));
 
-            let prompt = if has_merged && has_orphans {
-                "Select branches and worktrees to delete"
+            let has_branches = has_merged || has_gone;
+            let mut prompt = if has_branches && has_orphans {
+                "Select branches and worktrees to delete".to_string()
             } else if has_orphans {
-                "Select orphan worktrees to remove"
+                "Select orphan worktrees to remove".to_string()
             } else {
-                "Select branches to delete"
+                "Select branches to delete".to_string()
             };
+            if has_gone {
+                // Explain the unchecked entries where the user reads them.
+                prompt.push_str(" (deleted upstreams unchecked: not proof of a merge)");
+            }
 
             let selected = if opts.yes {
-                values.clone()
+                // Non-interactive: take everything except deleted-upstream
+                // branches, which stay opt-in behind --delete-gone.
+                values
+                    .iter()
+                    .filter(|value| {
+                        opts.delete_gone
+                            || !value
+                                .strip_prefix("branch:")
+                                .is_some_and(|b| gone_set.contains(b))
+                    })
+                    .cloned()
+                    .collect()
             } else {
-                ui.multi_select(prompt, &values, &labels, &defaults, &hints)?
+                ui.multi_select(&prompt, &values, &labels, &defaults, &hints)?
             };
 
             // --- Detect worktrees that would fail a plain removal ---
@@ -315,12 +379,13 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
             // (branch, force, force_delete)
             let mut problematic: Vec<(String, bool, bool)> = Vec::new();
-            // Branches that are merged (per find_merged_local) but whose
-            // commit SHAs are not reachable from any merge target (e.g.
-            // squash-merged or cherry-picked). These are auto force-deleted
-            // without a second prompt since merged status is already proven.
+            // Branches whose commit SHAs are not reachable from any merge
+            // target (squash-merged, cherry-picked, or selected on the strength
+            // of a deleted upstream). These are auto force-deleted without a
+            // second prompt: the user already selected them and there is no
+            // uncommitted work at risk.
             let mut auto_force: Vec<String> = Vec::new();
-            for branch in &merged {
+            for branch in &candidates {
                 let key = format!("branch:{branch}");
                 if !selected.contains(&key) {
                     continue;
@@ -351,8 +416,8 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     // Real data-loss risk: always confirm.
                     problematic.push((branch.clone(), dirty, unmerged));
                 } else if unmerged {
-                    // Merged-detected but commits not reachable from target
-                    // (squash / cherry-pick). Auto force-delete; no prompt.
+                    // Commits not reachable from target (squash / cherry-pick /
+                    // deleted upstream). Auto force-delete; no prompt.
                     auto_force.push(branch.clone());
                 }
             }
@@ -364,13 +429,14 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // deletion).
             let mut force_map: HashMap<String, (bool, bool)> = HashMap::new();
             let mut skip_set: HashSet<String> = HashSet::new();
-            // Auto force-delete merged-but-unreachable branches: no prompt,
-            // but surface the action so the user can see what's happening.
+            // Auto force-delete branches whose commits are unreachable from any
+            // target: no prompt, but surface the action so the user can see
+            // what's happening.
             for branch in &auto_force {
                 force_map.insert(branch.clone(), (false, true));
                 let wt = &wt_map[branch];
                 ui.muted(&format!(
-                    "Auto force-deleting '{}' ({}); merged but commits not reachable from target.",
+                    "Auto force-deleting '{}' ({}); commits not reachable from any merge target.",
                     branch,
                     tilde_path(&wt.path),
                 ));
@@ -435,7 +501,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // 1. Remove worktrees for selected merged branches first.
             if !opts.no_worktrees {
                 let mut wt_removed = 0usize;
-                for branch in &merged {
+                for branch in &candidates {
                     let key = format!("branch:{branch}");
                     if !selected.contains(&key) {
                         continue;
@@ -524,7 +590,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 }
             }
 
-            // 3. Delete selected merged branches.
+            // 3. Delete the selected branches.
             //
             // Branches whose worktree was removed via worktrunk are normally
             // deleted by `wt remove` itself. However, `wt`'s merge check is
@@ -534,12 +600,18 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // branches we verify the ref is actually gone and delete it
             // ourselves if it survived. Branches whose worktree the user chose
             // not to force-remove are skipped.
-            for branch in &merged {
+            for branch in &candidates {
                 let key = format!("branch:{branch}");
                 if !selected.contains(&key) {
                     continue;
                 }
                 if skip_set.contains(branch) {
+                    continue;
+                }
+                if opts.dry_run {
+                    ui.muted(&format!(
+                        "  (dry-run) Would delete local branch '{branch}'."
+                    ));
                     continue;
                 }
                 if wt_handled_branches.contains(branch) {
@@ -575,18 +647,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                     continue;
                 }
-                if opts.dry_run {
-                    ui.muted(&format!(
-                        "  (dry-run) Would delete local branch '{branch}'."
-                    ));
-                } else {
-                    match git.branch_delete(branch) {
-                        Ok(()) => total_deleted += 1,
-                        Err(e) => ui.error(&format!(
-                            "Failed to delete '{}': {e}",
-                            console::style(&branch).red()
-                        )),
-                    }
+                match git.branch_delete(branch) {
+                    Ok(()) => total_deleted += 1,
+                    Err(e) => ui.error(&format!(
+                        "Failed to delete '{}': {e}",
+                        console::style(&branch).red()
+                    )),
                 }
             }
             if !opts.dry_run && total_deleted > 0 {
@@ -781,6 +847,18 @@ mod tests {
         );
     }
 
+    /// Whether the real `wt` binary is available.
+    ///
+    /// Tests exercising the worktrunk code path cannot be faked, so they opt
+    /// out when it is not installed (notably in CI).
+    fn worktrunk_installed() -> bool {
+        let available = crate::git::worktrunk_available();
+        if !available {
+            eprintln!("skipping: worktrunk (`wt`) not available on PATH");
+        }
+        available
+    }
+
     fn default_config() -> Config {
         Config {
             protected: vec!["main".to_string()],
@@ -798,6 +876,7 @@ mod tests {
             local_only: false,
             remote_only: false,
             no_worktrees: false,
+            delete_gone: false,
             use_worktrunk: false,
         }
     }
@@ -879,6 +958,7 @@ mod tests {
             local_only: true, // skip the remote-deletion phase
             remote_only: false,
             no_worktrees: true,
+            delete_gone: false,
             use_worktrunk: false,
         };
 
@@ -929,6 +1009,107 @@ mod tests {
 
         let branches = git.local_branches()?;
         assert!(!branches.contains(&"feature/done".to_string()));
+        Ok(())
+    }
+
+    /// Options for the gone-upstream fixture: a real fetch is required for
+    /// deleted-upstream detection, and the remote phase is skipped so the test
+    /// only exercises local deletion.
+    fn opts_yes_with_fetch() -> CleanerOptions {
+        CleanerOptions {
+            yes: true,
+            no_fetch: false,
+            no_pull: true,
+            local_only: true,
+            ..opts_yes_skip_network()
+        }
+    }
+
+    #[test]
+    fn test_run_keeps_gone_branch_without_delete_gone() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let opts = opts_yes_with_fetch();
+
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        let branches = git.local_branches()?;
+        assert!(
+            branches.contains(&"feature/gone".to_string()),
+            "a deleted upstream alone must not trigger deletion under --yes"
+        );
+        assert!(
+            !branches.contains(&"feature/done".to_string()),
+            "content-merged branches are still deleted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_delete_gone_removes_branch_with_deleted_upstream() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let mut opts = opts_yes_with_fetch();
+        opts.delete_gone = true;
+
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        let branches = git.local_branches()?;
+        assert!(!branches.contains(&"feature/gone".to_string()));
+        assert!(
+            branches.contains(&"feature/alive".to_string()),
+            "branches whose upstream still exists are untouched"
+        );
+        assert!(branches.contains(&"main".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_no_fetch_disables_gone_detection() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let mut opts = opts_yes_with_fetch();
+        opts.no_fetch = true;
+        opts.delete_gone = true;
+
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        let branches = git.local_branches()?;
+        assert!(
+            branches.contains(&"feature/gone".to_string()),
+            "stale remote-tracking refs must not be trusted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_dry_run_preserves_gone_branch() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let mut opts = opts_yes_with_fetch();
+        opts.delete_gone = true;
+        opts.dry_run = true;
+
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(git.local_branches()?.contains(&"feature/gone".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_delete_gone_removes_worktree_and_branch() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let work = dir.path().join("work");
+        let wt_path = dir.path().join("wt-gone");
+        StdCommand::new("git")
+            .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/gone"])
+            .current_dir(&work)
+            .output()?;
+        assert!(wt_path.exists());
+
+        let mut opts = opts_yes_with_fetch();
+        opts.delete_gone = true;
+
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(!wt_path.exists(), "worktree should be removed");
+        assert!(!git.local_branches()?.contains(&"feature/gone".to_string()));
         Ok(())
     }
 
@@ -1982,8 +2163,7 @@ mod tests {
         // and so refuses to delete the branch without `-D`.
         //
         // Requires the real `wt` binary; skipped otherwise.
-        if !crate::git::worktrunk_available() {
-            eprintln!("skipping: worktrunk (`wt`) not available on PATH");
+        if !worktrunk_installed() {
             return Ok(());
         }
 
@@ -2059,6 +2239,57 @@ mod tests {
         assert!(
             !git.branch_exists("feature/wt-leftover")?,
             "branch left behind by `wt remove` should be deleted by git-sync"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_dry_run_with_worktrunk_touches_nothing() -> Result<()> {
+        // Regression test: under worktrunk, branches recorded as
+        // `wt_handled_branches` used to bypass the dry-run guard entirely and
+        // were really passed to `git worktree prune` + `git branch -D`.
+        //
+        // Requires the real `wt` binary; skipped otherwise.
+        if !worktrunk_installed() {
+            return Ok(());
+        }
+
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        StdCommand::new("git")
+            .args(["checkout", "-b", "feature/dry"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("dry.txt"), "dry")?;
+        commit_all(path, "feature dry");
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        StdCommand::new("git")
+            .args(["merge", "feature/dry"])
+            .current_dir(path)
+            .output()?;
+
+        let wt_path = path.join("wt-dry");
+        StdCommand::new("git")
+            .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/dry"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let mut opts = opts_yes_skip_network();
+        opts.use_worktrunk = true;
+        opts.dry_run = true;
+
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(wt_path.exists(), "dry run must not remove the worktree");
+        assert!(
+            git.branch_exists("feature/dry")?,
+            "dry run must not delete the branch"
         );
         Ok(())
     }

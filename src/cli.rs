@@ -48,6 +48,15 @@ pub struct Cli {
     #[arg(long)]
     pub no_worktrees: bool,
 
+    /// With --yes, also delete branches whose upstream branch was deleted
+    ///
+    /// These branches are always listed for interactive selection, but are
+    /// never pre-selected because a deleted upstream does not prove the branch
+    /// was merged. Requires up-to-date remote-tracking refs, so it has no
+    /// effect when --no-fetch is used outside of --dry-run.
+    #[arg(long)]
+    pub delete_gone: bool,
+
     /// Use worktrunk (wt) for worktree removal to trigger pre/post-remove hooks
     #[arg(long, overrides_with = "no_worktrunk")]
     pub worktrunk: bool,
@@ -138,6 +147,7 @@ mod tests {
         assert!(!cli.local_only);
         assert!(!cli.remote_only);
         assert!(!cli.no_worktrees);
+        assert!(!cli.delete_gone);
         assert!(!cli.worktrunk);
         assert!(!cli.no_worktrunk);
         assert!(cli.command.is_none());

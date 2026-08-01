@@ -110,6 +110,68 @@ pub fn init_repo_with_worktree() -> Result<(TempDir, Git, String)> {
     Ok((dir, git, wt_path.to_string_lossy().to_string()))
 }
 
+/// Create a clone whose `feature/gone` branch tracks a deleted remote branch.
+///
+/// Layout of the returned working clone:
+/// - `main` — protected target, tracks `origin/main`
+/// - `feature/gone` — one unmerged commit, upstream deleted then pruned
+/// - `feature/alive` — one unmerged commit, upstream still present
+/// - `feature/done` — merged into `main`, no upstream
+///
+/// Returns the tempdir holding both repos and a [`Git`] rooted in the clone.
+pub fn init_repo_with_gone_upstream() -> Result<(TempDir, Git)> {
+    let dir = tempfile::tempdir()?;
+    let origin = dir.path().join("origin.git");
+    let work = dir.path().join("work");
+
+    let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
+        StdCommand::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()?;
+        Ok(())
+    };
+
+    // Seed repository, then turn it into the remote.
+    let (seed, _) = init_repo()?;
+    git_in(
+        seed.path(),
+        &["clone", "--bare", ".", origin.to_str().unwrap()],
+    )?;
+    git_in(
+        dir.path(),
+        &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+    )?;
+    git_in(&work, &["config", "user.email", "test@test.com"])?;
+    git_in(&work, &["config", "user.name", "Test"])?;
+
+    for branch in ["feature/gone", "feature/alive"] {
+        git_in(&work, &["checkout", "-b", branch, "main"])?;
+        let file = format!("{}.txt", branch.replace('/', "-"));
+        std::fs::write(work.join(file), branch)?;
+        git_in(&work, &["add", "."])?;
+        git_in(&work, &["commit", "-m", branch])?;
+        git_in(&work, &["push", "-u", "origin", branch])?;
+    }
+
+    // A branch merged the classic way, with no upstream at all.
+    git_in(&work, &["checkout", "-b", "feature/done", "main"])?;
+    std::fs::write(work.join("done.txt"), "done")?;
+    git_in(&work, &["add", "."])?;
+    git_in(&work, &["commit", "-m", "feature done"])?;
+    git_in(&work, &["checkout", "main"])?;
+    git_in(&work, &["merge", "--no-ff", "-m", "merge", "feature/done"])?;
+
+    // Drop the remote branch and prune, leaving `feature/gone` orphaned.
+    git_in(&origin, &["branch", "-D", "feature/gone"])?;
+    git_in(&work, &["fetch", "--prune", "origin"])?;
+
+    let git = Git::with_workdir(false, &work);
+    // Keep `seed` alive for the lifetime of the clone's object store copy.
+    drop(seed);
+    Ok((dir, git))
+}
+
 /// Create a repo with a merged branch, a linked worktree for it, and lock the worktree.
 pub fn init_repo_with_locked_worktree() -> Result<(TempDir, Git, String)> {
     let (dir, git) = init_repo()?;

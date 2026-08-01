@@ -232,6 +232,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         local_only: cli.local_only,
         remote_only: cli.remote_only,
         no_worktrees: cli.no_worktrees,
+        delete_gone: cli.delete_gone,
         use_worktrunk,
     };
 

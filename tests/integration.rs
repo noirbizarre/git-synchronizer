@@ -1264,3 +1264,159 @@ fn no_stack_trace_when_not_in_a_git_repo() {
         .stderr(predicate::str::contains("Error:").not())
         .stderr(predicate::str::contains("stack backtrace").not());
 }
+
+// ── Deleted upstream detection ───────────────────────────────────────
+
+/// Create a repo with a `feature/gone` branch whose remote branch was deleted,
+/// plus a `feature/alive` branch still present on the remote. Neither branch is
+/// merged into `main`, so only the deleted-upstream signal can find them.
+fn init_repo_with_gone_upstream() -> (TempDir, std::path::PathBuf) {
+    let (dir, work_path, bare_path) = init_repo_with_remote();
+
+    for branch in ["feature/gone", "feature/alive"] {
+        StdCommand::new("git")
+            .args(["checkout", "-b", branch, "main"])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+        std::fs::write(
+            work_path.join(format!("{}.txt", branch.replace('/', "-"))),
+            branch,
+        )
+        .unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-m", branch])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "-u", "origin", branch])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+    }
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    // Delete the remote branch, as a merge-and-delete PR workflow would.
+    StdCommand::new("git")
+        .args(["branch", "-D", "feature/gone"])
+        .current_dir(&bare_path)
+        .output()
+        .unwrap();
+
+    (dir, work_path)
+}
+
+/// Local branch names in an arbitrary directory.
+fn branches_in(path: &std::path::Path) -> Vec<String> {
+    let output = StdCommand::new("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+#[test]
+fn gone_upstream_branch_is_reported_but_kept_by_default() {
+    let (_dir, work_path) = init_repo_with_gone_upstream();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-pull", "--local-only"])
+        .current_dir(&work_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("with a deleted upstream"));
+
+    let branches = branches_in(&work_path);
+    assert!(
+        branches.contains(&"feature/gone".to_string()),
+        "must not be deleted without --delete-gone: {branches:?}"
+    );
+}
+
+#[test]
+fn delete_gone_removes_branch_with_deleted_upstream() {
+    let (_dir, work_path) = init_repo_with_gone_upstream();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-pull", "--local-only", "--delete-gone"])
+        .current_dir(&work_path)
+        .assert()
+        .success();
+
+    let branches = branches_in(&work_path);
+    assert!(!branches.contains(&"feature/gone".to_string()));
+    assert!(
+        branches.contains(&"feature/alive".to_string()),
+        "branches with a live upstream must survive: {branches:?}"
+    );
+}
+
+#[test]
+fn gone_upstream_detection_requires_a_fetch() {
+    let (_dir, work_path) = init_repo_with_gone_upstream();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args([
+            "-y",
+            "--no-fetch",
+            "--no-pull",
+            "--local-only",
+            "--delete-gone",
+        ])
+        .current_dir(&work_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("with a deleted upstream").not());
+
+    assert!(branches_in(&work_path).contains(&"feature/gone".to_string()));
+}
+
+#[test]
+fn gone_upstream_detection_runs_in_dry_run_without_fetch() {
+    let (_dir, work_path) = init_repo_with_gone_upstream();
+
+    // Refresh remote-tracking refs out of band, as a user would before a preview.
+    StdCommand::new("git")
+        .args(["fetch", "--prune", "origin"])
+        .current_dir(&work_path)
+        .output()
+        .unwrap();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args([
+            "-y",
+            "--dry-run",
+            "--no-fetch",
+            "--no-pull",
+            "--local-only",
+            "--delete-gone",
+        ])
+        .current_dir(&work_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("with a deleted upstream"))
+        .stderr(predicate::str::contains(
+            "(dry-run) Would delete local branch 'feature/gone'",
+        ));
+
+    assert!(branches_in(&work_path).contains(&"feature/gone".to_string()));
+}

@@ -34,8 +34,14 @@ jobs:
       - uses: taiki-e/install-action@nextest
       # worktrunk (`wt`) is required by the worktrunk integration tests;
       # without it they skip and leave the code paths uncovered.
+      #
+      # `--force` is mandatory: rust-cache restores cargo's installed-package
+      # metadata but not `~/.cargo/bin`, so binstall would otherwise report
+      # worktrunk as "already installed" and skip it, leaving `wt` off PATH.
+      # `wt --version` then fails the job instead of silently losing coverage.
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm worktrunk
+      - run: cargo binstall --no-confirm --force worktrunk
+      - run: wt --version
       - run: cargo llvm-cov nextest --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v5
         with:
