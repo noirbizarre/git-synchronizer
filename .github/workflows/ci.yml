@@ -13,12 +13,14 @@ jobs:
     name: 🕵️ Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: j178/prek-action@v2
+      # Pinned to an exact release on purpose: prek-action stopped publishing
+      # moving major tags in v3, so `@v3` does not resolve.
+      - uses: j178/prek-action@v3.0.0
 
   test:
     name: 🧪 Test (${{ matrix.os }})
@@ -27,7 +29,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -43,7 +45,7 @@ jobs:
       - run: cargo binstall --no-confirm --force worktrunk
       - run: wt --version
       - run: cargo llvm-cov nextest --lcov --output-path lcov.info
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         with:
           files: lcov.info
 
@@ -56,7 +58,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install gh-ship
         run: gh extension install noirbizarre/gh-ship
