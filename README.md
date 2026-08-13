@@ -22,6 +22,17 @@ orphaned worktree cleanup.
 
 ## Installation
 
+From crates.io:
+
+```sh
+cargo install git-synchronizer
+```
+
+Or grab a prebuilt binary for your platform from the
+[latest release](https://github.com/noirbizarre/git-synchronizer/releases/latest).
+
+From a checkout:
+
 ```sh
 cargo install --path .
 ```
@@ -275,14 +286,42 @@ This project uses [mise](https://mise.jdx.dev/) for task management:
 
 ```sh
 mise run build          # Build the project
+mise run build:release  # Build in release mode
 mise run test           # Run tests with cargo-nextest
 mise run lint           # Run clippy
+mise run lint:actions   # Lint the GitHub Actions workflows
 mise run fmt            # Format code
 mise run check          # Run all checks (fmt + lint + test)
 mise run cover          # Generate lcov coverage report
 mise run cover:html     # Generate HTML coverage report
+mise run changelog      # Preview the next version and changelog
+mise run ship:validate  # Validate the gh-ship release setup
 mise run setup          # Install the binary locally
 ```
+
+### Commits
+
+[Conventional Commits](https://www.conventionalcommits.org/), enforced by
+commitlint. The changelog and the next version number are derived from them, so
+the type and scope matter.
+
+### Releases
+
+Orchestrated by [gh-ship](https://github.com/noirbizarre/gh-ship), with the
+version and the changelog produced by [git-cliff](https://git-cliff.org)
+(`cliff.toml`). gh-ship never versions and never writes changelogs; it drives
+the lifecycle:
+
+1. push to `main` → `gh ship prepare` opens or updates the **Release PR**,
+   carrying the `Cargo.toml` bump and the changelog;
+2. review the changelog and merge it;
+3. `gh ship release` tags the merge commit as `vX.Y.Z`, drafts the release,
+   attaches the cross-compiled binaries, publishes the crate to crates.io, and
+   only then makes the release public.
+
+Maintainers do not tag by hand. `gh ship validate` runs in CI, so a workflow
+that stops satisfying the contract fails on a pull request rather than
+mid-release.
 
 ## License
 

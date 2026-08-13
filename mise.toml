@@ -1,17 +1,34 @@
 min_version = "2026.1.1"
 
+[settings]
+# Resolve tools through mise.lock and keep it updated. Without this the
+# lockfile is ignored and `latest` really means latest — which would let
+# git-cliff change between releases and silently change our release notes.
+lockfile = true
+
+# Do not let mise adopt `rust-toolchain.toml`. Rust is installed by rustup
+# locally and by `dtolnay/rust-toolchain` in CI, which handle the per-job
+# components and the cross-compilation targets that mise does not. Without
+# this, `mise-action` would install a redundant second toolchain in every
+# workflow that uses it.
+idiomatic_version_file_enable_tools = []
+
 [tools]
 prek = "latest"
 cargo-binstall = "latest"
 "cargo:cargo-nextest" = "latest"
 "cargo:cargo-llvm-cov" = "latest"
-release-plz = "latest"
+# The release toolchain. git-cliff derives both the next version and the
+# changelog; typos is invoked by cliff.toml as a commit preprocessor.
+git-cliff = "latest"
+typos = "latest"
+actionlint = "latest"
 
 [tasks.build]
 description = "Build the project"
 run = "cargo build"
 
-[tasks.release]
+[tasks."build:release"]
 description = "Build in release mode"
 run = "cargo build --release"
 
@@ -42,6 +59,21 @@ run = "cargo fmt --all -- --check"
 [tasks.check]
 description = "Run all checks"
 depends = ["fmt-check", "lint", "test"]
+
+[tasks."lint:actions"]
+description = "Lint the GitHub Actions workflows"
+run = "actionlint -ignore 'unexpected key \"deployment\" for \"environment\" section' .github/workflows/*.yml"
+
+[tasks.changelog]
+description = "Preview the changelog and version for the next release"
+run = """
+git cliff --bumped-version
+git cliff --bump --unreleased
+"""
+
+[tasks."ship:validate"]
+description = "Validate this repository's gh-ship release setup"
+run = "gh ship validate"
 
 [tasks.setup]
 description = "Install locally"

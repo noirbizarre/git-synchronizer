@@ -1,0 +1,138 @@
+name: 📦 Publish Release
+
+# No correlation input: gh-ship dispatches this on the tag itself, which is
+# what it correlates on. See https://noirbizarre.github.io/gh-ship/workflows/
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag being released
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  RUSTUP_MAX_RETRIES: 10
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # gh-ship has already created the tag and the GitHub Release as a DRAFT, so
+  # these assets land before anyone watching the repository is notified.
+  # `upload-rust-binary-action` only ever calls `gh release upload`, never
+  # `gh release create`, so it attaches to the draft without revealing it.
+  build:
+    name: 🛠️ Build & Upload (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    # Deliberately no `environment:`. This job needs no release secret — the
+    # default GITHUB_TOKEN can upload to a release in its own repository — and
+    # gating eight matrix legs on the environment would demand eight approvals
+    # if it ever gains a required reviewer. The gate belongs on `crates-io`.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-freebsd
+            os: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Build exactly what is being released, not a branch tip that may
+          # have moved since gh-ship created the tag.
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+        if: startsWith(matrix.os, 'ubuntu') && !contains(matrix.target, '-musl')
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+        if: contains(matrix.target, '-musl')
+
+      - run: echo "RUSTFLAGS=${RUSTFLAGS} -C target-feature=+crt-static" >> "${GITHUB_ENV}"
+        if: endsWith(matrix.target, 'windows-msvc')
+
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: git-sync
+          target: ${{ matrix.target }}
+          # Must be a *fully-formed* tag ref: the action bails on anything not
+          # starting with `refs/tags/`. It is passed explicitly because this
+          # workflow is dispatched, so GITHUB_REF names a branch, not the tag.
+          ref: refs/tags/${{ inputs.tag }}
+          tar: all
+          zip: windows
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publishing to crates.io is irreversible, so it happens while the release is
+  # still a draft: if it fails, gh-ship never makes the release visible.
+  crates-io:
+    name: 📤 Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+
+    # This is the deployment. The `url:` registers it in the repository's
+    # deployment list and links straight to what shipped.
+    environment:
+      name: release
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.tag }}
+
+    permissions:
+      contents: read
+      # Required by crates.io trusted publishing: the OIDC token is what
+      # authenticates us, so there is no long-lived registry secret.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

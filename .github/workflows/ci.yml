@@ -46,3 +46,20 @@ jobs:
       - uses: codecov/codecov-action@v5
         with:
           files: lcov.info
+
+  # gh-ship releases git-synchronizer. Its configuration and the workflows it
+  # names must satisfy the contract gh-ship enforces, or the release breaks at
+  # the worst possible moment. This catches that on a pull request instead.
+  ship:
+    name: 🚢 Ship setup
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install gh-ship
+        run: gh extension install noirbizarre/gh-ship
+
+      - name: Validate the release setup
+        run: gh ship validate
