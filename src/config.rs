@@ -6,6 +6,16 @@ use crate::ui::Ui;
 /// The git config section name used for all sync settings.
 pub const SECTION: &str = "sync";
 
+/// Split a comma-separated prompt answer into trimmed, non-empty patterns.
+fn parse_patterns(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Stored configuration from the `[sync]` git config section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -138,11 +148,7 @@ impl Config {
             "Additional patterns to protect (comma-separated, e.g. release/*)",
             "",
         )?;
-        for pattern in extra.split(',').map(|s| s.trim()) {
-            if !pattern.is_empty() {
-                protected.push(pattern.to_string());
-            }
-        }
+        protected.extend(parse_patterns(&extra));
 
         if protected.is_empty() {
             protected.push("main".to_string());
@@ -157,12 +163,7 @@ impl Config {
             "Branch patterns to ignore entirely (comma-separated, e.g. wip/*)",
             "",
         )?;
-        let ignore: Vec<String> = ignore_input
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
+        let ignore = parse_patterns(&ignore_input);
 
         ui.blank();
 
@@ -282,6 +283,22 @@ mod tests {
         assert!(config.ignore.is_empty());
         assert!(config.remotes.is_none());
         assert!(config.worktrunk.is_none());
+    }
+
+    #[test]
+    fn parse_patterns_splits_trims_and_drops_empties() {
+        assert!(parse_patterns("").is_empty());
+        assert!(parse_patterns("   ").is_empty());
+        assert!(parse_patterns(",,").is_empty());
+        assert_eq!(parse_patterns("wip/*"), vec!["wip/*".to_string()]);
+        assert_eq!(
+            parse_patterns(" wip/* , scratch ,, tmp"),
+            vec![
+                "wip/*".to_string(),
+                "scratch".to_string(),
+                "tmp".to_string()
+            ]
+        );
     }
 
     #[test]
