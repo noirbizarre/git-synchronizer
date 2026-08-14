@@ -421,19 +421,23 @@ impl Git {
         Ok(target_tree.trim() == branch_tree.trim())
     }
 
-    /// Check whether the diff between `target` and `branch` is empty.
+    /// Check whether `branch` introduces no content change of its own.
     ///
-    /// Runs `git diff --quiet <target> <branch>` which compares the two tree
-    /// snapshots directly. An empty diff (exit 0) means the branch's content
-    /// is already fully present in the target — this catches squash-merge
-    /// cases where `git cherry` misses due to a different commit structure.
+    /// Runs `git diff --quiet <target>...<branch>` — the three-dot form, which
+    /// diffs the merge base of `target` and `branch` against `branch`. An empty
+    /// diff (exit 0) means the branch's commits net out to nothing relative to
+    /// the point where it forked: a commit followed by its revert, a branch
+    /// that only rewrote history without changing content, or a branch created
+    /// but never meaningfully advanced. Such a branch has nothing to lose.
     ///
-    /// Note: this only detects cases where the target tree contains at least
-    /// everything the branch tree has. When target advances with unrelated
-    /// changes after the squash-merge, the diff will no longer be empty;
-    /// those cases are handled by [`Self::merge_adds_nothing`].
+    /// Note: this deliberately does *not* detect squash merges. Once `branch`
+    /// has been squashed onto `target`, the three-dot diff still shows the
+    /// branch's changes (the merge base predates the squash commit). Squash
+    /// merges are covered by [`Self::merge_adds_nothing`] and
+    /// [`Self::squash_patch_id_match`]; branches whose tree is identical to the
+    /// target's are covered by the cheaper [`Self::trees_match`].
     pub fn diff_empty(&self, target: &str, branch: &str) -> Result<bool> {
-        self.run_exit_code(&["diff", "--quiet", target, branch])
+        self.run_exit_code(&["diff", "--quiet", &format!("{target}...{branch}")])
     }
 
     /// Compute the patch-ids of the commits in `range` (e.g. `"a..b"`).
@@ -1635,41 +1639,53 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        // Create a feature branch with a commit
+        // A branch that adds a file and then reverts it: its commits net out to
+        // no content change relative to the fork point.
         Command::new("git")
-            .args(["checkout", "-b", "feature/squash-test"])
+            .args(["checkout", "-b", "feature/no-op"])
             .current_dir(path)
             .output()?;
-        std::fs::write(path.join("squash.txt"), "squash content")?;
+        std::fs::write(path.join("temp.txt"), "temporary")?;
         Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
         Command::new("git")
-            .args(["commit", "-m", "squash commit"])
+            .args(["commit", "-m", "add temp"])
+            .current_dir(path)
+            .output()?;
+        std::fs::remove_file(path.join("temp.txt"))?;
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "remove temp"])
             .current_dir(path)
             .output()?;
 
-        // Switch back to main and squash-merge the feature branch
+        // Advance main with an unrelated change so the two trees differ. A
+        // two-dot diff would be non-empty here; the three-dot diff must still
+        // report that the branch itself contributes nothing.
         Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
+        std::fs::write(path.join("main.txt"), "main content")?;
         Command::new("git")
-            .args(["merge", "--squash", "feature/squash-test"])
+            .args(["add", "."])
             .current_dir(path)
             .output()?;
         Command::new("git")
-            .args(["commit", "-m", "squash merge feature"])
+            .args(["commit", "-m", "unrelated main work"])
             .current_dir(path)
             .output()?;
 
         let git = Git::with_workdir(false, path);
 
-        // The branch was squash-merged, so the three-dot diff should be empty
-        assert!(git.diff_empty("main", "feature/squash-test")?);
+        assert!(git.diff_empty("main", "feature/no-op")?);
 
-        // Create an unmerged branch — diff should NOT be empty
+        // Create an unmerged branch — the three-dot diff must NOT be empty.
         Command::new("git")
             .args(["checkout", "-b", "feature/unmerged"])
             .current_dir(path)
@@ -1685,6 +1701,76 @@ locked work in progress, do not remove
             .output()?;
 
         assert!(!git.diff_empty("main", "feature/unmerged")?);
+
+        Ok(())
+    }
+
+    /// Regression test for the two-dot → three-dot fix.
+    ///
+    /// A squash-merged branch is *not* the responsibility of `diff_empty`: the
+    /// merge base predates the squash commit, so the three-dot diff still shows
+    /// the branch's changes. This case is covered by `squash_patch_id_match` /
+    /// `merge_adds_nothing` instead.
+    #[test]
+    fn test_diff_empty_does_not_claim_squash_merges() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("README.md"), "# test")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()?;
+
+        Command::new("git")
+            .args(["checkout", "-b", "feature/squash-test"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("squash.txt"), "squash content")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash commit"])
+            .current_dir(path)
+            .output()?;
+
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["merge", "--squash", "feature/squash-test"])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "squash merge feature"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+
+        // diff_empty stays silent…
+        assert!(!git.diff_empty("main", "feature/squash-test")?);
+        // …but the branch is still detected as merged by the dedicated strategies.
+        assert!(git.squash_patch_id_match("main", "feature/squash-test")?);
 
         Ok(())
     }

@@ -99,8 +99,9 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
         }
     }
 
-    // Also check branches via empty diff (catches squash-merge cases
-    // where the target tree already contains all branch changes)
+    // Empty three-dot diff: catches branches whose own commits net out to no
+    // content change relative to their fork point (commit + revert, pure
+    // history rewrites, branches created but never advanced).
     for branch in &all_branches {
         if seen.contains(branch)
             || *branch == current
@@ -480,7 +481,8 @@ mod tests {
 
         let git = Git::with_workdir(false, path);
 
-        // Squash-merged branch should be detected via empty three-dot diff
+        // Squash-merged branch should be detected (via tree comparison here, or
+        // via the patch-id / simulated-merge strategies once main advances)
         let config = Config {
             protected: vec!["main".to_string()],
             remotes: None,
