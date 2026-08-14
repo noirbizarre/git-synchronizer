@@ -66,6 +66,11 @@ jobs:
         with:
           cache: true
 
+      # Installed up front because two later steps need it: `gh ship sign` and
+      # the artifact validation.
+      - name: Install gh-ship
+        run: gh extension install noirbizarre/gh-ship
+
       # --- versioning: ours, not gh-ship's ---------------------------------
 
       - name: Compute the next version
@@ -131,6 +136,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          # Git refuses to commit without an identity, and a runner has none.
+          # Which identity barely matters: the next step re-creates this commit
+          # through the API, and the re-created one takes its author from the
+          # token and its committer from GitHub.
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -140,6 +149,24 @@ jobs:
           # from main, so HEAD is already the right ref. Never push to the
           # release branch directly.
           git push origin HEAD
+
+      # A commit created on the runner is never signed, whichever token pushes
+      # it: signing needs a key, and there is no key here. GitHub *will* sign a
+      # commit it creates itself for a bot, but only when the request carries
+      # no author or committer of its own — so the only way to get the Verified
+      # badge without putting a signing key in our secrets is to push first and
+      # then have the API re-create the tip. That is what `gh ship sign` does.
+      #
+      # It signs the tip of the branch this workflow was dispatched on, which
+      # is gh-ship's staging branch — exactly what we just pushed. It exits
+      # non-zero rather than silently rewriting history if GitHub hands back an
+      # unsigned commit, and leaves an already-signed commit alone.
+      #
+      # gh-ship promotes whatever the staging branch points at, so moving the
+      # tip here is invisible to the rest of the release.
+      - name: Sign the release commit
+        if: steps.version.outputs.changed == 'true' && !inputs.dry_run
+        run: gh ship sign
 
       # --- the protocol ------------------------------------------------------
 
@@ -170,9 +197,7 @@ jobs:
       # Validating here turns a protocol mistake into a red workflow with a
       # precise error, instead of a confusing failure in gh-ship later.
       - name: Validate the release artifact
-        run: |
-          gh extension install noirbizarre/gh-ship
-          gh ship validate ship.release.json
+        run: gh ship validate ship.release.json
 
       - uses: actions/upload-artifact@v7
         with:
