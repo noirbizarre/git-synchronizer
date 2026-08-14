@@ -834,4 +834,88 @@ mod tests {
         git.set_branch_protected("main", false)?;
         Ok(())
     }
+
+    /// Baseline for the local/remote detection asymmetry (see issue #28).
+    ///
+    /// `find_merged_remote` currently runs `git branch -r --merged` only, so it
+    /// catches classic merges but misses every branch that `find_merged_local`
+    /// would find through cherry / tree / patch-id / simulated-merge probes.
+    /// This test pins that behaviour so extending it is a deliberate change.
+    #[test]
+    fn test_find_merged_remote_only_detects_ancestor_merges() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let origin = dir.path().join("origin.git");
+        let work = dir.path().join("work");
+
+        let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()?;
+            Ok(())
+        };
+
+        let (seed, _) = crate::test_helpers::init_repo()?;
+        git_in(
+            seed.path(),
+            &["clone", "--bare", ".", origin.to_str().unwrap()],
+        )?;
+        git_in(
+            dir.path(),
+            &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+        )?;
+        git_in(&work, &["config", "user.email", "test@test.com"])?;
+        git_in(&work, &["config", "user.name", "Test"])?;
+
+        // A classically merged branch, pushed to the remote.
+        git_in(&work, &["checkout", "-b", "feature/merged", "main"])?;
+        std::fs::write(work.join("merged.txt"), "merged")?;
+        git_in(&work, &["add", "."])?;
+        git_in(&work, &["commit", "-m", "merged feature"])?;
+        git_in(&work, &["push", "-u", "origin", "feature/merged"])?;
+
+        // A squash-merged branch, also pushed: local detection finds it, remote
+        // detection does not.
+        git_in(&work, &["checkout", "-b", "feature/squashed", "main"])?;
+        std::fs::write(work.join("squashed.txt"), "squashed")?;
+        git_in(&work, &["add", "."])?;
+        git_in(&work, &["commit", "-m", "squashed feature"])?;
+        git_in(&work, &["push", "-u", "origin", "feature/squashed"])?;
+
+        git_in(&work, &["checkout", "main"])?;
+        git_in(
+            &work,
+            &["merge", "--no-ff", "-m", "merge", "feature/merged"],
+        )?;
+        git_in(&work, &["merge", "--squash", "feature/squashed"])?;
+        git_in(&work, &["commit", "-m", "squash merge feature/squashed"])?;
+        git_in(&work, &["push", "origin", "main"])?;
+        git_in(&work, &["fetch", "origin"])?;
+
+        let git = Git::with_workdir(false, &work);
+        let config = Config {
+            protected: vec!["main".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+
+        let local = find_merged_local(&git, &config)?;
+        assert!(
+            local.contains(&"feature/squashed".to_string()),
+            "local detection should catch the squash-merged branch"
+        );
+
+        let remote = find_merged_remote(&git, &config, "origin")?;
+        assert!(
+            remote.contains(&"feature/merged".to_string()),
+            "remote detection should catch the classically merged branch, got {remote:?}"
+        );
+        assert!(
+            !remote.contains(&"feature/squashed".to_string()),
+            "known gap (#28): remote detection misses squash merges, got {remote:?}"
+        );
+
+        drop(seed);
+        Ok(())
+    }
 }
