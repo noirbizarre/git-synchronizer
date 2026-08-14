@@ -6,19 +6,55 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use crate::config::Config;
 use crate::git::Git;
 
-/// Build a `GlobSet` from the protected branch patterns in config.
-pub fn build_protected_matcher(config: &Config) -> Result<GlobSet> {
+/// Build a `GlobSet` from a list of glob patterns.
+fn build_matcher(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
-    for pattern in &config.protected {
+    for pattern in patterns {
         builder.add(Glob::new(pattern)?);
     }
     Ok(builder.build()?)
 }
 
-/// Check whether a branch is protected, considering both global glob patterns
-/// and per-branch `branch.<name>.sync-protected` config.
-fn is_protected(branch: &str, matcher: &GlobSet, branch_protected: &HashSet<String>) -> bool {
-    matcher.is_match(branch) || branch_protected.contains(branch)
+/// Branch classification: which branches are off-limits and why.
+///
+/// Two independent mechanisms feed each category: global glob patterns from the
+/// `[sync]` config section, and per-branch git config flags
+/// (`branch.<name>.sync-protected` / `branch.<name>.sync-ignored`).
+pub struct Filter {
+    protected: GlobSet,
+    protected_branches: HashSet<String>,
+    ignored: GlobSet,
+    ignored_branches: HashSet<String>,
+}
+
+impl Filter {
+    /// Read both glob patterns and per-branch flags from the repository.
+    pub fn load(git: &Git, config: &Config) -> Result<Self> {
+        Ok(Self {
+            protected: build_matcher(&config.protected)?,
+            protected_branches: git.branch_protected_list()?.into_iter().collect(),
+            ignored: build_matcher(&config.ignore)?,
+            ignored_branches: git.branch_ignored_list()?.into_iter().collect(),
+        })
+    }
+
+    /// Whether git-sync should pretend the branch does not exist.
+    pub fn is_ignored(&self, branch: &str) -> bool {
+        self.ignored.is_match(branch) || self.ignored_branches.contains(branch)
+    }
+
+    /// Whether the branch is protected from deletion and usable as a merge
+    /// target. Ignoring wins over protection: an ignored branch is invisible,
+    /// so it never becomes a target either.
+    pub fn is_protected(&self, branch: &str) -> bool {
+        !self.is_ignored(branch)
+            && (self.protected.is_match(branch) || self.protected_branches.contains(branch))
+    }
+
+    /// Whether the branch must be kept out of the deletion candidate list.
+    pub fn is_excluded(&self, branch: &str) -> bool {
+        self.is_ignored(branch) || self.is_protected(branch)
+    }
 }
 
 /// Resolve protected patterns to actual existing local branch names.
@@ -26,26 +62,23 @@ fn is_protected(branch: &str, matcher: &GlobSet, branch_protected: &HashSet<Stri
 /// Literal patterns (e.g. "main") are kept as-is if they exist.
 /// Glob patterns (e.g. "release/*") are expanded to matching branches.
 /// Branches marked with per-branch `sync-protected` config are also included.
-pub fn resolve_merge_targets(git: &Git, config: &Config) -> Result<Vec<String>> {
-    let matcher = build_protected_matcher(config)?;
-    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
+/// Ignored branches are never returned.
+pub fn resolve_merge_targets(git: &Git, filter: &Filter) -> Result<Vec<String>> {
     let all_branches = git.local_branches()?;
 
     let targets: Vec<String> = all_branches
         .into_iter()
-        .filter(|b| is_protected(b, &matcher, &branch_protected))
+        .filter(|b| filter.is_protected(b))
         .collect();
 
     Ok(targets)
 }
 
 /// Return local branches that are merged into *any* of the protected branches
-/// and are not themselves protected.
-pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
-    let matcher = build_protected_matcher(config)?;
-    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
+/// and are neither protected nor ignored.
+pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<Vec<String>> {
     let current = git.current_branch()?;
-    let targets = resolve_merge_targets(git, config)?;
+    let targets = resolve_merge_targets(git, filter)?;
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<String> = Vec::new();
@@ -53,10 +86,7 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
     for target in &targets {
         let merged = git.merged_branches(target)?;
         for branch in merged {
-            if branch == current {
-                continue;
-            }
-            if is_protected(&branch, &matcher, &branch_protected) {
+            if branch == current || filter.is_excluded(&branch) {
                 continue;
             }
             if seen.insert(branch.clone()) {
@@ -65,118 +95,47 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
         }
     }
 
-    // Also check branches not caught by --merged (rebase merge detection via git cherry)
-    let all_branches = git.local_branches()?;
-    for branch in &all_branches {
-        if seen.contains(branch)
-            || *branch == current
-            || is_protected(branch, &matcher, &branch_protected)
-        {
-            continue;
-        }
-        for target in &targets {
-            if git.cherry_merged(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
-                candidates.push(branch.clone());
-                break;
-            }
-        }
-    }
+    // Ignored branches never enter any of the content-based passes below.
+    let all_branches: Vec<String> = git
+        .local_branches()?
+        .into_iter()
+        .filter(|b| *b != current && !filter.is_excluded(b))
+        .collect();
 
-    // Fast tree-SHA comparison: detects branches whose tree object is
-    // identical to a target's tree (cheapest content-equality check).
-    for branch in &all_branches {
-        if seen.contains(branch)
-            || *branch == current
-            || is_protected(branch, &matcher, &branch_protected)
-        {
-            continue;
-        }
-        for target in &targets {
-            if git.trees_match(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
-                candidates.push(branch.clone());
-                break;
-            }
-        }
-    }
+    // Each pass below is a distinct merge-detection strategy, ordered from
+    // cheapest to most expensive. A branch caught by an earlier pass is skipped
+    // by the later ones via `seen`.
+    type Strategy = fn(&Git, &str, &str) -> Result<bool>;
 
-    // Empty three-dot diff: catches branches whose own commits net out to no
-    // content change relative to their fork point (commit + revert, pure
-    // history rewrites, branches created but never advanced).
-    for branch in &all_branches {
-        if seen.contains(branch)
-            || *branch == current
-            || is_protected(branch, &matcher, &branch_protected)
-        {
-            continue;
-        }
-        for target in &targets {
-            if git.diff_empty(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
-                candidates.push(branch.clone());
-                break;
-            }
-        }
-    }
+    // Also check branches not caught by --merged (rebase merge detection via
+    // `git cherry`), then progressively costlier content-equality strategies:
+    //
+    // - `trees_match`: identical tree object (cheapest content check).
+    // - `diff_empty`: the branch's own commits net out to no content change.
+    // - `patch_id_match`: commits re-applied on target with different SHAs.
+    // - `merge_adds_nothing`: in-memory merge yields target's existing tree,
+    //   catching squash-merges where target has since advanced.
+    // - `squash_patch_id_match`: the branch's combined diff matches a single
+    //   squash commit on target, surviving review-time formatting tweaks.
+    let strategies: [Strategy; 6] = [
+        Git::cherry_merged,
+        Git::trees_match,
+        Git::diff_empty,
+        Git::patch_id_match,
+        Git::merge_adds_nothing,
+        Git::squash_patch_id_match,
+    ];
 
-    // Patch-ID comparison: catches branches whose commits were re-applied
-    // on target with different SHAs (rebase + reword, partial cherry-pick,
-    // history rewrite). Fallback when cherry / tree / diff strategies miss.
-    for branch in &all_branches {
-        if seen.contains(branch)
-            || *branch == current
-            || is_protected(branch, &matcher, &branch_protected)
-        {
-            continue;
-        }
-        for target in &targets {
-            if git.patch_id_match(target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
-                candidates.push(branch.clone());
-                break;
+    for strategy in strategies {
+        for branch in &all_branches {
+            if seen.contains(branch) {
+                continue;
             }
-        }
-    }
-
-    // Simulated merge: in-memory merge yields target's existing tree
-    // (catches squash-merged branches where target has advanced with
-    // unrelated commits touching different files — defeats both
-    // `trees_match` and `diff_empty`). Placed last because it is the most
-    // expensive check.
-    for branch in &all_branches {
-        if seen.contains(branch)
-            || *branch == current
-            || is_protected(branch, &matcher, &branch_protected)
-        {
-            continue;
-        }
-        for target in &targets {
-            if git.merge_adds_nothing(target, branch).unwrap_or(false)
-                && seen.insert(branch.clone())
-            {
-                candidates.push(branch.clone());
-                break;
-            }
-        }
-    }
-
-    // Squash patch-id: combined patch-id of the branch's full diff matches
-    // the patch-id of a single squash commit on target. Catches squash-
-    // merges that defeat both per-commit `patch_id_match` (N branch commits
-    // collapsed into 1 squash) and textual `merge_adds_nothing` (squash
-    // commit on target was later edited so the in-memory merge re-applies
-    // branch text textually). `git patch-id` ignores whitespace and context
-    // lines, so it survives review-time formatting tweaks.
-    for branch in &all_branches {
-        if seen.contains(branch)
-            || *branch == current
-            || is_protected(branch, &matcher, &branch_protected)
-        {
-            continue;
-        }
-        for target in &targets {
-            if git.squash_patch_id_match(target, branch).unwrap_or(false)
-                && seen.insert(branch.clone())
-            {
-                candidates.push(branch.clone());
-                break;
+            for target in &targets {
+                if strategy(git, target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
+                    candidates.push(branch.clone());
+                    break;
+                }
             }
         }
     }
@@ -198,20 +157,16 @@ pub fn find_merged_local(git: &Git, config: &Config) -> Result<Vec<String>> {
 /// remote-tracking refs were refreshed with `git fetch --prune` beforehand,
 /// otherwise the result is meaningless.
 ///
-/// Protected branches, the current branch, and anything already reported by
-/// [`find_merged_local`] (passed as `merged`) are excluded.
-pub fn find_gone_local(git: &Git, config: &Config, merged: &[String]) -> Result<Vec<String>> {
-    let matcher = build_protected_matcher(config)?;
-    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
+/// Protected and ignored branches, the current branch, and anything already
+/// reported by [`find_merged_local`] (passed as `merged`) are excluded.
+pub fn find_gone_local(git: &Git, filter: &Filter, merged: &[String]) -> Result<Vec<String>> {
     let current = git.current_branch()?;
     let already: HashSet<&String> = merged.iter().collect();
 
     let mut candidates: Vec<String> = git
         .branches_with_gone_upstream()?
         .into_iter()
-        .filter(|b| {
-            *b != current && !already.contains(b) && !is_protected(b, &matcher, &branch_protected)
-        })
+        .filter(|b| *b != current && !already.contains(b) && !filter.is_excluded(b))
         .collect();
 
     candidates.sort();
@@ -220,11 +175,9 @@ pub fn find_gone_local(git: &Git, config: &Config, merged: &[String]) -> Result<
 }
 
 /// Return remote branches that are merged into *any* of the protected branches
-/// and are not themselves protected, for the given remote.
-pub fn find_merged_remote(git: &Git, config: &Config, remote: &str) -> Result<Vec<String>> {
-    let matcher = build_protected_matcher(config)?;
-    let branch_protected: HashSet<String> = git.branch_protected_list()?.into_iter().collect();
-    let targets = resolve_merge_targets(git, config)?;
+/// and are neither protected nor ignored, for the given remote.
+pub fn find_merged_remote(git: &Git, filter: &Filter, remote: &str) -> Result<Vec<String>> {
+    let targets = resolve_merge_targets(git, filter)?;
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<String> = Vec::new();
@@ -232,7 +185,7 @@ pub fn find_merged_remote(git: &Git, config: &Config, remote: &str) -> Result<Ve
     for target in &targets {
         let merged = git.merged_remote_branches(target, remote)?;
         for branch in merged {
-            if is_protected(&branch, &matcher, &branch_protected) {
+            if filter.is_excluded(&branch) {
                 continue;
             }
             if seen.insert(branch.clone()) {
@@ -265,19 +218,26 @@ mod tests {
         Ok((dir, git))
     }
 
+    /// Build a `Filter` for a repository/config pair.
+    fn filter_for(git: &Git, config: &Config) -> Result<Filter> {
+        Filter::load(git, config)
+    }
+
     #[test]
-    fn test_build_protected_matcher() -> Result<()> {
+    fn test_protected_patterns_match() -> Result<()> {
+        let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        let matcher = build_protected_matcher(&config)?;
-        assert!(matcher.is_match("main"));
-        assert!(matcher.is_match("release/1.0"));
-        assert!(matcher.is_match("release/2.0-beta"));
-        assert!(!matcher.is_match("feature/foo"));
-        assert!(!matcher.is_match("develop"));
+        let filter = filter_for(&git, &config)?;
+        assert!(filter.is_protected("main"));
+        assert!(filter.is_protected("release/1.0"));
+        assert!(filter.is_protected("release/2.0-beta"));
+        assert!(!filter.is_protected("feature/foo"));
+        assert!(!filter.is_protected("develop"));
         Ok(())
     }
 
@@ -286,11 +246,12 @@ mod tests {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
 
         // feature/done was merged, so it should appear
         assert!(merged.contains(&"feature/done".to_string()));
@@ -308,12 +269,13 @@ mod tests {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &config)?;
-        let gone = find_gone_local(&git, &config, &merged)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let gone = find_gone_local(&git, &filter_for(&git, &config)?, &merged)?;
 
         // Upstream was deleted and pruned.
         assert_eq!(gone, vec!["feature/gone".to_string()]);
@@ -331,13 +293,14 @@ mod tests {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
         // Pretend the content-based strategies already caught it.
         let merged = vec!["feature/gone".to_string()];
-        assert!(find_gone_local(&git, &config, &merged)?.is_empty());
+        assert!(find_gone_local(&git, &filter_for(&git, &config)?, &merged)?.is_empty());
         Ok(())
     }
 
@@ -348,10 +311,11 @@ mod tests {
         // Protected by pattern.
         let config = Config {
             protected: vec!["main".to_string(), "feature/*".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        assert!(find_gone_local(&git, &config, &[])?.is_empty());
+        assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
 
         // Checked out: never proposed for deletion.
         StdCommand::new("git")
@@ -360,10 +324,11 @@ mod tests {
             .output()?;
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        assert!(find_gone_local(&git, &config, &[])?.is_empty());
+        assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
         Ok(())
     }
 
@@ -372,12 +337,13 @@ mod tests {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
         let current = git.current_branch()?;
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(!merged.contains(&current));
         Ok(())
     }
@@ -437,10 +403,11 @@ mod tests {
         // Cherry-picked branch should always be detected as merged
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(merged.contains(&"feature/cherry".to_string()));
         Ok(())
     }
@@ -485,10 +452,11 @@ mod tests {
         // via the patch-id / simulated-merge strategies once main advances)
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             merged.contains(&"feature/squash".to_string()),
             "squash-merged branch should be detected as merged"
@@ -535,10 +503,11 @@ mod tests {
         // Branch should be detected via tree SHA comparison
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             merged.contains(&"feature/tree-match".to_string()),
             "branch with matching tree SHA should be detected as merged"
@@ -604,10 +573,11 @@ mod tests {
         let git = Git::with_workdir(false, path);
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             merged.contains(&"feature/patch-id".to_string()),
             "branch with matching patch-id should be detected as merged"
@@ -665,10 +635,11 @@ mod tests {
 
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             merged.contains(&"feature/squash-advanced".to_string()),
             "squash-merged branch with advanced target should be detected via simulated merge"
@@ -738,10 +709,11 @@ mod tests {
 
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             merged.contains(&"feature/multi-commit-squash".to_string()),
             "multi-commit branch squash-merged into main should be detected \
@@ -755,11 +727,12 @@ mod tests {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
-        let targets = resolve_merge_targets(&git, &config)?;
+        let targets = resolve_merge_targets(&git, &filter_for(&git, &config)?)?;
         assert!(targets.contains(&"main".to_string()));
         assert!(targets.contains(&"release/1.0".to_string()));
         assert!(!targets.contains(&"feature/done".to_string()));
@@ -773,11 +746,12 @@ mod tests {
         // Use a pattern that matches nothing
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(merged.is_empty());
         Ok(())
     }
@@ -787,17 +761,18 @@ mod tests {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
         // Without per-branch protection, feature/done should be a candidate
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(merged.contains(&"feature/done".to_string()));
 
         // Mark feature/done as per-branch protected
         git.set_branch_protected("feature/done", true)?;
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             !merged.contains(&"feature/done".to_string()),
             "per-branch protected branch should not be a deletion candidate"
@@ -814,17 +789,18 @@ mod tests {
         // Only use per-branch protection on "main" (no global patterns match anything)
         let config = Config {
             protected: vec!["nonexistent-branch".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
         // Without any real protected branches, nothing is a merge target
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(merged.is_empty());
 
         // Mark "main" as per-branch protected — it should now be a merge target
         git.set_branch_protected("main", true)?;
-        let merged = find_merged_local(&git, &config)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             merged.contains(&"feature/done".to_string()),
             "branches merged into a per-branch protected branch should be candidates"
@@ -895,17 +871,18 @@ mod tests {
         let git = Git::with_workdir(false, &work);
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
 
-        let local = find_merged_local(&git, &config)?;
+        let local = find_merged_local(&git, &filter_for(&git, &config)?)?;
         assert!(
             local.contains(&"feature/squashed".to_string()),
             "local detection should catch the squash-merged branch"
         );
 
-        let remote = find_merged_remote(&git, &config, "origin")?;
+        let remote = find_merged_remote(&git, &filter_for(&git, &config)?, "origin")?;
         assert!(
             remote.contains(&"feature/merged".to_string()),
             "remote detection should catch the classically merged branch, got {remote:?}"
@@ -913,6 +890,145 @@ mod tests {
         assert!(
             !remote.contains(&"feature/squashed".to_string()),
             "known gap (#28): remote detection misses squash merges, got {remote:?}"
+        );
+
+        drop(seed);
+        Ok(())
+    }
+
+    // ── Ignored branches ─────────────────────────────────────────────
+
+    fn config_with_ignore(ignore: &[&str]) -> Config {
+        Config {
+            protected: vec!["main".to_string()],
+            ignore: ignore.iter().map(|s| s.to_string()).collect(),
+            remotes: None,
+            worktrunk: None,
+        }
+    }
+
+    #[test]
+    fn ignored_literal_branch_is_not_a_merge_candidate() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
+        let config = config_with_ignore(&["feature/done"]);
+        let filter = filter_for(&git, &config)?;
+
+        assert!(filter.is_ignored("feature/done"));
+        assert!(!find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn ignored_glob_pattern_hides_every_matching_branch() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
+        let config = config_with_ignore(&["feature/*"]);
+        let filter = filter_for(&git, &config)?;
+
+        assert!(filter.is_ignored("feature/done"));
+        assert!(filter.is_ignored("feature/wip"));
+        assert!(!filter.is_ignored("main"));
+        assert!(find_merged_local(&git, &filter)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignore_takes_precedence_over_protect() -> Result<()> {
+        let (_dir, git) = init_repo_with_release()?;
+        let config = Config {
+            protected: vec!["main".to_string(), "release/*".to_string()],
+            ignore: vec!["release/*".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        let filter = filter_for(&git, &config)?;
+
+        assert!(filter.is_ignored("release/1.0"));
+        assert!(!filter.is_protected("release/1.0"));
+        assert!(
+            !resolve_merge_targets(&git, &filter)?.contains(&"release/1.0".to_string()),
+            "an ignored branch must not become a merge target"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn per_branch_ignore_flag_is_honoured() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
+        git.set_branch_ignored("feature/done", true)?;
+
+        let config = config_with_ignore(&[]);
+        let filter = filter_for(&git, &config)?;
+        assert!(filter.is_ignored("feature/done"));
+        assert!(!find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+
+        git.set_branch_ignored("feature/done", false)?;
+        let filter = filter_for(&git, &config)?;
+        assert!(!filter.is_ignored("feature/done"));
+        assert!(find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn ignored_branch_is_excluded_from_gone_upstream_detection() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
+        let config = config_with_ignore(&["feature/gone"]);
+        let filter = filter_for(&git, &config)?;
+
+        assert!(find_gone_local(&git, &filter, &[])?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignored_branch_is_excluded_from_remote_detection() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let origin = dir.path().join("origin.git");
+        let work = dir.path().join("work");
+
+        let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()?;
+            Ok(())
+        };
+
+        let (seed, _) = crate::test_helpers::init_repo()?;
+        git_in(
+            seed.path(),
+            &["clone", "--bare", ".", origin.to_str().unwrap()],
+        )?;
+        git_in(
+            dir.path(),
+            &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+        )?;
+        git_in(&work, &["config", "user.email", "test@test.com"])?;
+        git_in(&work, &["config", "user.name", "Test"])?;
+
+        git_in(&work, &["checkout", "-b", "wip/spike", "main"])?;
+        std::fs::write(work.join("spike.txt"), "spike")?;
+        git_in(&work, &["add", "."])?;
+        git_in(&work, &["commit", "-m", "spike"])?;
+        git_in(&work, &["push", "-u", "origin", "wip/spike"])?;
+
+        git_in(&work, &["checkout", "main"])?;
+        git_in(&work, &["merge", "--no-ff", "-m", "merge", "wip/spike"])?;
+        git_in(&work, &["push", "origin", "main"])?;
+        git_in(&work, &["fetch", "origin"])?;
+
+        let git = Git::with_workdir(false, &work);
+
+        let visible =
+            find_merged_remote(&git, &filter_for(&git, &config_with_ignore(&[]))?, "origin")?;
+        assert!(visible.contains(&"wip/spike".to_string()));
+
+        let hidden = find_merged_remote(
+            &git,
+            &filter_for(&git, &config_with_ignore(&["wip/*"]))?,
+            "origin",
+        )?;
+        assert!(
+            !hidden.contains(&"wip/spike".to_string()),
+            "ignored remote branch should be invisible, got {hidden:?}"
         );
 
         drop(seed);

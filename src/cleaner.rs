@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::branches::{
-    find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
+    Filter, find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
 };
 use crate::config::Config;
 use crate::git::{Git, GitCommandError, GitErrorKind, Worktree};
@@ -85,6 +85,9 @@ pub struct CleanerOptions {
 
 /// Run the full clean-up workflow.
 pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result<()> {
+    // Read protection and ignore rules once; every detection pass shares them.
+    let filter = Filter::load(git, config)?;
+
     // ── 1. Fetch & prune ─────────────────────────────────────────────
 
     // Whether every configured remote was refreshed this run. Deleted-upstream
@@ -106,7 +109,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 let mut succeeded = 0usize;
                 for remote in &remotes {
                     let result = ui.spinner(&format!("Fetching {remote}…"), || {
-                        git.fetch_remote_prune(remote)
+                        git.fetch_remote_prune(remote, &config.ignore)
                     });
                     match result {
                         Ok(()) => {
@@ -136,7 +139,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
     // ── 2. Pull / fast-forward target branches ─────────────────────
 
     if !opts.no_pull {
-        let targets = resolve_merge_targets(git, config)?;
+        let targets = resolve_merge_targets(git, &filter)?;
         if !targets.is_empty() {
             let current = git.current_branch()?;
             let worktrees = git.worktree_list()?;
@@ -210,7 +213,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
     if !opts.remote_only {
         let merged = ui.spinner("Scanning local branches…", || {
-            find_merged_local(git, config)
+            find_merged_local(git, &filter)
         })?;
 
         // Branches whose upstream was deleted. Only meaningful with fresh
@@ -219,7 +222,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         // useless.
         let gone = if fetch_succeeded || opts.dry_run {
             let gone = ui.spinner("Scanning for deleted upstreams…", || {
-                find_gone_local(git, config, &merged)
+                find_gone_local(git, &filter, &merged)
             })?;
             if !gone.is_empty() && !fetch_succeeded {
                 ui.warning("Remotes were not fetched; deleted-upstream detection may be stale.");
@@ -244,7 +247,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
         // Collect orphan worktrees (if worktree cleanup is enabled).
         let (orphan_locked, orphan_unlocked) = if !opts.no_worktrees {
-            let orphans = find_orphan_worktrees(git)?;
+            let orphans = find_orphan_worktrees(git, &filter)?;
             let (locked, unlocked): (Vec<_>, Vec<_>) =
                 orphans.into_iter().partition(|wt| wt.is_locked);
             (locked, unlocked)
@@ -372,7 +375,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // branches without `--force-delete`). Orphan worktrees keep the
             // existing auto-force behavior and are not surfaced here.
             let targets_for_unmerged = if opts.use_worktrunk {
-                resolve_merge_targets(git, config).unwrap_or_default()
+                resolve_merge_targets(git, &filter).unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -668,7 +671,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
         for remote in &remotes {
             let merged = ui.spinner(&format!("Scanning {remote}…"), || {
-                find_merged_remote(git, config, remote)
+                find_merged_remote(git, &filter, remote)
             })?;
 
             if merged.is_empty() {
@@ -862,6 +865,7 @@ mod tests {
     fn default_config() -> Config {
         Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         }
@@ -946,6 +950,7 @@ mod tests {
 
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: Some(vec!["broken".to_string()]),
             worktrunk: None,
         };
@@ -1119,6 +1124,7 @@ mod tests {
 
         let config_with = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: Some(vec!["origin".to_string(), "upstream".to_string()]),
             worktrunk: None,
         };
@@ -1127,6 +1133,7 @@ mod tests {
 
         let config_without = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
@@ -2214,6 +2221,7 @@ mod tests {
         let git = Git::with_workdir(false, path);
         let config = Config {
             protected: vec!["main".to_string(), "develop".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };

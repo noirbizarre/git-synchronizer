@@ -1420,3 +1420,209 @@ fn gone_upstream_detection_runs_in_dry_run_without_fetch() {
 
     assert!(branches_in(&work_path).contains(&"feature/gone".to_string()));
 }
+
+// ── Ignored branches ─────────────────────────────────────────────────
+
+#[test]
+fn ignored_branch_is_not_offered_for_deletion() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    StdCommand::new("git")
+        .args(["config", "--add", "sync.ignore", "feature/*"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["--dry-run", "--no-fetch"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("feature/done").not());
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let branches = git_branches(&dir);
+    assert!(
+        branches.contains(&"feature/done".to_string()),
+        "an ignored branch must survive an auto-confirmed clean, got {branches:?}"
+    );
+}
+
+#[test]
+fn per_branch_ignore_flag_survives_clean() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "ignore", "feature/done"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    assert!(git_branches(&dir).contains(&"feature/done".to_string()));
+}
+
+#[test]
+fn config_add_ignore_and_list() {
+    let dir = init_repo();
+    configure(&dir);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "add-ignore", "wip/*"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Added ignore pattern: wip/*"));
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ignore:"))
+        .stderr(predicate::str::contains("wip/*"));
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "remove-ignore", "wip/*"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removed ignore pattern: wip/*"));
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("wip/*").not());
+}
+
+#[test]
+fn config_ignore_and_unignore_individual_branch() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "ignore", "feature/done"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("is now ignored"));
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("branch ignored: feature/done"));
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "unignore", "feature/done"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no longer ignored"));
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("branch ignored: (none)"));
+
+    // Once unignored, the merged branch is a deletion candidate again.
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(!git_branches(&dir).contains(&"feature/done".to_string()));
+}
+
+#[test]
+fn config_remove_ignore_keeps_the_other_patterns() {
+    let dir = init_repo();
+    configure(&dir);
+
+    for pattern in ["wip/*", "scratch", "tmp/*"] {
+        Command::cargo_bin("git-sync")
+            .unwrap()
+            .args(["config", "add-ignore", pattern])
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "remove-ignore", "scratch"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let output = StdCommand::new("git")
+        .args(["config", "--get-all", "sync.ignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let patterns: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(
+        patterns,
+        vec!["wip/*".to_string(), "tmp/*".to_string()],
+        "remove-ignore must preserve the remaining patterns and their order"
+    );
+}
+
+#[test]
+fn config_list_renders_empty_sections_as_none() {
+    let dir = init_repo();
+
+    // A config section that exists but holds no protected pattern.
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "add-ignore", "wip/*"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("protected: (none)"))
+        .stderr(predicate::str::contains("ignore: wip/*"))
+        .stderr(predicate::str::contains("branch ignored: (none)"));
+}

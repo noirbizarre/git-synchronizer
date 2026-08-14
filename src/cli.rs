@@ -103,6 +103,21 @@ pub enum ConfigAction {
         pattern: String,
     },
 
+    /// Add an ignored branch pattern
+    ///
+    /// Ignored branches are not fetched and are invisible to every detection
+    /// pass. Ignoring takes precedence over protection.
+    AddIgnore {
+        /// Glob pattern (e.g. wip/*)
+        pattern: String,
+    },
+
+    /// Remove an ignored branch pattern
+    RemoveIgnore {
+        /// Glob pattern to remove
+        pattern: String,
+    },
+
     /// Add a remote to operate on
     AddRemote {
         /// Remote name (e.g. origin)
@@ -124,6 +139,18 @@ pub enum ConfigAction {
     /// Remove per-branch protection from a branch
     Unprotect {
         /// Branch name to unprotect
+        branch: String,
+    },
+
+    /// Mark a branch as ignored via per-branch config
+    Ignore {
+        /// Branch name to ignore
+        branch: String,
+    },
+
+    /// Remove the per-branch ignore flag from a branch
+    Unignore {
+        /// Branch name to stop ignoring
         branch: String,
     },
 
