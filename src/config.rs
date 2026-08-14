@@ -11,6 +11,9 @@ pub const SECTION: &str = "sync";
 pub struct Config {
     /// Glob patterns for branches that should never be deleted.
     pub protected: Vec<String>,
+    /// Glob patterns for branches git-sync should ignore entirely: they are not
+    /// fetched, never become merge targets, and never appear as candidates.
+    pub ignore: Vec<String>,
     /// Remotes to consider for remote branch deletion.
     /// `None` means *all* remotes.
     pub remotes: Option<Vec<String>>,
@@ -23,6 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             protected: vec!["main".to_string(), "master".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         }
@@ -39,6 +43,7 @@ impl Config {
         }
 
         let protected = git.config_get_all(&format!("{SECTION}.protected"))?;
+        let ignore = git.config_get_all(&format!("{SECTION}.ignore"))?;
 
         let remotes = {
             let vals = git.config_get_all(&format!("{SECTION}.remote"))?;
@@ -51,6 +56,7 @@ impl Config {
 
         Ok(Some(Self {
             protected,
+            ignore,
             remotes,
             worktrunk,
         }))
@@ -62,6 +68,12 @@ impl Config {
         git.config_unset_all(&format!("{SECTION}.protected"))?;
         for pattern in &self.protected {
             git.config_add(&format!("{SECTION}.protected"), pattern)?;
+        }
+
+        // Ignored branch patterns (multi-value)
+        git.config_unset_all(&format!("{SECTION}.ignore"))?;
+        for pattern in &self.ignore {
+            git.config_add(&format!("{SECTION}.ignore"), pattern)?;
         }
 
         // Remotes (multi-value, optional)
@@ -139,6 +151,21 @@ impl Config {
 
         ui.blank();
 
+        // ── Ignored branches ─────────────────────────────────────────
+
+        let ignore_input = ui.input(
+            "Branch patterns to ignore entirely (comma-separated, e.g. wip/*)",
+            "",
+        )?;
+        let ignore: Vec<String> = ignore_input
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        ui.blank();
+
         // ── Remotes ──────────────────────────────────────────────────
 
         let available_remotes = git.remotes()?;
@@ -179,6 +206,7 @@ impl Config {
 
         let config = Self {
             protected,
+            ignore,
             remotes,
             worktrunk,
         };
@@ -217,6 +245,7 @@ mod tests {
 
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
+            ignore: Vec::new(),
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: None,
         };
@@ -235,6 +264,7 @@ mod tests {
 
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
@@ -249,8 +279,68 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert_eq!(config.protected, vec!["main", "master"]);
+        assert!(config.ignore.is_empty());
         assert!(config.remotes.is_none());
         assert!(config.worktrunk.is_none());
+    }
+
+    #[test]
+    fn test_config_ignore_roundtrip() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        let config = Config {
+            protected: vec!["main".to_string()],
+            ignore: vec!["wip/*".to_string(), "scratch".to_string()],
+            remotes: None,
+            worktrunk: None,
+        };
+        config.save(&git)?;
+
+        let loaded = Config::load(&git)?.expect("config should exist");
+        assert_eq!(loaded.ignore, config.ignore);
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_ignore_defaults_to_empty_when_key_absent() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        Config {
+            protected: vec!["main".to_string()],
+            ignore: Vec::new(),
+            remotes: None,
+            worktrunk: None,
+        }
+        .save(&git)?;
+
+        let loaded = Config::load(&git)?.expect("config should exist");
+        assert!(loaded.ignore.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_save_clears_removed_ignore_patterns() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        Config {
+            protected: vec!["main".to_string()],
+            ignore: vec!["wip/*".to_string()],
+            remotes: None,
+            worktrunk: None,
+        }
+        .save(&git)?;
+
+        Config {
+            protected: vec!["main".to_string()],
+            ignore: Vec::new(),
+            remotes: None,
+            worktrunk: None,
+        }
+        .save(&git)?;
+
+        let loaded = Config::load(&git)?.expect("config should exist");
+        assert!(loaded.ignore.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -259,6 +349,7 @@ mod tests {
 
         let config1 = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: Some(true),
         };
@@ -266,6 +357,7 @@ mod tests {
 
         let config2 = Config {
             protected: vec!["develop".to_string(), "release/*".to_string()],
+            ignore: Vec::new(),
             remotes: Some(vec!["upstream".to_string()]),
             worktrunk: Some(false),
         };
@@ -285,6 +377,7 @@ mod tests {
         // Save with worktrunk enabled
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: Some(true),
         };
@@ -296,6 +389,7 @@ mod tests {
         // Overwrite with worktrunk disabled
         let config2 = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: Some(false),
         };
@@ -307,6 +401,7 @@ mod tests {
         // Overwrite with worktrunk unset
         let config3 = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };
@@ -323,6 +418,7 @@ mod tests {
 
         let config = Config {
             protected: vec!["main".to_string()],
+            ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
         };

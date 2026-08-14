@@ -13,6 +13,7 @@ orphaned worktree cleanup.
 - Respects locked worktrees: skips removal with an informational message
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
+- Ignore branch patterns entirely (`sync.ignore`) -- never fetched, never analysed
 - Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, empty three-dot diff, patch-ID matching, simulated merge, squash-merge detection, and deleted-upstream detection)
 - Automatic fast-forward of target branches before detection (with `--no-pull` to skip)
 - Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
@@ -98,6 +99,14 @@ git sync config remove-protected 'develop'
 git sync config protect develop
 git sync config unprotect develop
 
+# Add/remove ignored branch patterns
+git sync config add-ignore 'wip/*'
+git sync config remove-ignore 'wip/*'
+
+# Ignore/unignore individual branches
+git sync config ignore experiment
+git sync config unignore experiment
+
 # Add/remove remotes to operate on
 git sync config add-remote upstream
 git sync config remove-remote upstream
@@ -113,6 +122,7 @@ Configuration is stored in the `[sync]` section of your git config
     protected = main
     protected = master
     protected = release/*
+    ignore = wip/*
     remote = origin
     worktrunk = true
 ```
@@ -120,6 +130,7 @@ Configuration is stored in the `[sync]` section of your git config
 | Key | Type | Description |
 |-----|------|-------------|
 | `protected` | multi-value | Glob patterns for branches that should never be deleted |
+| `ignore` | multi-value | Glob patterns for branches git-sync ignores entirely |
 | `remote` | multi-value | Remotes to delete branches from (omit for all remotes) |
 | `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects |
 
@@ -134,6 +145,32 @@ config namespace:
 A per-branch protected branch is excluded from deletion candidates and also
 serves as a merge target (branches merged into it are flagged for cleanup).
 
+### Ignored branches
+
+Ignored branches are invisible to git-sync: they are never fetched, never
+become merge targets, never appear as deletion candidates, and their worktrees
+are left alone. Use them for branches git-sync has no business touching, such
+as long-lived spikes or vendor branches.
+
+Patterns go in `sync.ignore`, and individual branches can carry the flag
+directly:
+
+```ini
+[branch "experiment"]
+    sync-ignored = true
+```
+
+**Ignoring takes precedence over protection.** A branch matching both
+`sync.protected` and `sync.ignore` is ignored, which also means it is *not*
+used as a merge target.
+
+Exclusion at fetch time is implemented with negative refspecs
+(`^refs/heads/wip/*`), which require **git 2.29 or later** and understand a
+single `*` wildcard only. Richer glob patterns (`?`, character classes,
+alternates) are still fetched, then filtered out by the same matcher used
+everywhere else. Note that when any ignore pattern is active, the fetch uses an
+explicit refspec and therefore bypasses a custom `remote.<name>.fetch` setting.
+
 ### First run
 
 On first run (when no `[sync]` config section exists), an interactive
@@ -141,8 +178,9 @@ setup wizard runs automatically:
 
 1. Auto-detects local branches and pre-selects well-known ones (`main`, `master`, `develop`, `development`)
 2. Asks for additional protected patterns (e.g. `release/*`)
-3. Lists available remotes and asks which ones to operate on
-4. If [worktrunk](https://worktrunk.dev) (`wt`) is detected on `$PATH`, asks whether to use it for worktree removal
+3. Asks for branch patterns to ignore entirely (e.g. `wip/*`)
+4. Lists available remotes and asks which ones to operate on
+5. If [worktrunk](https://worktrunk.dev) (`wt`) is detected on `$PATH`, asks whether to use it for worktree removal
 
 ## How it works
 

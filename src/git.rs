@@ -286,8 +286,29 @@ impl Git {
     ///
     /// Runs `git fetch --prune <remote>`. Failures are returned to the caller
     /// so that one unreachable remote does not abort the whole workflow.
-    pub fn fetch_remote_prune(&self, remote: &str) -> Result<()> {
-        self.run(&["fetch", "--prune", remote])?;
+    ///
+    /// When `exclude` contains patterns, negative refspecs are appended so the
+    /// matching refs are never transferred. Negative refspecs require git 2.29
+    /// or later and only understand a single `*` wildcard, so patterns git
+    /// cannot express are dropped here (they are still filtered out later by
+    /// the globset matcher). Passing explicit refspecs also bypasses any custom
+    /// `remote.<name>.fetch` configuration, so the default mapping is restated.
+    pub fn fetch_remote_prune(&self, remote: &str, exclude: &[String]) -> Result<()> {
+        let negatives: Vec<String> = exclude
+            .iter()
+            .filter(|p| refspec_safe(p))
+            .map(|p| format!("^refs/heads/{p}"))
+            .collect();
+
+        if negatives.is_empty() {
+            self.run(&["fetch", "--prune", remote])?;
+            return Ok(());
+        }
+
+        let positive = format!("+refs/heads/*:refs/remotes/{remote}/*");
+        let mut args: Vec<&str> = vec!["fetch", "--prune", remote, &positive];
+        args.extend(negatives.iter().map(String::as_str));
+        self.run(&args)?;
         Ok(())
     }
 
@@ -943,25 +964,26 @@ impl Git {
         }
     }
 
-    // ── Per-branch protection ────────────────────────────────────────
+    // ── Per-branch flags ─────────────────────────────────────────────
 
-    /// Return the names of branches that have
-    /// `branch.<name>.sync-protected = true` in git config.
-    pub fn branch_protected_list(&self) -> Result<Vec<String>> {
-        let pattern = r"^branch\..*\.sync-protected$";
-        match self.run(&["config", "--get-regexp", pattern]) {
+    /// Return the names of branches whose `branch.<name>.<suffix>` key is set
+    /// to `true` in git config.
+    fn branch_flag_list(&self, suffix: &str) -> Result<Vec<String>> {
+        let pattern = format!(r"^branch\..*\.{suffix}$");
+        let dot_suffix = format!(".{suffix}");
+        match self.run(&["config", "--get-regexp", &pattern]) {
             Ok(out) => {
                 let mut branches = Vec::new();
                 for line in out.lines().filter(|l| !l.is_empty()) {
-                    // Each line: "branch.<name>.sync-protected true"
+                    // Each line: "branch.<name>.<suffix> true"
                     let mut parts = line.splitn(2, ' ');
                     if let (Some(key), Some(value)) = (parts.next(), parts.next())
                         && value.trim().eq_ignore_ascii_case("true")
                     {
-                        // Extract branch name from "branch.<name>.sync-protected"
+                        // Extract branch name from "branch.<name>.<suffix>"
                         if let Some(name) = key
                             .strip_prefix("branch.")
-                            .and_then(|s| s.strip_suffix(".sync-protected"))
+                            .and_then(|s| s.strip_suffix(&dot_suffix))
                         {
                             branches.push(name.to_string());
                         }
@@ -973,16 +995,13 @@ impl Git {
         }
     }
 
-    /// Set or unset per-branch protection for a given branch.
-    ///
-    /// When `protected` is `true`, sets `branch.<name>.sync-protected = true`.
-    /// When `false`, unsets the key entirely.
+    /// Set `branch.<name>.<suffix> = true`, or unset the key entirely.
     ///
     /// Uses `--local` to target the shared `.git/config`.
     /// See [`config_set`](Self::config_set) for rationale.
-    pub fn set_branch_protected(&self, branch: &str, protected: bool) -> Result<()> {
-        let key = format!("branch.{branch}.sync-protected");
-        if protected {
+    fn set_branch_flag(&self, branch: &str, suffix: &str, enabled: bool) -> Result<()> {
+        let key = format!("branch.{branch}.{suffix}");
+        if enabled {
             self.run(&["config", "--local", &key, "true"])?;
         } else {
             // --unset exits non-zero if the key doesn't exist; that's fine.
@@ -990,9 +1009,43 @@ impl Git {
         }
         Ok(())
     }
+
+    /// Return the names of branches that have
+    /// `branch.<name>.sync-protected = true` in git config.
+    pub fn branch_protected_list(&self) -> Result<Vec<String>> {
+        self.branch_flag_list("sync-protected")
+    }
+
+    /// Set or unset per-branch protection for a given branch.
+    pub fn set_branch_protected(&self, branch: &str, protected: bool) -> Result<()> {
+        self.set_branch_flag(branch, "sync-protected", protected)
+    }
+
+    /// Return the names of branches that have
+    /// `branch.<name>.sync-ignored = true` in git config.
+    pub fn branch_ignored_list(&self) -> Result<Vec<String>> {
+        self.branch_flag_list("sync-ignored")
+    }
+
+    /// Set or unset the per-branch ignore flag for a given branch.
+    pub fn set_branch_ignored(&self, branch: &str, ignored: bool) -> Result<()> {
+        self.set_branch_flag(branch, "sync-ignored", ignored)
+    }
 }
 
 // ── Parsing helpers ──────────────────────────────────────────────────
+
+/// Whether a glob pattern can be expressed as a git refspec pattern.
+///
+/// Git refspecs support at most one `*` and no other glob metacharacter.
+/// Anything richer (`?`, character classes, alternates, `**`) is rejected so
+/// the fetch falls back to transferring the ref; the globset matcher still
+/// filters it out afterwards.
+fn refspec_safe(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && pattern.matches('*').count() <= 1
+        && !pattern.contains(['?', '[', ']', '{', '}', '!', '^'])
+}
 
 /// A worktree entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2530,7 +2583,7 @@ locked work in progress, do not remove
 
         // Fetch so we have the remote ref
         let git = Git::with_workdir(false, &work_path);
-        git.fetch_remote_prune("origin")?;
+        git.fetch_remote_prune("origin", &[])?;
 
         // Record the commit before pulling
         let before = git.run(&["rev-parse", "HEAD"])?;
@@ -2875,6 +2928,93 @@ locked work in progress, do not remove
             .output()?;
         assert!(!git.patch_id_match("main", "feature/orphan")?);
 
+        Ok(())
+    }
+
+    // ── Ignored branches ─────────────────────────────────────────────
+
+    #[test]
+    fn refspec_safe_accepts_only_git_expressible_patterns() {
+        assert!(refspec_safe("wip"));
+        assert!(refspec_safe("wip/*"));
+        assert!(refspec_safe("*-scratch"));
+        assert!(!refspec_safe(""));
+        assert!(!refspec_safe("wip/*/*"));
+        assert!(!refspec_safe("wip/?"));
+        assert!(!refspec_safe("wip/[ab]"));
+        assert!(!refspec_safe("{wip,tmp}/*"));
+    }
+
+    #[test]
+    fn branch_ignored_flag_roundtrip() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
+
+        assert!(git.branch_ignored_list()?.is_empty());
+        git.set_branch_ignored("feature/wip", true)?;
+        assert_eq!(git.branch_ignored_list()?, vec!["feature/wip".to_string()]);
+
+        // The ignore flag is independent from the protection flag.
+        assert!(git.branch_protected_list()?.is_empty());
+
+        git.set_branch_ignored("feature/wip", false)?;
+        assert!(git.branch_ignored_list()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_remote_prune_skips_excluded_branches() -> Result<()> {
+        let (_dir, work_path, bare_path) = init_repo_with_local_remote()?;
+
+        // Push two branches from a second clone so the first one has to fetch
+        // them.
+        let other = _dir.path().join("other");
+        Command::new("git")
+            .args([
+                "clone",
+                bare_path.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ])
+            .output()?;
+        for (branch, file) in [("feature/keep", "keep.txt"), ("wip/spike", "spike.txt")] {
+            Command::new("git")
+                .args(["checkout", "-b", branch, "main"])
+                .current_dir(&other)
+                .output()?;
+            std::fs::write(other.join(file), "x")?;
+            Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=T", "add", "."])
+                .current_dir(&other)
+                .output()?;
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=T",
+                    "commit",
+                    "-m",
+                    branch,
+                ])
+                .current_dir(&other)
+                .output()?;
+            Command::new("git")
+                .args(["push", "origin", branch])
+                .current_dir(&other)
+                .output()?;
+        }
+
+        let git = Git::with_workdir(false, &work_path);
+        git.fetch_remote_prune("origin", &["wip/*".to_string()])?;
+
+        let refs = git.run(&["for-each-ref", "--format=%(refname)", "refs/remotes"])?;
+        assert!(
+            refs.contains("refs/remotes/origin/feature/keep"),
+            "non-ignored branch should be fetched, got {refs}"
+        );
+        assert!(
+            !refs.contains("refs/remotes/origin/wip/spike"),
+            "ignored branch should never be fetched, got {refs}"
+        );
         Ok(())
     }
 }

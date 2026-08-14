@@ -1,9 +1,13 @@
 use anyhow::Result;
 
+use crate::branches::Filter;
 use crate::git::{Git, Worktree};
 
 /// Find worktrees whose branch no longer exists locally.
-pub fn find_orphan_worktrees(git: &Git) -> Result<Vec<Worktree>> {
+///
+/// Worktrees holding an ignored branch are skipped: git-sync must not touch
+/// them even if their branch ref has disappeared.
+pub fn find_orphan_worktrees(git: &Git, filter: &Filter) -> Result<Vec<Worktree>> {
     let worktrees = git.worktree_list()?;
     let local_branches = git.local_branches()?;
 
@@ -15,7 +19,7 @@ pub fn find_orphan_worktrees(git: &Git) -> Result<Vec<Worktree>> {
                 return false;
             }
             match &wt.branch {
-                Some(branch) => !local_branches.contains(branch),
+                Some(branch) => !filter.is_ignored(branch) && !local_branches.contains(branch),
                 // Detached HEAD worktrees are not considered orphans
                 None => false,
             }
@@ -49,6 +53,7 @@ pub fn find_worktrees_for_branches(git: &Git, branches: &[String]) -> Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use std::process::Command as StdCommand;
 
     #[test]
@@ -75,7 +80,7 @@ mod tests {
         let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
         // All worktrees have existing branches, so no orphans
-        let orphans = find_orphan_worktrees(&git)?;
+        let orphans = find_orphan_worktrees(&git, &Filter::load(&git, &Config::default())?)?;
         assert!(orphans.is_empty());
         Ok(())
     }
@@ -93,7 +98,7 @@ mod tests {
             .output()?;
 
         // Now the worktree's branch no longer exists, so it's orphaned
-        let orphans = find_orphan_worktrees(&git)?;
+        let orphans = find_orphan_worktrees(&git, &Filter::load(&git, &Config::default())?)?;
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].branch.as_deref(), Some("feature/wt"));
         Ok(())

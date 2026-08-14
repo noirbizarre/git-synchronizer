@@ -110,6 +110,15 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                     ));
                     ui.line(&format!(
                         "  {} {}",
+                        ui.bold_style.apply_to("ignore:"),
+                        if cfg.ignore.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            cfg.ignore.join(", ")
+                        }
+                    ));
+                    ui.line(&format!(
+                        "  {} {}",
                         ui.bold_style.apply_to("remotes:"),
                         match &cfg.remotes {
                             Some(r) => r.join(", "),
@@ -125,6 +134,17 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                             "(none)".to_string()
                         } else {
                             branch_protected.join(", ")
+                        }
+                    ));
+
+                    let branch_ignored = git.branch_ignored_list()?;
+                    ui.line(&format!(
+                        "  {} {}",
+                        ui.bold_style.apply_to("branch ignored:"),
+                        if branch_ignored.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            branch_ignored.join(", ")
                         }
                     ));
 
@@ -176,6 +196,30 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
             Ok(())
         }
 
+        ConfigAction::AddIgnore { pattern } => {
+            git.config_add(&format!("{}.ignore", config::SECTION), &pattern)?;
+            ui.success(&format!(
+                "Added ignore pattern: {}",
+                console::style(pattern).cyan()
+            ));
+            Ok(())
+        }
+
+        ConfigAction::RemoveIgnore { pattern } => {
+            let key = format!("{}.ignore", config::SECTION);
+            let mut ignore = git.config_get_all(&key)?;
+            ignore.retain(|p| p != &pattern);
+            git.config_unset_all(&key)?;
+            for p in &ignore {
+                git.config_add(&key, p)?;
+            }
+            ui.success(&format!(
+                "Removed ignore pattern: {}",
+                console::style(pattern).cyan()
+            ));
+            Ok(())
+        }
+
         ConfigAction::AddRemote { name } => {
             git.config_add(&format!("{}.remote", config::SECTION), &name)?;
             ui.success(&format!("Added remote: {}", console::style(&name).cyan()));
@@ -207,6 +251,24 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
             git.set_branch_protected(&branch, false)?;
             ui.success(&format!(
                 "Branch '{}' is no longer protected",
+                console::style(&branch).cyan()
+            ));
+            Ok(())
+        }
+
+        ConfigAction::Ignore { branch } => {
+            git.set_branch_ignored(&branch, true)?;
+            ui.success(&format!(
+                "Branch '{}' is now ignored",
+                console::style(&branch).cyan()
+            ));
+            Ok(())
+        }
+
+        ConfigAction::Unignore { branch } => {
+            git.set_branch_ignored(&branch, false)?;
+            ui.success(&format!(
+                "Branch '{}' is no longer ignored",
                 console::style(&branch).cyan()
             ));
             Ok(())
