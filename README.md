@@ -13,7 +13,7 @@ orphaned worktree cleanup.
 - Respects locked worktrees: skips removal with an informational message
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
-- Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, empty-diff detection for squash merges, and deleted-upstream detection)
+- Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, empty three-dot diff, patch-ID matching, simulated merge, squash-merge detection, and deleted-upstream detection)
 - Automatic fast-forward of target branches before detection (with `--no-pull` to skip)
 - Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
 - Interactive setup wizard on first run
@@ -169,7 +169,8 @@ CLI flags:
 
 3. **Delete merged local branches & clean worktrees** -- identifies branches
    merged into any protected branch (both glob-pattern and per-branch
-   protected) using several complementary strategies:
+   protected) using several complementary strategies, applied from cheapest to
+   most expensive and stopping as soon as one matches:
    - *Standard detection*: `git branch --merged <target>` catches fast-forward
      and regular merges.
    - *Rebase-aware detection*: `git cherry <target> <branch>` catches
@@ -177,9 +178,21 @@ CLI flags:
      applied upstream.
    - *Tree SHA comparison*: compares `git rev-parse <ref>^{tree}` between
      the target and branch -- the cheapest content-equality check.
-   - *Empty-diff detection*: `git diff --quiet <target> <branch>` catches
-     squash-merge cases where the target tree already contains all branch
-     changes.
+   - *Empty three-dot diff*: `git diff --quiet <target>...<branch>` catches
+     branches whose own commits net out to no content change relative to their
+     fork point (a commit and its revert, a pure history rewrite, a branch
+     created but never meaningfully advanced).
+   - *Patch-ID matching*: compares `git patch-id --stable` fingerprints of the
+     branch's commits against those recently applied on the target, catching
+     branches re-applied under different SHAs (rebase + reword, partial
+     cherry-pick, history rewrite).
+   - *Simulated merge*: `git merge-tree --write-tree <target> <branch>` --
+     if merging the branch would produce exactly the target's current tree,
+     the branch adds nothing. Handles squash merges even after the target has
+     advanced with unrelated changes.
+   - *Squash-merge detection*: compares the patch-ID of the branch's combined
+     diff against the target's recent commits, catching multi-commit branches
+     collapsed into a single squash commit.
 
    Per-branch protected branches also serve as merge targets, so branches
    merged into them are detected as candidates too.
@@ -222,6 +235,13 @@ CLI flags:
    merged remote-tracking branches with `git branch -r --merged <target>`. The
    user selects which to delete, and they are removed with
    `git push --delete --force-with-lease` for safety.
+
+   Note that remote detection currently uses **only** this standard ancestor
+   check: the cherry, tree, patch-ID and simulated-merge strategies listed in
+   step 3 are applied to local branches only. Remote branches that were
+   squash- or rebase-merged are therefore not reported yet -- see
+   [issue #28](https://github.com/noirbizarre/git-synchronizer/issues/28).
+   Their local counterparts are still detected normally.
    Skipped with `--local-only`.
 
 ```mermaid
