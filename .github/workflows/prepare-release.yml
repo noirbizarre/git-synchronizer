@@ -28,9 +28,19 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
 
+    # Well below the App installation token's one-hour lifetime: a job that
+    # outlives its own token fails at whichever `gh` call lands after the
+    # deadline, which is a confusing way to learn a build hung.
+    timeout-minutes: 30
+
     # The GitHub App credentials live only in the `release` environment.
     # Preparing a release is not a deployment, so this gates the secrets
     # without registering one. The deployment is publish-release.
+    #
+    # It is load-bearing twice over: it gates the private key, and an
+    # environment-scoped variable only resolves in a job that declares its
+    # environment — so APP_CLIENT_ID would silently expand to nothing without
+    # this.
     environment:
       name: release
       deployment: false
@@ -41,7 +51,11 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.APP_ID }}
+          # The Client ID is not a secret, so it lives in a variable — but it
+          # is scoped to the `release` environment, which is why every job that
+          # mints a token must declare that environment. Without it the
+          # expansion is silently empty and the mint fails confusingly.
+          client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       # Set once so every `gh` and `git` invocation below authenticates with

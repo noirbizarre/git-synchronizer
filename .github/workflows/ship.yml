@@ -56,7 +56,11 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.APP_ID }}
+          # The Client ID is not a secret, so it lives in a variable — but it
+          # is scoped to the `release` environment, which is why every job that
+          # mints a token must declare that environment. Without it the
+          # expansion is silently empty and the mint fails confusingly.
+          client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@v7
@@ -87,8 +91,12 @@ jobs:
       && github.repository_owner == 'noirbizarre'
     runs-on: ubuntu-latest
     # `gh ship release` waits on the publish workflow, which cross-compiles
-    # eight targets and publishes the crate.
-    timeout-minutes: 60
+    # eight targets and publishes the crate — so this is the job most likely to
+    # run long. Capped below 60 on purpose: an App installation token expires
+    # after an hour, and a job that outlives its own token fails at whichever
+    # `gh` call happens to land after the deadline. Also below gh-ship's own
+    # SHIP_RUN_TIMEOUT default, so a stuck run fails here rather than hanging.
+    timeout-minutes: 50
 
     environment:
       name: release
@@ -98,7 +106,8 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.APP_ID }}
+          # Scoped to the `release` environment, as above.
+          client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@v7

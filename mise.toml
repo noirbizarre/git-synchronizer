@@ -62,7 +62,21 @@ depends = ["fmt-check", "lint", "test"]
 
 [tasks."lint:actions"]
 description = "Lint the GitHub Actions workflows"
-run = "actionlint -ignore 'unexpected key \"deployment\" for \"environment\" section' .github/workflows/*.yml"
+# Three ignores, each for a case where actionlint's bundled knowledge is behind
+# the platform rather than our workflows being wrong:
+#   - `environment.deployment` is a real key, used to take a job out of the
+#     deployment history while still granting the environment's secrets;
+#   - `client-id` is the input `actions/create-github-app-token` now
+#     recommends, and it deprecated `app-id` in v3. actionlint still ships the
+#     pre-v3 input list, so it reports the correct spelling as unknown and the
+#     deprecated one as missing.
+run = """
+actionlint \
+  -ignore 'unexpected key "deployment" for "environment" section' \
+  -ignore 'input "client-id" is not defined in action "actions/create-github-app-token' \
+  -ignore 'missing input "app-id" which is required by action "actions/create-github-app-token' \
+  .github/workflows/*.yml
+"""
 
 [tasks.changelog]
 description = "Preview the changelog and version for the next release"
