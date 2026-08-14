@@ -1,0 +1,220 @@
+name: 🚀 Prepare Release
+
+# No correlation input: gh-ship finds the run it dispatched from the ref it
+# cut, the event type and the run being new, so the contract is just an
+# ordinary dispatchable workflow.
+# See https://noirbizarre.github.io/gh-ship/workflows/
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Produce the artifact but do not commit or push
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+
+    # Well below the App installation token's one-hour lifetime: a job that
+    # outlives its own token fails at whichever `gh` call lands after the
+    # deadline, which is a confusing way to learn a build hung.
+    timeout-minutes: 30
+
+    # The GitHub App credentials live only in the `release` environment.
+    # Preparing a release is not a deployment, so this gates the secrets
+    # without registering one. The deployment is publish-release.
+    #
+    # It is load-bearing twice over: it gates the private key, and an
+    # environment-scoped variable only resolves in a job that declares its
+    # environment — so APP_CLIENT_ID would silently expand to nothing without
+    # this.
+    environment:
+      name: release
+      deployment: false
+
+    steps:
+      # The default GITHUB_TOKEN cannot trigger workflows, so a Release PR it
+      # authors would show no CI results. The App token can.
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          # The Client ID is not a secret, so it lives in a variable — but it
+          # is scoped to the `release` environment, which is why every job that
+          # mints a token must declare that environment. Without it the
+          # expansion is silently empty and the mint fails confusingly.
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # Set once so every `gh` and `git` invocation below authenticates with
+      # the App token rather than falling back to the default one.
+      - run: echo "GH_TOKEN=${{ steps.app-token.outputs.token }}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history *and* tags: git-cliff derives the next version from
+          # the last tag, and a shallow clone has neither.
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # git-cliff and typos are pinned by mise.lock: a changelog tool that
+      # changes version between releases would silently change our release
+      # notes.
+      - uses: jdx/mise-action@v4
+        with:
+          cache: true
+
+      # Installed up front because two later steps need it: `gh ship sign` and
+      # the artifact validation.
+      - name: Install gh-ship
+        run: gh extension install noirbizarre/gh-ship
+
+      # --- versioning: ours, not gh-ship's ---------------------------------
+
+      - name: Compute the next version
+        id: version
+        run: |
+          set -euo pipefail
+
+          # Compare against the last *tag*, not the version in Cargo.toml.
+          # Cargo.toml already carries the version being prepared, so
+          # comparing to it would report "no change" for the very first
+          # release and make bootstrapping impossible.
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          next_tag="$(git cliff --bumped-version)"
+
+          # This project tags with a `v` prefix, so the tag and the crate
+          # version differ by exactly that character. gh-ship never derives one
+          # from the other, which is why both are computed here.
+          {
+            echo "tag=$next_tag"
+            echo "version=${next_tag#v}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$last_tag" = "$next_tag" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No new releasable commits since ${last_tag:-the beginning}."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing ${last_tag:-<nothing>} -> $next_tag"
+          fi
+
+      - name: Generate the changelog
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git cliff --bump -o CHANGELOG.md
+
+          # Release notes are scratch input for `jq --rawfile`, not a
+          # source file. Keep them out of the worktree so `git add -A`
+          # cannot commit them.
+          git cliff --unreleased --bump --strip all -o "$RUNNER_TEMP/ship-notes.md"
+
+          # The `## <version> - <date>` heading belongs to CHANGELOG.md. The
+          # Release PR and the GitHub Release both carry the version in their
+          # own title, so drop the first heading and the blank lines ahead of
+          # it. The `0,/^## /` range stops at the first match, leaving later
+          # `##` sections such as New Contributors alone.
+          sed -i -e '0,/^## /{/^## /d}' -e '/./,$!d' "$RUNNER_TEMP/ship-notes.md"
+
+      - name: Apply the version
+        if: steps.version.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Only the first `version =` belongs to [package].
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+          # Keeps Cargo.lock's entry for this crate in step with Cargo.toml.
+          cargo update --workspace
+
+      - name: Commit and push
+        if: steps.version.outputs.changed == 'true' && !inputs.dry_run
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Git refuses to commit without an identity, and a runner has none.
+          # Which identity barely matters: the next step re-creates this commit
+          # through the API, and the re-created one takes its author from the
+          # token and its committer from GitHub.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          git diff --cached --quiet || git commit -m "chore(release): $VERSION"
+          # gh-ship dispatched this workflow on a throwaway staging branch cut
+          # from main, so HEAD is already the right ref. Never push to the
+          # release branch directly.
+          git push origin HEAD
+
+      # A commit created on the runner is never signed, whichever token pushes
+      # it: signing needs a key, and there is no key here. GitHub *will* sign a
+      # commit it creates itself for a bot, but only when the request carries
+      # no author or committer of its own — so the only way to get the Verified
+      # badge without putting a signing key in our secrets is to push first and
+      # then have the API re-create the tip. That is what `gh ship sign` does.
+      #
+      # It signs the tip of the branch this workflow was dispatched on, which
+      # is gh-ship's staging branch — exactly what we just pushed. It exits
+      # non-zero rather than silently rewriting history if GitHub hands back an
+      # unsigned commit, and leaves an already-signed commit alone.
+      #
+      # gh-ship promotes whatever the staging branch points at, so moving the
+      # tip here is invisible to the rest of the release.
+      - name: Sign the release commit
+        if: steps.version.outputs.changed == 'true' && !inputs.dry_run
+        run: gh ship sign
+
+      # --- the protocol ------------------------------------------------------
+
+      - name: Write the release artifact
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.version.outputs.changed }}" != "true" ]; then
+            jq -n '{schemaVersion: 1, changed: false}' > ship.release.json
+          else
+            jq -n \
+              --arg version "$VERSION" \
+              --arg tag     "$TAG" \
+              --rawfile notes "$RUNNER_TEMP/ship-notes.md" \
+              '{
+                "$schema": "https://noirbizarre.github.io/gh-ship/schema/release/v1.json",
+                schemaVersion: 1,
+                changed: true,
+                version: $version,
+                tag: $tag,
+                release: { notes: $notes }
+              }' > ship.release.json
+          fi
+          cat ship.release.json
+
+      # Validating here turns a protocol mistake into a red workflow with a
+      # precise error, instead of a confusing failure in gh-ship later.
+      - name: Validate the release artifact
+        run: gh ship validate ship.release.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ship-release
+          path: ship.release.json
+          if-no-files-found: error
