@@ -39,3 +39,19 @@ language = "system"
 entry = "cargo clippy --all-targets --all-features -- -D warnings"
 files = "\\.rs$"
 pass_filenames = false
+
+# The release runs entirely on workflows, so a typo in one is only discovered
+# when a release is already under way. Configuration, including which checks
+# are silenced and why, lives in .github/actionlint.yml.
+#
+# `system`, like the hooks above, but routed through mise: unlike cargo, which
+# rustup puts on PATH, actionlint exists only as a mise-managed tool. Going via
+# `mise exec` runs the version mise.lock pins whether or not the caller's shell
+# has mise activated — a git hook usually does not.
+[[repos.hooks]]
+id = "actionlint"
+name = "actionlint"
+language = "system"
+entry = "mise exec -- actionlint"
+files = "^\\.github/(workflows/.*\\.ya?ml|actionlint\\.ya?ml)$"
+pass_filenames = false

@@ -18,6 +18,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The prek hooks are `system` hooks: they run whatever is on PATH. mise
+      # is what puts actionlint there, at the version mise.lock pins, so this
+      # job checks the same thing a local `prek run` does.
+      - uses: jdx/mise-action@v4
+        with:
+          cache: true
       # Pinned to an exact release on purpose: prek-action stopped publishing
       # moving major tags in v3, so `@v3` does not resolve.
       - uses: j178/prek-action@v3.0.0
