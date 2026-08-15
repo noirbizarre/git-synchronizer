@@ -118,6 +118,35 @@ fn config_set_value() {
 }
 
 #[test]
+fn config_set_replaces_every_value_of_a_multi_valued_key() {
+    let dir = init_repo();
+
+    // Two values: a plain `git config sync.protected <v>` would fail here.
+    for value in ["main", "develop"] {
+        StdCommand::new("git")
+            .args(["config", "--add", "sync.protected", value])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+    }
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "set", "protected", "release"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Set protected = release"));
+
+    let output = StdCommand::new("git")
+        .args(["config", "--get-all", "sync.protected"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "release");
+}
+
+#[test]
 fn config_add_and_remove_protected() {
     let dir = init_repo();
     let p = dir.path();

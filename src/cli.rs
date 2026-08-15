@@ -85,7 +85,11 @@ pub enum ConfigAction {
 
     /// Set a configuration value
     Set {
-        /// Configuration key (e.g. protected)
+        /// Configuration key (e.g. worktrunk)
+        ///
+        /// For multi-valued keys (protected, ignore, remote) this replaces
+        /// every existing value; use the add-*/remove-* subcommands to edit
+        /// them individually.
         key: String,
         /// Value to set
         value: String,

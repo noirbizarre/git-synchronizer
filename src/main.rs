@@ -98,6 +98,14 @@ fn short_cause(err: &anyhow::Error) -> String {
         .unwrap_or_else(|| err.to_string())
 }
 
+/// Whether a `[sync]` key is stored as repeated git config entries.
+///
+/// Multi-valued keys cannot be written with a plain `git config <key> <value>`
+/// once they hold more than one entry.
+fn is_multi_valued(key: &str) -> bool {
+    matches!(key, "protected" | "ignore" | "remote")
+}
+
 fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::List => {
@@ -168,7 +176,15 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 
         ConfigAction::Set { key, value } => {
             let full_key = format!("{}.{key}", config::SECTION);
-            git.config_set(&full_key, &value)?;
+            if is_multi_valued(&key) {
+                // `git config --local <key> <value>` refuses a key that already
+                // holds several values. Treat `set` as "replace every value"
+                // so the outcome matches the verb regardless of prior state.
+                git.config_unset_all(&full_key)?;
+                git.config_add(&full_key, &value)?;
+            } else {
+                git.config_set(&full_key, &value)?;
+            }
             ui.success(&format!("Set {key} = {value}"));
             Ok(())
         }

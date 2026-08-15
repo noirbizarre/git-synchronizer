@@ -196,7 +196,9 @@ pub fn worktrunk_available() -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        // `is_ok` alone only proves the process was spawned; a `wt` that exists
+        // but fails to run would still be reported as available.
+        .is_ok_and(|status| status.success())
 }
 
 /// A thin wrapper around git CLI invocations.
