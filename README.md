@@ -253,7 +253,15 @@ CLI flags:
    with a deleted upstream, and orphan worktrees (worktrees whose branch no
    longer exists locally). Merged branches default to selected;
    deleted-upstream branches and orphan worktrees default to unselected.
-   The user confirms everything in one pass.
+
+   Two cases are handled outside that multiselect. Worktrees that are dirty
+   (uncommitted or untracked changes) or hold unmerged commits are collected
+   into a **second multiselect** for forced removal, defaulting to unselected;
+   anything left unselected there is skipped entirely, with neither the
+   worktree removed nor the branch deleted. Under `--yes` all of them are
+   force-removed without prompting. Separately, a selected branch whose
+   commits are unreachable from any merge target is force-deleted
+   automatically, with an informational line rather than a prompt.
 
    For selected branches that have worktrees, the worktree is removed first,
    then the branch is deleted with `git branch -D` (force-delete is safe here
