@@ -519,7 +519,10 @@ impl Git {
 
     /// Use `git cherry` to detect rebase-merged branches.
     ///
-    /// Returns branch names whose commits have all been applied upstream.
+    /// Returns `true` when every commit of `branch` has already been applied
+    /// on `upstream` — that is, when `git cherry` prefixes every line with
+    /// `-`. Returns `false` when the output is empty, which means the branch
+    /// has no commits ahead of `upstream`.
     pub fn cherry_merged(&self, upstream: &str, branch: &str) -> Result<bool> {
         let out = self.run(&["cherry", upstream, branch])?;
         // If all lines start with `-`, every commit was cherry-picked upstream.
@@ -741,7 +744,7 @@ impl Git {
 
     // ── Worktree operations ──────────────────────────────────────────
 
-    /// Parsed worktree entry from `git worktree list --porcelain`.
+    /// Return the parsed entries of `git worktree list --porcelain`.
     pub fn worktree_list(&self) -> Result<Vec<Worktree>> {
         let out = self.run(&["worktree", "list", "--porcelain"])?;
         Ok(parse_worktree_list(&out))
@@ -1015,8 +1018,9 @@ pub struct Worktree {
 
 /// Parse `git branch` output (with leading `*`, `+` and whitespace).
 ///
-/// `*` marks the current branch, `+` marks branches checked out in
-/// other linked worktrees — both are stripped.
+/// `*` marks the current branch and those entries are **excluded** from the
+/// result. `+` marks branches checked out in other linked worktrees; only its
+/// `+ ` prefix is stripped and the branch is kept.
 fn parse_branch_list(output: &str) -> Vec<String> {
     output
         .lines()

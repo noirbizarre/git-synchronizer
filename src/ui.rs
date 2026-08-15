@@ -91,7 +91,7 @@ impl Ui {
         }
     }
 
-    /// Ask for confirmation, defaulting to "no" for safety.
+    /// Ask for confirmation, pre-selecting `default`.
     pub fn confirm(&self, prompt: &str, default: bool) -> anyhow::Result<bool> {
         Ok(Confirm::new(prompt).selected(default).run()?)
     }
