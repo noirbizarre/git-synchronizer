@@ -341,7 +341,16 @@ flowchart TD
 
 ## Development
 
-This project uses [mise](https://mise.jdx.dev/) for task management:
+This project uses [mise](https://mise.jdx.dev/) for task management. Start by
+installing the toolchain and the git hooks:
+
+```sh
+mise install            # Install the pinned toolchain and tools
+prek install            # Install the pre-commit and commit-msg git hooks
+```
+
+The hooks are what enforce formatting, clippy and the commit convention
+locally; without them the first feedback comes from CI.
 
 ```sh
 mise run build          # Build the project
@@ -350,7 +359,8 @@ mise run test           # Run tests with cargo-nextest
 mise run lint           # Run clippy
 mise run lint:actions   # Lint the GitHub Actions workflows
 mise run fmt            # Format code
-mise run check          # Run all checks (fmt + lint + test)
+mise run fmt-check      # Check formatting without rewriting files
+mise run check          # Run all checks (fmt-check + lint + test)
 mise run cover          # Generate lcov coverage report
 mise run cover:html     # Generate HTML coverage report
 mise run changelog      # Preview the next version and changelog
@@ -361,8 +371,9 @@ mise run setup          # Install the binary locally
 ### Commits
 
 [Conventional Commits](https://www.conventionalcommits.org/), enforced by
-commitlint. The changelog and the next version number are derived from them, so
-the type and scope matter.
+commitlint via the prek `commit-msg` hook and re-checked by the CI lint job.
+The changelog and the next version number are derived from them, so the type
+and scope matter.
 
 ### Releases
 
