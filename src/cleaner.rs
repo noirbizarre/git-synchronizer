@@ -821,8 +821,14 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
         for remote in &remotes {
             let merged = ui.spinner(&format!("Scanning {remote}…"), || {
-                find_merged_remote(git, &filter, remote)
+                find_merged_remote(git, &filter, remote, opts.effort)
             })?;
+            // Surfaced after the spinner: printing inside it would corrupt the
+            // spinner's own line.
+            for warning in &merged.warnings {
+                warn(ui, &mut report, warning);
+            }
+            let merged = merged.candidates;
 
             if merged.is_empty() {
                 ui.muted(&format!("No merged remote branches on '{remote}'."));

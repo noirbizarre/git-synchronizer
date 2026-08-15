@@ -540,13 +540,17 @@ impl Git {
     /// Return remote-tracking branches merged into `target` for the given remote.
     pub fn merged_remote_branches(&self, target: &str, remote: &str) -> Result<Vec<String>> {
         let out = self.run(&["branch", "-r", "--merged", target])?;
-        let prefix = format!("{remote}/");
-        Ok(out
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| l.starts_with(&prefix) && !l.contains("->"))
-            .map(|l| l.strip_prefix(&prefix).unwrap_or(l).to_string())
-            .collect())
+        Ok(parse_remote_branch_list(&out, remote))
+    }
+
+    /// Return every remote-tracking branch of `remote`, in short form
+    /// (`feature/x`, not `origin/feature/x`).
+    ///
+    /// The `origin/HEAD -> origin/main` symref line is skipped, so the result
+    /// only contains branches that can meaningfully be compared or deleted.
+    pub fn remote_branches(&self, remote: &str) -> Result<Vec<String>> {
+        let out = self.run(&["branch", "-r", "--format=%(refname:short)"])?;
+        Ok(parse_remote_branch_list(&out, remote))
     }
 
     /// Use `git cherry` to detect rebase-merged branches.
@@ -1074,6 +1078,21 @@ fn parse_branch_list(output: &str) -> Vec<String> {
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with('*'))
         .map(|l| l.strip_prefix("+ ").unwrap_or(l).to_string())
+        .collect()
+}
+
+/// Parse `git branch -r` output, keeping only the branches of `remote` and
+/// returning them in short form (without the `<remote>/` prefix).
+///
+/// The `origin/HEAD -> origin/main` symref line is dropped: it is an alias, not
+/// a branch, and must never be offered for comparison or deletion.
+fn parse_remote_branch_list(output: &str, remote: &str) -> Vec<String> {
+    let prefix = format!("{remote}/");
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with(&prefix) && !l.contains("->"))
+        .map(|l| l.strip_prefix(&prefix).unwrap_or(l).to_string())
         .collect()
 }
 
@@ -2657,5 +2676,73 @@ locked work in progress, do not remove
             "ignored branch should never be fetched, got {refs}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn remote_branches_lists_short_names_and_skips_head() -> Result<()> {
+        let (_dir, work_path, bare_path) = init_repo_with_local_remote()?;
+
+        // Push a branch from a second clone so the first one has to fetch it.
+        let other = _dir.path().join("other");
+        Command::new("git")
+            .args([
+                "clone",
+                bare_path.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ])
+            .output()?;
+        Command::new("git")
+            .args(["checkout", "-b", "feature/x", "main"])
+            .current_dir(&other)
+            .output()?;
+        std::fs::write(other.join("x.txt"), "x")?;
+        Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=T", "add", "."])
+            .current_dir(&other)
+            .output()?;
+        Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-m",
+                "x",
+            ])
+            .current_dir(&other)
+            .output()?;
+        Command::new("git")
+            .args(["push", "origin", "feature/x"])
+            .current_dir(&other)
+            .output()?;
+
+        let git = Git::with_workdir(false, &work_path);
+        git.run(&["fetch", "origin"])?;
+        // Materialise origin/HEAD so the symref line is actually exercised.
+        git.run(&["remote", "set-head", "origin", "--auto"])?;
+
+        let mut branches = git.remote_branches("origin")?;
+        branches.sort();
+        assert_eq!(
+            branches,
+            vec!["feature/x".to_string(), "main".to_string()],
+            "short names only, no HEAD alias"
+        );
+        assert!(
+            git.remote_branches("nope")?.is_empty(),
+            "an unknown remote has no branches"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_remote_branch_list_strips_prefix_and_head() {
+        let out =
+            "  origin/HEAD -> origin/main\n  origin/main\n  origin/feature/x\n  upstream/main\n";
+        assert_eq!(
+            parse_remote_branch_list(out, "origin"),
+            vec!["main".to_string(), "feature/x".to_string()]
+        );
     }
 }
