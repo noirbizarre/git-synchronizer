@@ -100,55 +100,35 @@ relevant file into your shell's completion directory.
 
 ## Usage
 
+Run `git sync` with no arguments: it works interactively, showing what it found
+and prompting before every destructive step.
+
 ```sh
 # Interactive mode (prompts for confirmation at each step)
 git sync
 
-# Auto-confirm everything
-git sync --yes
-
-# Also force-remove worktrees with uncommitted changes or unmerged commits
-git sync --yes --force
-
-# Dry run (show what would be done)
+# Show what would be done, change nothing
 git sync --dry-run
 
-# Show git commands being executed
-git sync --verbose
+# Unattended: auto-confirm everything
+git sync --yes
 
-# Skip fetching/pruning
-git sync --no-fetch
-
-# Skip pulling (fast-forwarding) target branches
-git sync --no-pull
-
-# Only clean local or remote branches
-git sync --local-only
-git sync --remote-only
-
-# Skip worktree cleanup
-git sync --no-worktrees
-
-# With -y, also delete branches whose upstream branch was deleted
+# Also delete branches whose upstream branch was deleted
 git sync -y --delete-gone
 
-# Trade speed for accuracy in merge detection (1 = fastest, 3 = most thorough, default 2)
-git sync --effort 1
-git sync --effort 3
-
-# Keep worktrees created less than a given duration ago (default: 0s, no guard)
-git sync --min-age 2h
-git sync --min-age 7d
-
-# Use worktrunk for worktree removal (triggers pre/post-remove hooks)
-git sync --worktrunk
-
-# Disable worktrunk even if configured or detected
-git sync --no-worktrunk
+# Also force-remove worktrees with uncommitted changes or unmerged commits
+git sync -y --force
 
 # Machine-readable output (implies --yes)
 git sync --json
 ```
+
+The rest of the flags tune scope (`--local-only`, `--no-worktrees`, …), merge
+detection (`--effort`) and worktree safety (`--min-age`). Rather than repeat them
+here, where they would drift, the complete reference is generated from the same
+definition as the binary: run `git sync -h` for the summary, or `man git-sync`
+for the full manual — see
+[Man pages and completions](#man-pages-and-completions) above.
 
 ### JSON output
 
@@ -190,6 +170,9 @@ Item statuses are `updated`, `deleted`, `removed`, `skipped`, `locked`,
 
 ### Configuration management
 
+`git sync config` reads and writes the `[sync]` settings described in
+[Configuration](#configuration) below:
+
 ```sh
 # Display current configuration
 git sync config list
@@ -200,26 +183,17 @@ git sync config setup
 # Set a configuration value directly
 git sync config set worktrunk false
 
-# Add/remove protected branch patterns
+# Add a protected branch pattern
 git sync config add-protected 'release/*'
-git sync config remove-protected 'develop'
 
-# Protect/unprotect individual branches
-git sync config protect develop
-git sync config unprotect develop
-
-# Add/remove ignored branch patterns
-git sync config add-ignore 'wip/*'
-git sync config remove-ignore 'wip/*'
-
-# Ignore/unignore individual branches
+# Ignore a single branch
 git sync config ignore experiment
-git sync config unignore experiment
-
-# Add/remove remotes to operate on
-git sync config add-remote upstream
-git sync config remove-remote upstream
 ```
+
+Each of these has a counterpart: `add-`/`remove-` pairs for the `protected`,
+`ignore` and `remote` patterns, and `protect`/`unprotect`, `ignore`/`unignore`
+for individual branches. `git sync config -h` lists them all, and each has its
+own man page (`man git-sync-config-set`).
 
 ## Configuration
 
@@ -524,6 +498,7 @@ mise run cover          # Generate lcov coverage report
 mise run cover:html     # Generate HTML coverage report
 mise run changelog      # Preview the next version and changelog
 mise run ship:validate  # Validate the gh-ship release setup
+mise run man            # Collect the generated man pages and completions
 mise run setup          # Install the binary locally
 ```
 
