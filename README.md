@@ -46,6 +46,19 @@ configured remotes. It also handles orphaned worktree cleanup.
 
 ## Installation
 
+Homebrew:
+
+```sh
+brew install noirbizarre/tap/git-sync
+```
+
+Arch Linux, from the AUR — prebuilt (`git-synchronizer-bin`), built from the
+release source (`git-synchronizer`) or from `main` (`git-synchronizer-git`):
+
+```sh
+paru -S git-synchronizer-bin
+```
+
 From crates.io:
 
 ```sh
@@ -68,8 +81,9 @@ making it available as the `git sync` subcommand.
 
 Git rewrites `git sync --help` into `git help sync`, which runs `man git-sync`.
 That only works once the man page is installed — otherwise git reports
-*"No manual entry for git-sync"*. `cargo install` places the binary alone, so
-the pages have to be installed separately.
+*"No manual entry for git-sync"*. The Homebrew and AUR packages install the
+pages and the shell completions for you; `cargo install` places the binary
+alone, so with it they have to be installed separately.
 
 From a checkout, `mise` does both, plus zsh completions:
 
