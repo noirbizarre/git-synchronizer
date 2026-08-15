@@ -1137,6 +1137,9 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{
+        advance_remote, init_repo_with_local_remote, init_repo_with_worktree_config,
+    };
 
     #[test]
     fn config_readers_propagate_failures_that_are_not_an_unset_key() -> Result<()> {
@@ -1488,35 +1491,8 @@ locked work in progress, do not remove
     /// Integration test: verify basic git operations in a temporary repo.
     #[test]
     fn test_git_in_temp_repo() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        // Initialize a bare-minimum repo
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-
-        // Create an initial commit
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
 
         // Test current branch
         assert_eq!(git.current_branch()?, "main");
@@ -1566,30 +1542,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_branch_delete() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create and merge a branch
         Command::new("git")
@@ -1614,8 +1568,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         let branches = git.local_branches()?;
         assert!(branches.contains(&"feature/to-delete".to_string()));
 
@@ -1629,32 +1581,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_remotes_empty() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
         let remotes = git.remotes()?;
         assert!(remotes.is_empty());
 
@@ -1663,30 +1591,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_cherry_merged() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a feature branch
         Command::new("git")
@@ -1731,8 +1637,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // The branch's commit was cherry-picked, so cherry_merged should be true
         assert!(git.cherry_merged("main", "feature/cherry-test")?);
 
@@ -1759,30 +1663,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_diff_empty() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // A branch that adds a file and then reverts it: its commits net out to
         // no content change relative to the fork point.
@@ -1826,8 +1708,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         assert!(git.diff_empty("main", "feature/no-op")?);
 
         // Create an unmerged branch — the three-dot diff must NOT be empty.
@@ -1858,30 +1738,8 @@ locked work in progress, do not remove
     /// `merge_adds_nothing` instead.
     #[test]
     fn test_diff_empty_does_not_claim_squash_merges() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         Command::new("git")
             .args(["checkout", "-b", "feature/squash-test"])
@@ -1910,8 +1768,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // diff_empty stays silent…
         assert!(!git.diff_empty("main", "feature/squash-test")?);
         // …but the branch is still detected as merged by the dedicated strategies.
@@ -1922,30 +1778,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_trees_match() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a feature branch with a commit
         Command::new("git")
@@ -1976,8 +1810,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // After squash-merge, main and the branch have the same tree
         assert!(git.trees_match("main", "feature/squash-test")?);
 
@@ -2003,30 +1835,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_merge_adds_nothing() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a feature branch that touches a.txt
         Command::new("git")
@@ -2073,8 +1883,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // Sanity check: the cheaper detectors no longer fire.
         assert!(!git.trees_match("main", "feature/squash")?);
         assert!(!git.diff_empty("main", "feature/squash")?);
@@ -2110,30 +1918,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_squash_patch_id_match() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test\n")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Feature branch with TWO commits — combined diff = "line1\nline2\n"
         // on a.txt. This is the canonical case `patch_id_match` per-commit
@@ -2185,8 +1971,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // Sanity: textual detectors that compare per-commit fail here.
         // (Two branch patch-ids cannot all be found among target's
         // single squash patch-id.)
@@ -2234,30 +2018,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_worktree_list_integration() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a branch and worktree
         Command::new("git")
@@ -2270,7 +2032,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
         let worktrees = git.worktree_list()?;
 
         // Should have at least 2 worktrees: main repo + the added one
@@ -2286,32 +2047,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_branch_protected_list_empty() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
         let protected = git.branch_protected_list()?;
         assert!(protected.is_empty());
 
@@ -2320,30 +2057,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_branch_protected_list() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Mark two branches as protected via per-branch config
         Command::new("git")
@@ -2355,7 +2070,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
         let mut protected = git.branch_protected_list()?;
         protected.sort();
         assert_eq!(protected, vec!["develop", "staging"]);
@@ -2365,32 +2079,7 @@ locked work in progress, do not remove
 
     #[test]
     fn test_set_branch_protected_and_unset() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Set protection
         git.set_branch_protected("develop", true)?;
@@ -2409,57 +2098,6 @@ locked work in progress, do not remove
     }
 
     // ── Worktree-config tests ────────────────────────────────────────
-
-    /// Helper: create a repo with `extensions.worktreeConfig = true` and
-    /// a linked worktree, returning (tempdir, main_path, worktree_path).
-    fn init_repo_with_worktree_config()
-    -> Result<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
-        let dir = tempfile::tempdir()?;
-        let main_path = dir.path().join("main-repo");
-        std::fs::create_dir_all(&main_path)?;
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(&main_path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&main_path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&main_path)
-            .output()?;
-
-        std::fs::write(main_path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&main_path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&main_path)
-            .output()?;
-
-        // Enable extensions.worktreeConfig
-        Command::new("git")
-            .args(["config", "extensions.worktreeConfig", "true"])
-            .current_dir(&main_path)
-            .output()?;
-
-        // Create a branch and a linked worktree
-        Command::new("git")
-            .args(["branch", "feature/wt"])
-            .current_dir(&main_path)
-            .output()?;
-        let wt_path = dir.path().join("linked-wt");
-        Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
-            .current_dir(&main_path)
-            .output()?;
-
-        Ok((dir, main_path, wt_path))
-    }
 
     #[test]
     fn test_config_set_from_linked_worktree_writes_to_shared_config() -> Result<()> {
@@ -2552,93 +2190,6 @@ locked work in progress, do not remove
     }
 
     // ── Pull / fast-forward tests ────────────────────────────────────
-
-    /// Helper: create a repo with a local bare "remote" and tracking set up.
-    /// Returns (tempdir, workdir_path, bare_remote_path).
-    fn init_repo_with_local_remote()
-    -> Result<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
-        let dir = tempfile::tempdir()?;
-
-        // Create a bare "remote" repo
-        let bare_path = dir.path().join("remote.git");
-        Command::new("git")
-            .args([
-                "init",
-                "--bare",
-                "--initial-branch=main",
-                bare_path.to_str().unwrap(),
-            ])
-            .output()?;
-
-        // Clone it to get a working repo with tracking
-        let work_path = dir.path().join("work");
-        Command::new("git")
-            .args([
-                "clone",
-                bare_path.to_str().unwrap(),
-                work_path.to_str().unwrap(),
-            ])
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&work_path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&work_path)
-            .output()?;
-
-        // Create an initial commit and push
-        std::fs::write(work_path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&work_path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&work_path)
-            .output()?;
-        Command::new("git")
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work_path)
-            .output()?;
-
-        Ok((dir, work_path, bare_path))
-    }
-
-    /// Advance the bare remote by pushing from a temporary second clone.
-    fn advance_remote(bare_path: &Path, dir: &Path) -> Result<()> {
-        let pusher = dir.join("pusher");
-        Command::new("git")
-            .args([
-                "clone",
-                bare_path.to_str().unwrap(),
-                pusher.to_str().unwrap(),
-            ])
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&pusher)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&pusher)
-            .output()?;
-        std::fs::write(pusher.join("new.txt"), "new content")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&pusher)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "remote advance"])
-            .current_dir(&pusher)
-            .output()?;
-        Command::new("git")
-            .args(["push"])
-            .current_dir(&pusher)
-            .output()?;
-        Ok(())
-    }
 
     #[test]
     fn test_branch_upstream_with_tracking() -> Result<()> {
@@ -2894,30 +2445,8 @@ locked work in progress, do not remove
 
     #[test]
     fn test_patch_id_match() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create feature/patch with a commit
         Command::new("git")
@@ -2966,8 +2495,6 @@ locked work in progress, do not remove
             .args(["commit", "--amend", "-m", "patch feature (reworded)"])
             .current_dir(path)
             .output()?;
-
-        let git = Git::with_workdir(false, path);
 
         // Patch-id of the reworded commit on main matches feature/patch.
         assert!(git.patch_id_match("main", "feature/patch")?);

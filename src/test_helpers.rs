@@ -2,12 +2,25 @@
 //!
 //! These helpers are only compiled in test builds.
 
+use std::path::Path;
 use std::process::Command as StdCommand;
 
 use anyhow::Result;
 use tempfile::TempDir;
 
 use crate::git::Git;
+
+/// Run a git command in `cwd`, ignoring its output.
+///
+/// Fixture setup only: the exit status is deliberately not checked, because
+/// several fixtures run commands that are allowed to be no-ops.
+pub fn git_in(cwd: &Path, args: &[&str]) -> Result<()> {
+    StdCommand::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()?;
+    Ok(())
+}
 
 /// Initialize a minimal git repo with a single commit on `main`.
 pub fn init_repo() -> Result<(TempDir, Git)> {
@@ -124,14 +137,6 @@ pub fn init_repo_with_gone_upstream() -> Result<(TempDir, Git)> {
     let origin = dir.path().join("origin.git");
     let work = dir.path().join("work");
 
-    let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
-        StdCommand::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()?;
-        Ok(())
-    };
-
     // Seed repository, then turn it into the remote.
     let (seed, _) = init_repo()?;
     git_in(
@@ -219,4 +224,141 @@ pub fn init_repo_with_locked_worktree() -> Result<(TempDir, Git, String)> {
         .output()?;
 
     Ok((dir, git, wt_path.to_string_lossy().to_string()))
+}
+
+/// Helper: create a repo with `extensions.worktreeConfig = true` and
+/// a linked worktree, returning (tempdir, main_path, worktree_path).
+pub fn init_repo_with_worktree_config() -> Result<(TempDir, std::path::PathBuf, std::path::PathBuf)>
+{
+    let dir = tempfile::tempdir()?;
+    let main_path = dir.path().join("main-repo");
+    std::fs::create_dir_all(&main_path)?;
+
+    StdCommand::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(&main_path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&main_path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&main_path)
+        .output()?;
+
+    std::fs::write(main_path.join("README.md"), "# test")?;
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&main_path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&main_path)
+        .output()?;
+
+    // Enable extensions.worktreeConfig
+    StdCommand::new("git")
+        .args(["config", "extensions.worktreeConfig", "true"])
+        .current_dir(&main_path)
+        .output()?;
+
+    // Create a branch and a linked worktree
+    StdCommand::new("git")
+        .args(["branch", "feature/wt"])
+        .current_dir(&main_path)
+        .output()?;
+    let wt_path = dir.path().join("linked-wt");
+    StdCommand::new("git")
+        .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
+        .current_dir(&main_path)
+        .output()?;
+
+    Ok((dir, main_path, wt_path))
+}
+
+/// Helper: create a repo with a local bare "remote" and tracking set up.
+/// Returns (tempdir, workdir_path, bare_remote_path).
+pub fn init_repo_with_local_remote() -> Result<(TempDir, std::path::PathBuf, std::path::PathBuf)> {
+    let dir = tempfile::tempdir()?;
+
+    // Create a bare "remote" repo
+    let bare_path = dir.path().join("remote.git");
+    StdCommand::new("git")
+        .args([
+            "init",
+            "--bare",
+            "--initial-branch=main",
+            bare_path.to_str().unwrap(),
+        ])
+        .output()?;
+
+    // Clone it to get a working repo with tracking
+    let work_path = dir.path().join("work");
+    StdCommand::new("git")
+        .args([
+            "clone",
+            bare_path.to_str().unwrap(),
+            work_path.to_str().unwrap(),
+        ])
+        .output()?;
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&work_path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&work_path)
+        .output()?;
+
+    // Create an initial commit and push
+    std::fs::write(work_path.join("README.md"), "# test")?;
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&work_path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&work_path)
+        .output()?;
+    StdCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&work_path)
+        .output()?;
+
+    Ok((dir, work_path, bare_path))
+}
+
+/// Advance the bare remote by pushing from a temporary second clone.
+pub fn advance_remote(bare_path: &Path, dir: &Path) -> Result<()> {
+    let pusher = dir.join("pusher");
+    StdCommand::new("git")
+        .args([
+            "clone",
+            bare_path.to_str().unwrap(),
+            pusher.to_str().unwrap(),
+        ])
+        .output()?;
+    StdCommand::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&pusher)
+        .output()?;
+    StdCommand::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&pusher)
+        .output()?;
+    std::fs::write(pusher.join("new.txt"), "new content")?;
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&pusher)
+        .output()?;
+    StdCommand::new("git")
+        .args(["commit", "-m", "remote advance"])
+        .current_dir(&pusher)
+        .output()?;
+    StdCommand::new("git")
+        .args(["push"])
+        .current_dir(&pusher)
+        .output()?;
+    Ok(())
 }

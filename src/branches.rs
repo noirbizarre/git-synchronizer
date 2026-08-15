@@ -858,13 +858,7 @@ mod tests {
         let origin = dir.path().join("origin.git");
         let work = dir.path().join("work");
 
-        let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
-            StdCommand::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()?;
-            Ok(())
-        };
+        use crate::test_helpers::git_in;
 
         let (seed, _) = crate::test_helpers::init_repo()?;
         git_in(
@@ -1031,13 +1025,7 @@ mod tests {
         let origin = dir.path().join("origin.git");
         let work = dir.path().join("work");
 
-        let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
-            StdCommand::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()?;
-            Ok(())
-        };
+        use crate::test_helpers::git_in;
 
         let (seed, _) = crate::test_helpers::init_repo()?;
         git_in(
