@@ -16,6 +16,9 @@ target
 # Coverage artifacts
 lcov.info
 
+# Man pages and shell completions collected by `mise run man`
+dist
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

@@ -13,12 +13,7 @@ use clap::{Parser, Subcommand};
 /// On first run, an interactive setup wizard stores preferences in the
 /// git config `[sync]` section.
 #[derive(Parser, Debug)]
-#[command(
-    name = "git-sync",
-    version,
-    about,
-    long_about = None,
-)]
+#[command(name = "git-sync", version, about, long_about)]
 pub struct Cli {
     /// Skip all confirmation prompts (auto-confirm deletions)
     #[arg(short = 'y', long)]
