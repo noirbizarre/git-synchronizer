@@ -61,6 +61,19 @@ pub struct Cli {
     #[arg(long)]
     pub delete_gone: bool,
 
+    /// How thorough merge detection should be (default: 2)
+    ///
+    /// Levels are cumulative:
+    ///
+    /// 1: ancestor merges only (`git branch --merged`), fastest.
+    ///
+    /// 2: adds cherry-pick, tree SHA and empty diff detection.
+    ///
+    /// 3: adds patch-id, simulated merge and squash patch-id detection,
+    /// the most thorough but noticeably slower.
+    #[arg(long, value_name = "LEVEL", value_parser = clap::value_parser!(u8).range(1..=3))]
+    pub effort: Option<u8>,
+
     /// Use worktrunk (wt) for worktree removal to trigger pre/post-remove hooks
     #[arg(long, overrides_with = "no_worktrunk")]
     pub worktrunk: bool,
@@ -185,6 +198,7 @@ mod tests {
         assert!(!cli.delete_gone);
         assert!(!cli.worktrunk);
         assert!(!cli.no_worktrunk);
+        assert!(cli.effort.is_none());
         assert!(cli.command.is_none());
     }
 
@@ -204,6 +218,25 @@ mod tests {
         let cli = Cli::parse_from(["git-sync", "--no-pull"]);
         assert!(cli.no_pull);
         assert!(!cli.no_fetch);
+    }
+
+    #[test]
+    fn cli_effort_flag() {
+        assert_eq!(
+            Cli::parse_from(["git-sync", "--effort", "1"]).effort,
+            Some(1)
+        );
+        assert_eq!(
+            Cli::parse_from(["git-sync", "--effort", "3"]).effort,
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn cli_effort_rejects_out_of_range_levels() {
+        assert!(Cli::try_parse_from(["git-sync", "--effort", "0"]).is_err());
+        assert!(Cli::try_parse_from(["git-sync", "--effort", "4"]).is_err());
+        assert!(Cli::try_parse_from(["git-sync", "--effort", "max"]).is_err());
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! repository-local `.git/config`. [`Config::try_load`] returns `None` when the
 //! section is absent, which is what triggers [`run_setup_wizard`].
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
+use crate::branches::Effort;
 use crate::git::Git;
 use crate::ui::Ui;
 
@@ -36,6 +37,9 @@ pub struct Config {
     /// Whether to use worktrunk (wt) for worktree removal.
     /// `None` means auto-detect from worktrunk config presence.
     pub worktrunk: Option<bool>,
+    /// How thorough merge detection should be.
+    /// `None` means use [`Effort::default`].
+    pub effort: Option<Effort>,
 }
 
 /// A conventional starting point, **not** the value git-sync falls back to at
@@ -52,6 +56,7 @@ impl Default for Config {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         }
     }
 }
@@ -79,11 +84,18 @@ impl Config {
             .config_get(&format!("{SECTION}.worktrunk"))?
             .map(|v| v.eq_ignore_ascii_case("true"));
 
+        let effort = git
+            .config_get(&format!("{SECTION}.effort"))?
+            .map(|v| v.parse::<Effort>())
+            .transpose()
+            .with_context(|| format!("invalid {SECTION}.effort in git config"))?;
+
         Ok(Some(Self {
             protected,
             ignore,
             remotes,
             worktrunk,
+            effort,
         }))
     }
 
@@ -119,6 +131,16 @@ impl Config {
             }
             None => {
                 git.config_unset_all(&format!("{SECTION}.worktrunk"))?;
+            }
+        }
+
+        // Merge detection effort level (optional)
+        match self.effort {
+            Some(effort) => {
+                git.config_set(&format!("{SECTION}.effort"), &effort.as_u8().to_string())?;
+            }
+            None => {
+                git.config_unset_all(&format!("{SECTION}.effort"))?;
             }
         }
 
@@ -220,11 +242,14 @@ impl Config {
 
         // ── Save ─────────────────────────────────────────────────────
 
+        // Effort is deliberately not asked here: it is a power-user knob with
+        // a sensible default, set later with `git sync config set effort <n>`.
         let config = Self {
             protected,
             ignore,
             remotes,
             worktrunk,
+            effort: None,
         };
         config.save(git)?;
 
@@ -264,6 +289,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: None,
+            effort: None,
         };
         config.save(&git)?;
 
@@ -283,6 +309,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         config.save(&git)?;
 
@@ -325,6 +352,7 @@ mod tests {
             ignore: vec!["wip/*".to_string(), "scratch".to_string()],
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         config.save(&git)?;
 
@@ -342,6 +370,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         }
         .save(&git)?;
 
@@ -359,6 +388,7 @@ mod tests {
             ignore: vec!["wip/*".to_string()],
             remotes: None,
             worktrunk: None,
+            effort: None,
         }
         .save(&git)?;
 
@@ -367,6 +397,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         }
         .save(&git)?;
 
@@ -384,6 +415,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: Some(true),
+            effort: None,
         };
         config1.save(&git)?;
 
@@ -392,6 +424,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: Some(vec!["upstream".to_string()]),
             worktrunk: Some(false),
+            effort: None,
         };
         config2.save(&git)?;
 
@@ -399,6 +432,49 @@ mod tests {
         assert_eq!(loaded.protected, vec!["develop", "release/*"]);
         assert_eq!(loaded.remotes, Some(vec!["upstream".to_string()]));
         assert_eq!(loaded.worktrunk, Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn config_effort_roundtrip() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        let config = Config {
+            effort: Some(Effort::Thorough),
+            ..Config::default()
+        };
+        config.save(&git)?;
+        assert_eq!(
+            Config::try_load(&git)?.expect("config should exist").effort,
+            Some(Effort::Thorough)
+        );
+
+        // Unsetting it removes the key entirely, falling back to the default.
+        let config = Config {
+            effort: None,
+            ..Config::default()
+        };
+        config.save(&git)?;
+        assert!(
+            Config::try_load(&git)?
+                .expect("config should exist")
+                .effort
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_effort_rejects_an_invalid_stored_value() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+        Config::default().save(&git)?;
+        git.config_set(&format!("{SECTION}.effort"), "9")?;
+
+        let err = Config::try_load(&git).expect_err("invalid effort must fail to load");
+        assert!(
+            format!("{err:#}").contains("sync.effort"),
+            "error should name the offending key, got: {err:#}"
+        );
         Ok(())
     }
 
@@ -412,6 +488,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: Some(true),
+            effort: None,
         };
         config.save(&git)?;
 
@@ -424,6 +501,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: Some(false),
+            effort: None,
         };
         config2.save(&git)?;
 
@@ -436,6 +514,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         config3.save(&git)?;
 
@@ -453,6 +532,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         config.save(&git)?;
 

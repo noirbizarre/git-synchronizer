@@ -6,8 +6,10 @@
 //! no single git command recognises rebases, squashes and plain merges alike.
 
 use std::collections::HashSet;
+use std::fmt;
+use std::str::FromStr;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::config::Config;
@@ -86,6 +88,71 @@ pub fn resolve_merge_targets(git: &Git, filter: &Filter) -> Result<Vec<String>> 
     Ok(targets)
 }
 
+/// How thorough merge detection should be, trading speed for accuracy.
+///
+/// Each level is cumulative: it runs everything the previous level runs, plus
+/// its own strategies. The default is [`Effort::Standard`], which keeps the
+/// scan cheap enough to run on every invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Effort {
+    /// Ancestor merges only (`git branch --merged`). Fastest.
+    Quick = 1,
+    /// Adds the cheap content-equality strategies: `git cherry`, identical
+    /// tree SHA and empty three-dot diff.
+    #[default]
+    Standard = 2,
+    /// Adds the expensive strategies: patch-id matching, simulated merge and
+    /// combined squash patch-id. Most thorough, noticeably slower.
+    Thorough = 3,
+}
+
+impl Effort {
+    /// The numeric level, as accepted by `--effort` and `sync.effort`.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Human-readable name, used in `git sync config list`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Standard => "standard",
+            Self::Thorough => "thorough",
+        }
+    }
+}
+
+impl TryFrom<u8> for Effort {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        match value {
+            1 => Ok(Self::Quick),
+            2 => Ok(Self::Standard),
+            3 => Ok(Self::Thorough),
+            other => Err(anyhow!("invalid effort level {other}, expected 1, 2 or 3")),
+        }
+    }
+}
+
+impl FromStr for Effort {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let value: u8 = s
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("invalid effort level {s:?}, expected 1, 2 or 3"))?;
+        Self::try_from(value)
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.as_u8(), self.label())
+    }
+}
+
 /// Outcome of a merged-branch scan.
 ///
 /// Merge detection deliberately survives the failure of an individual
@@ -103,7 +170,9 @@ pub struct MergedLocal {
 
 /// Return local branches that are merged into *any* of the protected branches
 /// and are neither protected nor ignored.
-pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<MergedLocal> {
+///
+/// `effort` decides how many detection strategies run: see [`Effort`].
+pub fn find_merged_local(git: &Git, filter: &Filter, effort: Effort) -> Result<MergedLocal> {
     let current = git.current_branch()?;
     let targets = resolve_merge_targets(git, filter)?;
 
@@ -134,17 +203,21 @@ pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<MergedLocal> {
     // by the later ones via `seen`.
     type Strategy = fn(&Git, &str, &str) -> Result<bool>;
 
-    // Also check branches not caught by --merged (rebase merge detection via
-    // `git cherry`), then progressively costlier content-equality strategies:
+    // The `git branch --merged` pass above is Effort::Quick on its own. The
+    // strategies below are enabled progressively:
     //
+    // Effort::Standard (default) adds the cheap content-equality checks:
+    // - `cherry_merged`: rebase merge detection via `git cherry`.
     // - `trees_match`: identical tree object (cheapest content check).
     // - `diff_empty`: the branch's own commits net out to no content change.
+    //
+    // Effort::Thorough adds the costly ones:
     // - `patch_id_match`: commits re-applied on target with different SHAs.
     // - `merge_adds_nothing`: in-memory merge yields target's existing tree,
     //   catching squash-merges where target has since advanced.
     // - `squash_patch_id_match`: the branch's combined diff matches a single
     //   squash commit on target, surviving review-time formatting tweaks.
-    let strategies: [Strategy; 6] = [
+    const STRATEGIES: [Strategy; 6] = [
         Git::cherry_merged,
         Git::trees_match,
         Git::diff_empty,
@@ -153,10 +226,16 @@ pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<MergedLocal> {
         Git::squash_patch_id_match,
     ];
 
+    let enabled = match effort {
+        Effort::Quick => 0,
+        Effort::Standard => 3,
+        Effort::Thorough => STRATEGIES.len(),
+    };
+
     let mut warnings: Vec<String> = Vec::new();
     let mut failed_strategies: HashSet<String> = HashSet::new();
 
-    for strategy in strategies {
+    for strategy in &STRATEGIES[..enabled] {
         for branch in &all_branches {
             if seen.contains(branch) {
                 continue;
@@ -265,6 +344,21 @@ mod tests {
         Ok((dir, git))
     }
 
+    #[test]
+    fn effort_parses_and_renders_levels() {
+        assert_eq!("1".parse::<Effort>().unwrap(), Effort::Quick);
+        assert_eq!(" 2 ".parse::<Effort>().unwrap(), Effort::Standard);
+        assert_eq!("3".parse::<Effort>().unwrap(), Effort::Thorough);
+        assert!("0".parse::<Effort>().is_err());
+        assert!("4".parse::<Effort>().is_err());
+        assert!("high".parse::<Effort>().is_err());
+
+        assert_eq!(Effort::default(), Effort::Standard);
+        assert_eq!(Effort::Thorough.as_u8(), 3);
+        assert_eq!(Effort::Thorough.to_string(), "3 (thorough)");
+        assert!(Effort::try_from(9u8).is_err());
+    }
+
     /// Build a `Filter` for a repository/config pair.
     fn filter_for(git: &Git, config: &Config) -> Result<Filter> {
         Filter::load(git, config)
@@ -278,6 +372,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         let filter = filter_for(&git, &config)?;
         assert!(filter.is_protected("main"));
@@ -296,9 +391,11 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
 
         // feature/done was merged, so it should appear
         assert!(merged.contains(&"feature/done".to_string()));
@@ -319,9 +416,11 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         let gone = find_gone_local(&git, &filter_for(&git, &config)?, &merged)?;
 
         // Upstream was deleted and pruned.
@@ -343,6 +442,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
         // Pretend the content-based strategies already caught it.
@@ -361,6 +461,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
 
@@ -374,6 +475,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
         Ok(())
@@ -387,10 +489,12 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
         let current = git.current_branch()?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(!merged.contains(&current));
         Ok(())
     }
@@ -453,9 +557,19 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let filter = filter_for(&git, &config)?;
+        let merged = find_merged_local(&git, &filter, Effort::Standard)?.candidates;
         assert!(merged.contains(&"feature/cherry".to_string()));
+
+        // At the lowest effort only ancestor merges count, so the
+        // cherry-picked branch must stay untouched.
+        let quick = find_merged_local(&git, &filter, Effort::Quick)?.candidates;
+        assert!(
+            !quick.contains(&"feature/cherry".to_string()),
+            "effort 1 must not run the cherry-pick strategy"
+        );
         Ok(())
     }
 
@@ -502,8 +616,10 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(
             merged.contains(&"feature/squash".to_string()),
             "squash-merged branch should be detected as merged"
@@ -553,8 +669,10 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(
             merged.contains(&"feature/tree-match".to_string()),
             "branch with matching tree SHA should be detected as merged"
@@ -623,11 +741,20 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let filter = filter_for(&git, &config)?;
+        let merged = find_merged_local(&git, &filter, Effort::Thorough)?.candidates;
         assert!(
             merged.contains(&"feature/patch-id".to_string()),
             "branch with matching patch-id should be detected as merged"
+        );
+
+        // Ancestor merges only: nothing content-based runs at effort 1.
+        let quick = find_merged_local(&git, &filter, Effort::Quick)?.candidates;
+        assert!(
+            !quick.contains(&"feature/patch-id".to_string()),
+            "effort 1 must not run any content-based strategy"
         );
         Ok(())
     }
@@ -685,12 +812,15 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Thorough)?.candidates;
         assert!(
             merged.contains(&"feature/squash-advanced".to_string()),
             "squash-merged branch with advanced target should be detected via simulated merge"
         );
+
         Ok(())
     }
 
@@ -759,12 +889,22 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let filter = filter_for(&git, &config)?;
+        let merged = find_merged_local(&git, &filter, Effort::Thorough)?.candidates;
         assert!(
             merged.contains(&"feature/multi-commit-squash".to_string()),
             "multi-commit branch squash-merged into main should be detected \
              via squash patch-id"
+        );
+
+        // Combined-squash patch-id is an effort 3 strategy: the default level
+        // does not pay for it, so this branch stays undetected there.
+        let standard = find_merged_local(&git, &filter, Effort::Standard)?.candidates;
+        assert!(
+            !standard.contains(&"feature/multi-commit-squash".to_string()),
+            "effort 2 must not run the squash patch-id strategy"
         );
         Ok(())
     }
@@ -777,6 +917,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
         let targets = resolve_merge_targets(&git, &filter_for(&git, &config)?)?;
@@ -796,9 +937,11 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(merged.is_empty());
         Ok(())
     }
@@ -811,15 +954,18 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
         // Without per-branch protection, feature/done should be a candidate
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(merged.contains(&"feature/done".to_string()));
 
         // Mark feature/done as per-branch protected
         git.set_branch_protected("feature/done", true)?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(
             !merged.contains(&"feature/done".to_string()),
             "per-branch protected branch should not be a deletion candidate"
@@ -839,15 +985,18 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
         // Without any real protected branches, nothing is a merge target
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(merged.is_empty());
 
         // Mark "main" as per-branch protected — it should now be a merge target
         git.set_branch_protected("main", true)?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let merged =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(
             merged.contains(&"feature/done".to_string()),
             "branches merged into a per-branch protected branch should be candidates"
@@ -915,9 +1064,11 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
 
-        let local = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
+        let local =
+            find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
         assert!(
             local.contains(&"feature/squashed".to_string()),
             "local detection should catch the squash-merged branch"
@@ -945,6 +1096,7 @@ mod tests {
             ignore: ignore.iter().map(|s| s.to_string()).collect(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         }
     }
 
@@ -956,7 +1108,7 @@ mod tests {
 
         assert!(filter.is_ignored("feature/done"));
         assert!(
-            !find_merged_local(&git, &filter)?
+            !find_merged_local(&git, &filter, Effort::Standard)?
                 .candidates
                 .contains(&"feature/done".to_string())
         );
@@ -972,7 +1124,11 @@ mod tests {
         assert!(filter.is_ignored("feature/done"));
         assert!(filter.is_ignored("feature/wip"));
         assert!(!filter.is_ignored("main"));
-        assert!(find_merged_local(&git, &filter)?.candidates.is_empty());
+        assert!(
+            find_merged_local(&git, &filter, Effort::Standard)?
+                .candidates
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -984,6 +1140,7 @@ mod tests {
             ignore: vec!["release/*".to_string()],
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         let filter = filter_for(&git, &config)?;
 
@@ -1005,7 +1162,7 @@ mod tests {
         let filter = filter_for(&git, &config)?;
         assert!(filter.is_ignored("feature/done"));
         assert!(
-            !find_merged_local(&git, &filter)?
+            !find_merged_local(&git, &filter, Effort::Standard)?
                 .candidates
                 .contains(&"feature/done".to_string())
         );
@@ -1014,7 +1171,7 @@ mod tests {
         let filter = filter_for(&git, &config)?;
         assert!(!filter.is_ignored("feature/done"));
         assert!(
-            find_merged_local(&git, &filter)?
+            find_merged_local(&git, &filter, Effort::Standard)?
                 .candidates
                 .contains(&"feature/done".to_string())
         );
