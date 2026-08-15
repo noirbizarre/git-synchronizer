@@ -31,6 +31,7 @@ configured remotes. It also handles orphaned worktree cleanup.
 - Delete local and remote branches that have been merged
 - Worktree cleanup: unified prompt for branches with worktrees and orphaned worktrees
 - Respects locked worktrees: skips removal with an informational message
+- Min-age guard (`--min-age`): never removes a worktree created too recently
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
 - Ignore branch patterns entirely (`sync.ignore`) -- never fetched, never analysed
@@ -132,6 +133,10 @@ git sync -y --delete-gone
 git sync --effort 1
 git sync --effort 3
 
+# Keep worktrees created less than a given duration ago (default: 0s, no guard)
+git sync --min-age 2h
+git sync --min-age 7d
+
 # Use worktrunk for worktree removal (triggers pre/post-remove hooks)
 git sync --worktrunk
 
@@ -166,6 +171,7 @@ that has never been configured is an error rather than a setup wizard (run
 | `status` | `success` or `error` |
 | `dry_run` | Whether `--dry-run` was in effect |
 | `effort` | The effective merge-detection level (`1`-`3`) |
+| `min_age` | The effective minimum worktree age, e.g. `"0s"` or `"2h"` |
 | `fetch` | Phase 1: per-remote fetch/prune outcome |
 | `pull` | Phase 2: per-branch fast-forward outcome |
 | `local` | Phase 3: `merged`/`gone` candidates, plus per-branch and per-worktree outcomes |
@@ -175,7 +181,7 @@ that has never been configured is an error rather than a setup wizard (run
 | `summary` | `local_branches_deleted`, `remote_branches_deleted`, `worktrees_removed`, `errors` |
 
 Item statuses are `updated`, `deleted`, `removed`, `skipped`, `locked`,
-`failed` or `dry_run`. A fatal error still yields a document (with
+`too_young`, `failed` or `dry_run`. A fatal error still yields a document (with
 `status: "error"`) and a non-zero exit code.
 
 ### Configuration management
@@ -226,6 +232,7 @@ to the repository-local `.git/config`:
     remote = origin
     worktrunk = true
     effort = 3
+    minage = 2h
 ```
 
 | Key | Type | Description |
@@ -235,6 +242,7 @@ to the repository-local `.git/config`:
 | `remote` | multi-value | Remotes to delete branches from (omit for all remotes) |
 | `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects (see below) |
 | `effort` | `1`-`3` | How thorough merge detection should be. Defaults to `2`; `--effort` overrides it |
+| `minage` | duration | Minimum age a worktree must have before it may be removed, e.g. `30s`, `2h`, `7d`. Defaults to `0s` (no guard); `--min-age` overrides it |
 
 When `worktrunk` is unset, git-sync enables it only if the repository has a
 `[worktrunk]` config section **and** `wt` is on `$PATH`; it then asks once per
@@ -398,6 +406,12 @@ CLI flags:
    Locked worktrees (via `git worktree lock`) are automatically skipped with
    an informational message -- this also prevents their branch from being
    deleted, since git refuses to delete a branch checked out in any worktree.
+   Worktrees created less than `--min-age` ago (or `sync.minage`) are skipped
+   the same way. Age is measured from the creation time of the worktree's
+   administrative directory (`.git/worktrees/<id>`), not from its branch tip,
+   so a worktree you just created from an up-to-date default branch is
+   protected even though that branch counts as merged. The guard is disabled
+   by default (`0s`).
    Skipped with `--remote-only`. Worktree cleanup is skipped with
    `--no-worktrees`.
 

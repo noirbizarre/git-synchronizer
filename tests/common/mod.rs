@@ -111,6 +111,41 @@ pub fn add_branches(dir: &TempDir) {
         .unwrap();
 }
 
+/// Add a linked worktree on a branch already merged into `main`, so the
+/// worktree is a removal candidate. Returns its path.
+///
+/// The worktree is necessarily brand new, which is exactly what the
+/// `--min-age` guard is meant to protect.
+pub fn add_merged_worktree(dir: &TempDir, branch: &str, name: &str) -> std::path::PathBuf {
+    let p = dir.path();
+
+    for args in [
+        vec!["checkout", "-b", branch],
+        vec!["commit", "--allow-empty", "-m", "worktree work"],
+        vec!["checkout", "main"],
+        vec!["merge", branch, "--no-edit"],
+    ] {
+        StdCommand::new("git")
+            .args(&args)
+            .current_dir(p)
+            .output()
+            .unwrap();
+    }
+
+    let wt_path = p.join(name);
+    StdCommand::new("git")
+        .args(["worktree", "add", wt_path.to_str().unwrap(), branch])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    assert!(
+        wt_path.exists(),
+        "fixture worktree should have been created"
+    );
+
+    wt_path
+}
+
 /// Return the list of local branch names in the repo.
 pub fn git_branches(dir: &TempDir) -> Vec<String> {
     let output = StdCommand::new("git")

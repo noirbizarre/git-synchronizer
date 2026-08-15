@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::branches::Effort;
+use crate::duration::MinAge;
 use crate::git::{GitCommandError, GitErrorKind};
 
 /// Serialize `value` to stdout as a single JSON document.
@@ -52,6 +53,8 @@ pub enum ItemStatus {
     Skipped,
     /// Worktree is locked, so it was left alone.
     Locked,
+    /// Worktree is newer than `--min-age`, so it was left alone.
+    TooYoung,
     /// The git operation failed; see the matching entry in `errors`.
     Failed,
     /// Would have been acted upon, but `--dry-run` was in effect.
@@ -219,6 +222,8 @@ pub struct Report {
     pub dry_run: bool,
     /// Effective merge-detection effort level (1, 2 or 3).
     pub effort: Effort,
+    /// Effective minimum worktree age, e.g. `"0s"` or `"2h"`.
+    pub min_age: MinAge,
     pub fetch: FetchPhase,
     pub pull: PullPhase,
     pub local: LocalPhase,
@@ -234,12 +239,13 @@ impl Report {
     /// Schema version. Bump on any breaking change to the document shape.
     pub const VERSION: u32 = 1;
 
-    pub fn new(dry_run: bool, effort: Effort) -> Self {
+    pub fn new(dry_run: bool, effort: Effort, min_age: MinAge) -> Self {
         Self {
             version: Self::VERSION,
             status: Status::Success,
             dry_run,
             effort,
+            min_age,
             fetch: FetchPhase::default(),
             pull: PullPhase::default(),
             local: LocalPhase::default(),
@@ -263,7 +269,7 @@ impl Report {
 
     /// A single-error document for a run that could not complete.
     pub fn fatal(action: &str, target: &str, err: &anyhow::Error) -> Self {
-        let mut report = Self::new(false, Effort::default());
+        let mut report = Self::new(false, Effort::default(), MinAge::default());
         report.status = Status::Error;
         report.push_error(action, target, err);
         report
@@ -283,6 +289,8 @@ pub struct ConfigReport {
     pub branch_ignored: Vec<String>,
     /// `null` means "use the built-in default".
     pub effort: Option<Effort>,
+    /// `null` means "use the built-in default" (no guard).
+    pub min_age: Option<MinAge>,
     /// `null` means "auto-detect".
     pub worktrunk: Option<bool>,
 }
@@ -298,7 +306,7 @@ mod tests {
 
     #[test]
     fn report_serializes_expected_shape() {
-        let mut report = Report::new(true, Effort::Thorough);
+        let mut report = Report::new(true, Effort::Thorough, MinAge::default());
         report.local.merged.push("feature".to_string());
         report.local.branches.push(LocalBranch {
             branch: "feature".to_string(),
@@ -321,7 +329,7 @@ mod tests {
 
     #[test]
     fn push_error_classifies_and_counts() {
-        let mut report = Report::new(false, Effort::default());
+        let mut report = Report::new(false, Effort::default(), MinAge::default());
         let err = anyhow::Error::new(GitCommandError {
             program: "git".into(),
             args: vec!["fetch".into()],
@@ -354,16 +362,23 @@ mod tests {
 
     #[test]
     fn effort_serializes_as_its_numeric_level() {
-        let report = Report::new(false, Effort::Thorough);
+        let report = Report::new(false, Effort::Thorough, MinAge::default());
         let value: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["effort"], 3);
+    }
+
+    #[test]
+    fn min_age_serializes_as_its_canonical_string() {
+        let report = Report::new(false, Effort::default(), "2h".parse().unwrap());
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["min_age"], "2h");
     }
 
     #[test]
     fn print_json_writes_a_document_to_stdout() {
         // stdout is captured by the test harness and is not a terminal here,
         // so this exercises the compact branch.
-        print_json(&Report::new(true, Effort::default())).unwrap();
+        print_json(&Report::new(true, Effort::default(), MinAge::default())).unwrap();
         print_json(&ConfigReport {
             configured: false,
             protected: Vec::new(),
@@ -373,6 +388,7 @@ mod tests {
             branch_ignored: Vec::new(),
             worktrunk: None,
             effort: None,
+            min_age: None,
         })
         .unwrap();
     }
@@ -387,6 +403,7 @@ mod tests {
             branch_protected: Vec::new(),
             branch_ignored: Vec::new(),
             worktrunk: Some(true),
+            min_age: None,
             effort: Some(Effort::Quick),
         })
         .unwrap();

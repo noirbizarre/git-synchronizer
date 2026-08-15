@@ -15,6 +15,7 @@ mod branches;
 mod cleaner;
 mod cli;
 mod config;
+mod duration;
 mod git;
 mod report;
 #[cfg(test)]
@@ -234,6 +235,14 @@ fn handle_config_command(
                             None => format!("(default: {})", branches::Effort::default()),
                         },
                     );
+
+                    ui.field(
+                        "min age",
+                        &match cfg.min_age {
+                            Some(min_age) => min_age.to_string(),
+                            None => format!("(default: {})", duration::MinAge::default()),
+                        },
+                    );
                 }
                 None => {
                     ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
@@ -365,6 +374,7 @@ fn list_config_json(git: &git::Git) -> Result<()> {
         branch_protected: git.branch_protected_list()?,
         branch_ignored: git.branch_ignored_list()?,
         effort: cfg.as_ref().and_then(|c| c.effort),
+        min_age: cfg.as_ref().and_then(|c| c.min_age),
         worktrunk: cfg.as_ref().and_then(|c| c.worktrunk),
     };
     report::print_json(&report)
@@ -386,6 +396,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
 
     let use_worktrunk = resolve_worktrunk(git, ui, cli, &cfg)?;
     let effort = resolve_effort(cli, &cfg)?;
+    let min_age = resolve_min_age(cli, &cfg);
 
     let opts = cleaner::CleanerOptions {
         yes: cli.effective_yes(),
@@ -398,6 +409,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         delete_gone: cli.delete_gone,
         use_worktrunk,
         effort,
+        min_age,
     };
 
     let report = cleaner::run(git, &cfg, ui, &opts)?;
@@ -418,6 +430,13 @@ fn resolve_effort(cli: &Cli, cfg: &config::Config) -> Result<branches::Effort> {
         return branches::Effort::try_from(level);
     }
     Ok(cfg.effort.unwrap_or_default())
+}
+
+/// Resolve the minimum age a worktree must have before it may be removed.
+///
+/// Priority: CLI flag > config setting > [`duration::MinAge::default`] (no guard).
+fn resolve_min_age(cli: &Cli, cfg: &config::Config) -> duration::MinAge {
+    cli.min_age.or(cfg.min_age).unwrap_or_default()
 }
 
 /// Resolve whether to use worktrunk for worktree removal.
@@ -477,6 +496,25 @@ mod tests {
             stderr: stderr.into(),
             kind,
         })
+    }
+
+    #[test]
+    fn resolve_min_age_prefers_cli_then_config_then_default() {
+        let cfg_default = config::Config::default();
+        let cfg_2h = config::Config {
+            min_age: Some("2h".parse().unwrap()),
+            ..config::Config::default()
+        };
+
+        let cli_unset = Cli::parse_from(["git-sync"]);
+        let cli_30m = Cli::parse_from(["git-sync", "--min-age", "30m"]);
+
+        // Nothing set anywhere: no guard.
+        assert!(resolve_min_age(&cli_unset, &cfg_default).is_zero());
+        // Config only.
+        assert_eq!(resolve_min_age(&cli_unset, &cfg_2h), "2h".parse().unwrap());
+        // CLI wins over config.
+        assert_eq!(resolve_min_age(&cli_30m, &cfg_2h), "30m".parse().unwrap());
     }
 
     #[test]

@@ -469,6 +469,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let filter = filter_for(&git, &config)?;
         assert!(filter.is_protected("main"));
@@ -488,6 +489,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         let merged =
@@ -513,6 +515,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         let merged =
@@ -539,6 +542,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         // Pretend the content-based strategies already caught it.
@@ -558,6 +562,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
 
@@ -572,6 +577,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
         Ok(())
@@ -586,6 +592,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         let current = git.current_branch()?;
@@ -654,6 +661,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let filter = filter_for(&git, &config)?;
         let merged = find_merged_local(&git, &filter, Effort::Standard)?.candidates;
@@ -713,6 +721,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let merged =
             find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
@@ -766,6 +775,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let merged =
             find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?.candidates;
@@ -838,6 +848,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let filter = filter_for(&git, &config)?;
         let merged = find_merged_local(&git, &filter, Effort::Thorough)?.candidates;
@@ -909,6 +920,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let merged =
             find_merged_local(&git, &filter_for(&git, &config)?, Effort::Thorough)?.candidates;
@@ -986,6 +998,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let filter = filter_for(&git, &config)?;
         let merged = find_merged_local(&git, &filter, Effort::Thorough)?.candidates;
@@ -1014,6 +1027,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         let targets = resolve_merge_targets(&git, &filter_for(&git, &config)?)?;
@@ -1034,6 +1048,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         let merged =
@@ -1051,6 +1066,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         // Without per-branch protection, feature/done should be a candidate
@@ -1082,6 +1098,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         // Without any real protected branches, nothing is a merge target
@@ -1164,6 +1181,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         }
     }
 
@@ -1278,6 +1296,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         let filter = filter_for(&git, &config)?;
@@ -1309,6 +1328,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
 
         let filter = filter_for(&git, &config)?;
@@ -1421,6 +1441,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         }
     }
 
@@ -1465,6 +1486,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let filter = filter_for(&git, &config)?;
 

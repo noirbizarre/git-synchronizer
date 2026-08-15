@@ -24,8 +24,15 @@ use clap_complete::Shell;
 #[allow(dead_code)]
 mod cli;
 
+// `cli` names it through `crate::duration`, which here resolves against the
+// build script's own root.
+#[path = "src/duration.rs"]
+#[allow(dead_code)]
+mod duration;
+
 fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed=src/cli.rs");
+    println!("cargo:rerun-if-changed=src/duration.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is always set by cargo"));
