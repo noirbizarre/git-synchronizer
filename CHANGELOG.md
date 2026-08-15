@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0](https://github.com/noirbizarre/git-synchronizer/compare/v0.2.0..v0.3.0) - 2026-08-15
+
+### 💫 Features
+
+- **artwork** Add the logo, icon and social preview ([#55](https://github.com/noirbizarre/git-synchronizer/issues/55)) - ([1645f1a](https://github.com/noirbizarre/git-synchronizer/commit/1645f1a753fbe028fabe2bcfc38302b0b8352d2e))
+- **branches** Apply advanced merge detection to remote branches ([#59](https://github.com/noirbizarre/git-synchronizer/issues/59)) - ([dbeb892](https://github.com/noirbizarre/git-synchronizer/commit/dbeb892cbf8bdde021295a58b99cdb9271940195))
+- **branches** Add effort levels for merge detection ([#58](https://github.com/noirbizarre/git-synchronizer/issues/58)) - ([77b40cf](https://github.com/noirbizarre/git-synchronizer/commit/77b40cf4b5dab86798acea495060c32acacf643b))
+- **ci** Publish a source tarball and an Intel macOS binary - ([8579497](https://github.com/noirbizarre/git-synchronizer/commit/85794979dab58e3933d5d919519d42c82f388713))
+- **cli**  🚨 **breaking** Decouple --force from --yes for worktree force-removal ([#63](https://github.com/noirbizarre/git-synchronizer/issues/63)) - ([19aeb31](https://github.com/noirbizarre/git-synchronizer/commit/19aeb31079f889d1c124955b09b0dce976e072c4))
+- **cli** Add --json machine-readable output ([#57](https://github.com/noirbizarre/git-synchronizer/issues/57)) - ([e351e4a](https://github.com/noirbizarre/git-synchronizer/commit/e351e4ae477f6a8df22e5d7d0deb18a738275867))
+- **docs** Generate and ship man pages and shell completions ([#60](https://github.com/noirbizarre/git-synchronizer/issues/60)) - ([a95efc4](https://github.com/noirbizarre/git-synchronizer/commit/a95efc46f5546724c6300acaa78e2f92b13ee33a))
+- **packaging** Publish a Homebrew formula - ([bae2296](https://github.com/noirbizarre/git-synchronizer/commit/bae2296ee7d9c5d353d980e0d406caf87e15912b))
+- **packaging** Publish on the AUR - ([953316b](https://github.com/noirbizarre/git-synchronizer/commit/953316b58d7f8937e64ca35619ccdd53c3725614))
+- **worktrees** Add a min-age guard for worktree removal (`--min-age`) ([#62](https://github.com/noirbizarre/git-synchronizer/issues/62)) - ([ffb7c24](https://github.com/noirbizarre/git-synchronizer/commit/ffb7c24973b2784c797dd16d0b8ce1de8984242b))
+
+### 📚 Documentation
+
+- **readme** Defer the CLI reference to --help and man pages ([#64](https://github.com/noirbizarre/git-synchronizer/issues/64)) - ([5cfe1e7](https://github.com/noirbizarre/git-synchronizer/commit/5cfe1e73cbdcd3a4bc894e14010b6312a434bda4))
+
 ## [v0.2.0](https://github.com/noirbizarre/git-synchronizer/compare/v0.1.1..v0.2.0) - 2026-08-15
 
 ### 💫 Features
@@ -100,6 +119,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **mise** Remove unused git-cliff dependency - ([e431570](https://github.com/noirbizarre/git-synchronizer/commit/e431570d59823e39cea8479374ac5b5248448c42))
 
+## ❤️ New Contributors
+
+* @noirbizbot[bot] made their first contribution in [#51](https://github.com/noirbizarre/git-synchronizer/pull/51)
 ## [v0.1.1](https://github.com/noirbizarre/git-synchronizer/compare/v0.1.0..v0.1.1) - 2026-04-09
 
 ### 📚 Documentation
