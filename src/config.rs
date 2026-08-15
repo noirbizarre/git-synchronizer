@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 
 use crate::branches::Effort;
+use crate::duration::MinAge;
 use crate::git::Git;
 use crate::ui::Ui;
 
@@ -40,6 +41,9 @@ pub struct Config {
     /// How thorough merge detection should be.
     /// `None` means use [`Effort::default`].
     pub effort: Option<Effort>,
+    /// Minimum age a worktree must have before it may be removed.
+    /// `None` means use [`MinAge::default`], i.e. no guard.
+    pub min_age: Option<MinAge>,
 }
 
 /// A conventional starting point, **not** the value git-sync falls back to at
@@ -57,6 +61,7 @@ impl Default for Config {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         }
     }
 }
@@ -90,12 +95,19 @@ impl Config {
             .transpose()
             .with_context(|| format!("invalid {SECTION}.effort in git config"))?;
 
+        let min_age = git
+            .config_get(&format!("{SECTION}.minage"))?
+            .map(|v| v.parse::<MinAge>())
+            .transpose()
+            .with_context(|| format!("invalid {SECTION}.minage in git config"))?;
+
         Ok(Some(Self {
             protected,
             ignore,
             remotes,
             worktrunk,
             effort,
+            min_age,
         }))
     }
 
@@ -141,6 +153,16 @@ impl Config {
             }
             None => {
                 git.config_unset_all(&format!("{SECTION}.effort"))?;
+            }
+        }
+
+        // Minimum worktree age (optional)
+        match self.min_age {
+            Some(min_age) => {
+                git.config_set(&format!("{SECTION}.minage"), &min_age.to_string())?;
+            }
+            None => {
+                git.config_unset_all(&format!("{SECTION}.minage"))?;
             }
         }
 
@@ -242,14 +264,16 @@ impl Config {
 
         // ── Save ─────────────────────────────────────────────────────
 
-        // Effort is deliberately not asked here: it is a power-user knob with
-        // a sensible default, set later with `git sync config set effort <n>`.
+        // Effort and min age are deliberately not asked here: they are
+        // power-user knobs with sensible defaults, set later with
+        // `git sync config set effort <n>` / `... set minage <duration>`.
         let config = Self {
             protected,
             ignore,
             remotes,
             worktrunk,
             effort: None,
+            min_age: None,
         };
         config.save(git)?;
 
@@ -290,6 +314,7 @@ mod tests {
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         config.save(&git)?;
 
@@ -310,6 +335,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         config.save(&git)?;
 
@@ -353,6 +379,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         config.save(&git)?;
 
@@ -371,6 +398,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         }
         .save(&git)?;
 
@@ -389,6 +417,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         }
         .save(&git)?;
 
@@ -398,6 +427,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         }
         .save(&git)?;
 
@@ -416,6 +446,7 @@ mod tests {
             remotes: Some(vec!["origin".to_string()]),
             worktrunk: Some(true),
             effort: None,
+            min_age: None,
         };
         config1.save(&git)?;
 
@@ -425,6 +456,7 @@ mod tests {
             remotes: Some(vec!["upstream".to_string()]),
             worktrunk: Some(false),
             effort: None,
+            min_age: None,
         };
         config2.save(&git)?;
 
@@ -489,6 +521,7 @@ mod tests {
             remotes: None,
             worktrunk: Some(true),
             effort: None,
+            min_age: None,
         };
         config.save(&git)?;
 
@@ -502,6 +535,7 @@ mod tests {
             remotes: None,
             worktrunk: Some(false),
             effort: None,
+            min_age: None,
         };
         config2.save(&git)?;
 
@@ -515,6 +549,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         config3.save(&git)?;
 
@@ -533,6 +568,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         config.save(&git)?;
 

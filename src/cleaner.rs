@@ -14,13 +14,14 @@ use crate::branches::{
     Effort, Filter, find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
 };
 use crate::config::Config;
+use crate::duration::MinAge;
 use crate::git::{Git, Worktree};
 use crate::report::{
     BranchReason, ItemStatus, LocalBranch, PulledBranch, RemoteBranch, RemoteFetch, RemoteReport,
     Report, WorktreeEntry, WorktreeKind, path_string,
 };
 use crate::ui::Ui;
-use crate::worktrees::find_orphan_worktrees;
+use crate::worktrees::{find_orphan_worktrees, is_too_young};
 
 /// Report a failed operation to both the user and the JSON report.
 fn fail(ui: &Ui, report: &mut Report, action: &str, target: &str, err: &anyhow::Error) {
@@ -68,6 +69,8 @@ pub struct CleanerOptions {
     pub use_worktrunk: bool,
     /// How thorough merge detection should be.
     pub effort: Effort,
+    /// Minimum age a worktree must have before it may be removed.
+    pub min_age: MinAge,
 }
 
 /// Run the full clean-up workflow.
@@ -75,7 +78,7 @@ pub struct CleanerOptions {
 /// Returns a structured [`Report`] of everything that was detected and done;
 /// text mode discards it, `--json` serializes it to stdout.
 pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result<Report> {
-    let mut report = Report::new(opts.dry_run, opts.effort);
+    let mut report = Report::new(opts.dry_run, opts.effort, opts.min_age);
 
     // Read protection and ignore rules once; every detection pass shares them.
     let filter = Filter::load(git, config)?;
@@ -286,44 +289,61 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             .collect();
 
         // Collect orphan worktrees (if worktree cleanup is enabled).
-        let (orphan_locked, orphan_unlocked) = if !opts.no_worktrees {
-            let orphans = find_orphan_worktrees(git, &filter)?;
-            let (locked, unlocked): (Vec<_>, Vec<_>) =
-                orphans.into_iter().partition(|wt| wt.is_locked);
-            (locked, unlocked)
+        let orphans = if !opts.no_worktrees {
+            find_orphan_worktrees(git, &filter)?
         } else {
-            (Vec::new(), Vec::new())
+            Vec::new()
         };
 
-        // Report locked worktrees (both branch-associated and orphan).
+        // Worktrees created too recently to touch. Resolved once, up front:
+        // each lookup costs a `git rev-parse` and the answer is consulted at
+        // several points below.
+        let young: HashSet<PathBuf> = if opts.no_worktrees || opts.min_age.is_zero() {
+            HashSet::new()
+        } else {
+            candidates
+                .iter()
+                .filter_map(|branch| wt_map.get(branch))
+                .chain(orphans.iter())
+                .filter(|wt| is_too_young(git, wt, opts.min_age))
+                .map(|wt| wt.path.clone())
+                .collect()
+        };
+
+        let (orphan_guarded, orphan_actionable): (Vec<_>, Vec<_>) = orphans
+            .into_iter()
+            .partition(|wt| worktree_guard(wt, &young).is_some());
+
+        // Report guarded worktrees (both branch-associated and orphan).
         if !opts.no_worktrees {
             for branch in &candidates {
                 if let Some(wt) = wt_map.get(branch)
-                    && wt.is_locked
+                    && let Some(guard) = worktree_guard(wt, &young)
                 {
-                    ui.muted(&format_locked_skip_message(wt));
+                    ui.muted(&guard.skip_message(wt, opts.min_age));
                     report.local.worktrees.push(WorktreeEntry {
                         path: path_string(&wt.path),
                         branch: wt.branch.clone(),
                         kind: WorktreeKind::Branch,
-                        status: ItemStatus::Locked,
+                        status: guard.status(),
                     });
                 }
             }
-            for wt in &orphan_locked {
-                ui.muted(&format_locked_skip_message(wt));
+            for wt in &orphan_guarded {
+                let guard = worktree_guard(wt, &young).expect("partitioned as guarded");
+                ui.muted(&guard.skip_message(wt, opts.min_age));
                 report.local.worktrees.push(WorktreeEntry {
                     path: path_string(&wt.path),
                     branch: wt.branch.clone(),
                     kind: WorktreeKind::Orphan,
-                    status: ItemStatus::Locked,
+                    status: guard.status(),
                 });
             }
         }
 
         let has_merged = !merged.is_empty();
         let has_gone = !gone.is_empty();
-        let has_orphans = !orphan_unlocked.is_empty();
+        let has_orphans = !orphan_actionable.is_empty();
 
         // Outcome per candidate branch, filled in as the selections are
         // processed; anything left out stays `Skipped`.
@@ -349,8 +369,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             for branch in &candidates {
                 values.push(format!("branch:{branch}"));
                 let is_gone = gone_set.contains(branch);
-                let has_unlocked_wt = wt_map.get(branch).is_some_and(|wt| !wt.is_locked);
-                if !opts.no_worktrees && has_unlocked_wt {
+                let has_actionable_wt = wt_map
+                    .get(branch)
+                    .is_some_and(|wt| worktree_guard(wt, &young).is_none());
+                if !opts.no_worktrees && has_actionable_wt {
                     let wt = &wt_map[branch];
                     labels.push(format!("{branch} ({})", tilde_path(&wt.path)));
                     hints.push(if is_gone {
@@ -370,7 +392,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             }
 
             // Orphan worktrees.
-            for wt in &orphan_unlocked {
+            for wt in &orphan_actionable {
                 values.push(format!("orphan-wt:{}", wt.path.display()));
                 labels.push(tilde_path(&wt.path));
                 hints.push(format!(
@@ -389,7 +411,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 found.push(format!("{} with a deleted upstream", gone.len()));
             }
             if has_orphans {
-                found.push(format!("{} orphan worktree(s)", orphan_unlocked.len()));
+                found.push(format!("{} orphan worktree(s)", orphan_actionable.len()));
             }
             ui.heading(&format!("Found {}:", join_with_and(&found)));
 
@@ -471,7 +493,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 let Some(wt) = wt_map.get(branch) else {
                     continue;
                 };
-                if wt.is_locked {
+                if worktree_guard(wt, &young).is_some() {
                     continue;
                 }
                 let dirty = match git.worktree_dirty(&wt.path) {
@@ -614,7 +636,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         continue; // already warned above
                     }
                     if let Some(wt) = wt_map.get(branch) {
-                        if wt.is_locked {
+                        if worktree_guard(wt, &young).is_some() {
                             continue; // already reported above
                         }
                         let (force, force_delete) =
@@ -671,7 +693,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 }
 
                 // 2. Remove selected orphan worktrees.
-                for wt in &orphan_unlocked {
+                for wt in &orphan_actionable {
                     let key = format!("orphan-wt:{}", wt.path.display());
                     if !selected.contains(&key) {
                         continue;
@@ -931,6 +953,50 @@ fn effective_remotes(git: &Git, config: &Config) -> Result<Vec<String>> {
     }
 }
 
+/// Why git-sync must leave a worktree alone.
+///
+/// Guarded worktrees are reported and then excluded from every subsequent
+/// step: the multiselect, the dirty/unmerged scan and the removal loops. The
+/// enum exists so those four sites share one decision instead of each
+/// re-deriving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeGuard {
+    /// `git worktree lock` was used on it.
+    Locked,
+    /// It was created less than `--min-age` ago.
+    TooYoung,
+}
+
+impl WorktreeGuard {
+    /// How the guarded worktree appears in the JSON report.
+    fn status(self) -> ItemStatus {
+        match self {
+            Self::Locked => ItemStatus::Locked,
+            Self::TooYoung => ItemStatus::TooYoung,
+        }
+    }
+
+    /// The informational line shown to the user.
+    fn skip_message(self, wt: &Worktree, min_age: MinAge) -> String {
+        match self {
+            Self::Locked => format_locked_skip_message(wt),
+            Self::TooYoung => format_too_young_skip_message(wt, min_age),
+        }
+    }
+}
+
+/// Whether `wt` is guarded, and why. `young` holds the paths of the worktrees
+/// already found to be below the `--min-age` threshold.
+fn worktree_guard(wt: &Worktree, young: &HashSet<PathBuf>) -> Option<WorktreeGuard> {
+    if wt.is_locked {
+        Some(WorktreeGuard::Locked)
+    } else if young.contains(&wt.path) {
+        Some(WorktreeGuard::TooYoung)
+    } else {
+        None
+    }
+}
+
 /// Format an informational skip message for a locked worktree.
 fn format_locked_skip_message(wt: &Worktree) -> String {
     let branch_label = wt.branch.as_deref().unwrap_or("detached");
@@ -948,6 +1014,15 @@ fn format_locked_skip_message(wt: &Worktree) -> String {
             )
         }
     }
+}
+
+/// Format an informational skip message for a worktree below `--min-age`.
+fn format_too_young_skip_message(wt: &Worktree, min_age: MinAge) -> String {
+    let branch_label = wt.branch.as_deref().unwrap_or("detached");
+    format!(
+        "  Skipping recent worktree '{}' (branch: {branch_label}): created less than {min_age} ago.",
+        wt.path.display()
+    )
 }
 
 /// Remove a single worktree, optionally using worktrunk to trigger hooks.
@@ -982,6 +1057,7 @@ fn remove_worktree(
 mod tests {
     use super::*;
     use std::process::Command;
+    use tempfile::TempDir;
 
     /// Whether the real `wt` binary is available.
     ///
@@ -1002,6 +1078,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         }
     }
 
@@ -1017,6 +1094,7 @@ mod tests {
             delete_gone: false,
             use_worktrunk: false,
             effort: Effort::Standard,
+            min_age: MinAge::default(),
         }
     }
 
@@ -1089,6 +1167,7 @@ mod tests {
             remotes: Some(vec!["broken".to_string()]),
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let ui = Ui::new();
         let opts = CleanerOptions {
@@ -1102,6 +1181,7 @@ mod tests {
             delete_gone: false,
             use_worktrunk: false,
             effort: Effort::Standard,
+            min_age: MinAge::default(),
         };
 
         // The fetch will fail but the cleaner should not bail out.
@@ -1265,6 +1345,7 @@ mod tests {
             remotes: Some(vec!["origin".to_string(), "upstream".to_string()]),
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let remotes = effective_remotes(&git, &config_with)?;
         assert_eq!(remotes, vec!["origin", "upstream"]);
@@ -1275,6 +1356,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let remotes = effective_remotes(&git, &config_without)?;
         assert!(remotes.is_empty());
@@ -1390,6 +1472,185 @@ mod tests {
         assert!(msg.contains("/tmp/wt"));
         assert!(msg.contains("feature/x"));
         assert!(msg.contains("do not touch"));
+    }
+
+    #[test]
+    fn format_too_young_skip_message_mentions_the_threshold() {
+        let wt = Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: Some("feature/x".to_string()),
+            is_bare: false,
+            is_locked: false,
+            lock_reason: None,
+        };
+        let msg = format_too_young_skip_message(&wt, "2h".parse().unwrap());
+        assert!(msg.contains("Skipping recent worktree"));
+        assert!(msg.contains("/tmp/wt"));
+        assert!(msg.contains("feature/x"));
+        assert!(msg.contains("less than 2h ago"));
+    }
+
+    #[test]
+    fn worktree_guard_prefers_locked_over_too_young() {
+        let mut wt = Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: None,
+            is_bare: false,
+            is_locked: true,
+            lock_reason: None,
+        };
+        let young: HashSet<PathBuf> = [wt.path.clone()].into_iter().collect();
+
+        assert_eq!(
+            worktree_guard(&wt, &young),
+            Some(WorktreeGuard::Locked),
+            "a lock is the more specific reason and should win"
+        );
+
+        wt.is_locked = false;
+        assert_eq!(worktree_guard(&wt, &young), Some(WorktreeGuard::TooYoung));
+        assert_eq!(worktree_guard(&wt, &HashSet::new()), None);
+    }
+
+    /// Repo with `feature/merged` merged into `main` and a worktree on it.
+    /// The worktree is brand new, so any non-zero `--min-age` protects it.
+    fn init_repo_with_merged_worktree(name: &str) -> Result<(TempDir, Git, PathBuf)> {
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path().to_path_buf();
+
+        for args in [
+            vec!["checkout", "-b", "feature/merged"],
+            vec!["commit", "--allow-empty", "-m", "merged work"],
+            vec!["checkout", "main"],
+            vec!["merge", "feature/merged", "--no-edit"],
+        ] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(&path)
+                .output()?;
+        }
+
+        let wt_path = path.join(name);
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/merged",
+            ])
+            .current_dir(&path)
+            .output()?;
+
+        let git = Git::with_workdir(false, &path);
+        Ok((dir, git, wt_path))
+    }
+
+    #[test]
+    fn run_skips_young_worktree() -> Result<()> {
+        let (_dir, git, wt_path) = init_repo_with_merged_worktree("wt-young")?;
+
+        let opts = CleanerOptions {
+            min_age: "1h".parse()?,
+            ..opts_yes_skip_network()
+        };
+        run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(
+            wt_path.exists(),
+            "a worktree created seconds ago must survive --min-age 1h"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_removes_worktree_with_zero_min_age() -> Result<()> {
+        let (_dir, git, wt_path) = init_repo_with_merged_worktree("wt-old-enough")?;
+
+        // The default: the guard is disabled and behaviour is unchanged.
+        run(
+            &git,
+            &default_config(),
+            &Ui::new(),
+            &opts_yes_skip_network(),
+        )?;
+
+        assert!(!wt_path.exists(), "the worktree should have been removed");
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_a_young_worktree_as_too_young() -> Result<()> {
+        let (_dir, git, wt_path) = init_repo_with_merged_worktree("wt-young-report")?;
+
+        let opts = CleanerOptions {
+            min_age: "1h".parse()?,
+            ..opts_yes_skip_network()
+        };
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        // Matched on the branch, not the path: macOS resolves the temp dir
+        // through /private, so git reports a different string than the fixture
+        // holds.
+        let entry = report
+            .local
+            .worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some("feature/merged"))
+            .expect("the young worktree should be reported");
+        assert_eq!(entry.status, ItemStatus::TooYoung);
+        assert_eq!(entry.kind, WorktreeKind::Branch);
+        assert!(wt_path.exists());
+        assert_eq!(report.min_age, "1h".parse()?);
+        assert_eq!(report.summary.worktrees_removed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn run_skips_young_orphan_worktree() -> Result<()> {
+        let (dir, _git, wt_path) = init_repo_with_merged_worktree("wt-young-orphan")?;
+        let path = dir.path();
+
+        // Drop the branch ref so the worktree becomes an orphan.
+        Command::new("git")
+            .args(["update-ref", "-d", "refs/heads/feature/merged"])
+            .current_dir(path)
+            .output()?;
+
+        let git = Git::with_workdir(false, path);
+        let opts = CleanerOptions {
+            min_age: "1h".parse()?,
+            ..opts_yes_skip_network()
+        };
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(wt_path.exists(), "young orphan worktree should survive");
+        let entry = report
+            .local
+            .worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some("feature/merged"))
+            .expect("the young orphan should be reported");
+        assert_eq!(entry.status, ItemStatus::TooYoung);
+        assert_eq!(entry.kind, WorktreeKind::Orphan);
+        Ok(())
+    }
+
+    #[test]
+    fn run_ignores_min_age_when_worktree_cleanup_is_disabled() -> Result<()> {
+        let (_dir, git, wt_path) = init_repo_with_merged_worktree("wt-no-worktrees")?;
+
+        let opts = CleanerOptions {
+            min_age: "1h".parse()?,
+            no_worktrees: true,
+            ..opts_yes_skip_network()
+        };
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        // --no-worktrees leaves worktrees alone entirely, and nothing is
+        // reported about them: the guard never runs.
+        assert!(wt_path.exists());
+        assert!(report.local.worktrees.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -2271,6 +2532,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
             effort: None,
+            min_age: None,
         };
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();

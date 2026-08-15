@@ -786,6 +786,19 @@ impl Git {
         Ok(parse_worktree_list(&out))
     }
 
+    /// Absolute path of a worktree's administrative directory.
+    ///
+    /// For a linked worktree this is `<common-dir>/worktrees/<id>`, created by
+    /// `git worktree add` and never recreated afterwards, which makes its
+    /// birth time a faithful worktree creation time. For the main worktree it
+    /// is the repository's `.git` directory.
+    pub fn worktree_git_dir(&self, path: &Path) -> Result<PathBuf> {
+        let out = self
+            .in_dir(path)
+            .run(&["rev-parse", "--absolute-git-dir"])?;
+        Ok(PathBuf::from(out.trim()))
+    }
+
     /// Remove a worktree by path.
     pub fn worktree_remove(&self, path: &Path, force: bool) -> Result<()> {
         let path = path_arg(path)?;
@@ -2084,6 +2097,21 @@ locked work in progress, do not remove
         assert!(wt_branches.contains(&Some("main")));
         assert!(wt_branches.contains(&Some("feature/wt")));
 
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_git_dir_returns_the_admin_dir() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_worktree()?;
+
+        let admin = git.worktree_git_dir(Path::new(&wt_path))?;
+
+        assert!(admin.is_dir(), "{} should exist", admin.display());
+        assert!(
+            admin.parent().is_some_and(|p| p.ends_with("worktrees")),
+            "expected an admin dir under .git/worktrees, got {}",
+            admin.display()
+        );
         Ok(())
     }
 

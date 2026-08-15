@@ -9,7 +9,10 @@ use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 mod common;
-use common::{add_branches, configure, git_branches, init_repo, init_repo_with_worktree_config};
+use common::{
+    add_branches, add_merged_worktree, configure, git_branches, init_repo,
+    init_repo_with_worktree_config,
+};
 
 // ── CLI basics ───────────────────────────────────────────────────────
 
@@ -896,6 +899,82 @@ fn config_set_effort_roundtrips() {
 }
 
 #[test]
+fn min_age_flag_accepted() {
+    let dir = init_repo();
+    configure(&dir);
+
+    for value in ["0", "30s", "15m", "2h", "7d", "1w"] {
+        Command::cargo_bin("git-sync")
+            .unwrap()
+            .args(["-y", "--no-fetch", "--local-only", "--min-age", value])
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn min_age_flag_rejects_garbage() {
+    let dir = init_repo();
+    configure(&dir);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--min-age", "soon"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid duration"));
+}
+
+#[test]
+fn min_age_keeps_a_freshly_created_worktree() {
+    let dir = init_repo();
+    configure(&dir);
+    let wt_path = add_merged_worktree(&dir, "feature/fresh", "wt-fresh");
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--local-only", "--min-age", "1h"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    assert!(
+        wt_path.exists(),
+        "a worktree created seconds ago must survive --min-age 1h"
+    );
+}
+
+#[test]
+fn config_set_minage_roundtrips() {
+    let dir = init_repo();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "set", "minage", "2h"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let output = StdCommand::new("git")
+        .args(["config", "--get", "sync.minage"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2h");
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("min age"))
+        .stderr(predicate::str::contains("2h"));
+}
+
+#[test]
 fn pull_updates_current_branch() {
     let (dir, work_path, bare_path) = init_repo_with_remote();
 
@@ -1710,6 +1789,31 @@ fn json_keeps_stdout_free_of_human_output() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with('{') && stdout.trim_end().ends_with('}'));
+}
+
+#[test]
+fn json_reports_a_young_worktree_as_too_young() {
+    let dir = init_repo();
+    configure(&dir);
+    let wt_path = add_merged_worktree(&dir, "feature/young", "wt-young");
+
+    let doc = json_output(
+        &dir,
+        &["--json", "--no-fetch", "--local-only", "--min-age", "1h"],
+    );
+
+    assert_eq!(doc["min_age"], "1h");
+    // Matched on the branch, not the path: macOS resolves the temp dir through
+    // /private, so git reports a different string than the fixture holds.
+    let worktrees = doc["local"]["worktrees"].as_array().unwrap();
+    let entry = worktrees
+        .iter()
+        .find(|w| w["branch"] == "feature/young")
+        .expect("the young worktree should be reported");
+    assert_eq!(entry["status"], "too_young");
+    assert_eq!(entry["kind"], "branch");
+    assert_eq!(doc["summary"]["worktrees_removed"], 0);
+    assert!(wt_path.exists());
 }
 
 #[test]

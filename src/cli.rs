@@ -4,6 +4,8 @@
 
 use clap::{Parser, Subcommand};
 
+use crate::duration::MinAge;
+
 /// Easily synchronize your local branches and worktrees.
 ///
 /// Detects branches that have been merged into your main branch(es) and offers
@@ -68,6 +70,14 @@ pub struct Cli {
     /// the most thorough but noticeably slower.
     #[arg(long, value_name = "LEVEL", value_parser = clap::value_parser!(u8).range(1..=3))]
     pub effort: Option<u8>,
+
+    /// Skip worktrees created less than this long ago (default: 0s)
+    ///
+    /// Accepts a single value and unit: 30s, 15m, 2h, 7d, 1w — or a bare 0 to
+    /// disable the guard. Protects a worktree you just created from the
+    /// default branch from being removed along with its "merged" branch.
+    #[arg(long, value_name = "DURATION")]
+    pub min_age: Option<MinAge>,
 
     /// Use worktrunk (wt) for worktree removal to trigger pre/post-remove hooks
     #[arg(long, overrides_with = "no_worktrunk")]
@@ -269,6 +279,19 @@ mod tests {
         assert!(Cli::try_parse_from(["git-sync", "--effort", "0"]).is_err());
         assert!(Cli::try_parse_from(["git-sync", "--effort", "4"]).is_err());
         assert!(Cli::try_parse_from(["git-sync", "--effort", "max"]).is_err());
+    }
+
+    #[test]
+    fn cli_min_age_flag() {
+        let cli = Cli::parse_from(["git-sync", "--min-age", "2h"]);
+        assert_eq!(cli.min_age, Some("2h".parse().unwrap()));
+        assert_eq!(Cli::parse_from(["git-sync"]).min_age, None);
+    }
+
+    #[test]
+    fn cli_min_age_rejects_garbage() {
+        assert!(Cli::try_parse_from(["git-sync", "--min-age", "soon"]).is_err());
+        assert!(Cli::try_parse_from(["git-sync", "--min-age", "5x"]).is_err());
     }
 
     #[test]
