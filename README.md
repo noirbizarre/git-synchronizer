@@ -1,4 +1,4 @@
-# git-sync
+# git-synchronizer (git-sync)
 
 Easily synchronize your local branches and worktrees.
 
@@ -114,8 +114,9 @@ git sync config remove-remote upstream
 
 ## Configuration
 
-Configuration is stored in the `[sync]` section of your git config
-(local or global):
+Configuration is read from the `[sync]` section of your git config at any
+scope (local, global or system). Every `git sync config` subcommand **writes**
+to the repository-local `.git/config`:
 
 ```ini
 [sync]
@@ -132,7 +133,12 @@ Configuration is stored in the `[sync]` section of your git config
 | `protected` | multi-value | Glob patterns for branches that should never be deleted |
 | `ignore` | multi-value | Glob patterns for branches git-sync ignores entirely |
 | `remote` | multi-value | Remotes to delete branches from (omit for all remotes) |
-| `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects |
+| `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects (see below) |
+
+When `worktrunk` is unset, git-sync enables it only if the repository has a
+`[worktrunk]` config section **and** `wt` is on `$PATH`; it then asks once per
+run before using it, and enables it without asking under `--yes`. If either
+condition is missing, worktrunk is not used.
 
 Individual branches can also be protected via the standard `[branch]`
 config namespace:
@@ -168,8 +174,10 @@ Exclusion at fetch time is implemented with negative refspecs
 (`^refs/heads/wip/*`), which require **git 2.29 or later** and understand a
 single `*` wildcard only. Richer glob patterns (`?`, character classes,
 alternates) are still fetched, then filtered out by the same matcher used
-everywhere else. Note that when any ignore pattern is active, the fetch uses an
-explicit refspec and therefore bypasses a custom `remote.<name>.fetch` setting.
+everywhere else. Note that when at least one ignore pattern is expressible as a
+refspec (a single `*` and no other metacharacters), the fetch uses an explicit
+refspec and therefore bypasses a custom `remote.<name>.fetch` setting. With only
+richer patterns, the default fetch — and your custom refspec — is left intact.
 
 ### First run
 
@@ -307,7 +315,7 @@ flowchart TD
     PullCheck{--no-pull?}
     PullCheck -- No --> Pull[Fast-forward target branches]
     Pull --> PullCurrent[Current branch:\ngit pull --ff-only]
-    Pull --> PullWT[In worktree:\ngit -C path pull --ff-only]
+    Pull --> PullWT[In worktree:\ngit pull --ff-only from that worktree]
     Pull --> PullFetch[Not checked out:\ngit fetch remote ref:branch]
     PullCurrent --> LocalCheck
     PullWT --> LocalCheck
@@ -320,12 +328,18 @@ flowchart TD
     FindLocal --> Cherry[Rebase-aware detection\ngit cherry]
     FindLocal --> TreeSHA[Tree SHA comparison]
     FindLocal --> EmptyDiff[Empty-diff detection\ngit diff --quiet]
+    FindLocal --> PatchID[Patch-ID matching\ngit patch-id]
+    FindLocal --> SimMerge[Simulated merge\ngit merge-tree --write-tree]
+    FindLocal --> Squash[Squash-merge detection\ncombined patch-id]
     FindLocal --> GoneUpstream[Deleted-upstream detection\nrequires a fetch]
     FindLocal --> Orphans[Find orphan worktrees]
     Merged --> SelectLocal[Unified multiselect:\nbranches + worktrees]
     Cherry --> SelectLocal
     TreeSHA --> SelectLocal
     EmptyDiff --> SelectLocal
+    PatchID --> SelectLocal
+    SimMerge --> SelectLocal
+    Squash --> SelectLocal
     GoneUpstream --> SelectLocal
     Orphans --> SelectLocal
     SelectLocal --> RemoveWT[Remove selected worktrees]
@@ -390,9 +404,9 @@ version and the changelog produced by [git-cliff](https://git-cliff.org)
 (`cliff.toml`). gh-ship never versions and never writes changelogs; it drives
 the lifecycle:
 
-1. push to `main` → `gh ship prepare` opens or updates the **Release PR**,
-   carrying the `Cargo.toml` bump and the changelog;
-2. review the changelog and merge it;
+1. push to `main` → `gh ship prepare` opens or updates the **Release PR** on
+   the `release/next` branch, carrying the `Cargo.toml` bump and the changelog;
+2. review the changelog and merge that PR;
 3. `gh ship release` tags the merge commit as `vX.Y.Z`, drafts the release,
    attaches the cross-compiled binaries, publishes the crate to crates.io, and
    only then makes the release public.
