@@ -1,0 +1,108 @@
+name: 🍺 Homebrew
+
+# Updates the `git-sync` formula in noirbizarre/homebrew-tap once a release is
+# public. Same trigger as 📦 AUR and for the same reason: gh-ship only undrafts
+# the release after 📦 Publish Release succeeds, so waiting for `published`
+# means the URLs baked into the formula already resolve when it lands.
+run-name: 🍺 Homebrew ${{ inputs.tag || github.event.release.tag_name }}
+
+on:
+  release:
+    types: [published]
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to publish to the tap
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  homebrew:
+    name: 🍺 Formula
+    runs-on: ubuntu-latest
+
+    # A dedicated environment: the token that can write to the tap is scoped to
+    # it rather than sitting next to the GitHub App credentials in `release`,
+    # and the update is registered as its own deployment.
+    environment:
+      name: homebrew
+      url: https://github.com/noirbizarre/homebrew-tap
+
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Render the formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p build assets
+          cp packaging/homebrew/git-sync.rb build/git-sync.rb
+
+          # The tag carries a `v` prefix, the formula's `version` does not — it
+          # puts the `v` back when building the download URLs.
+          version="${TAG#v}"
+          sed -i "s/@VERSION@/${version}/" build/git-sync.rb
+
+          # Checksums are computed from the published assets themselves rather
+          # than from the `.sha256` files shipped next to them, so a mismatch
+          # between the two cannot reach the tap.
+          checksum() {
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$1" --dir assets >&2
+            sha256sum "assets/$1" | cut -d' ' -f1
+          }
+
+          declare -A targets=(
+            [DARWIN_ARM64]=git-sync-aarch64-apple-darwin.tar.gz
+            [DARWIN_X86_64]=git-sync-x86_64-apple-darwin.tar.gz
+            [LINUX_ARM64]=git-sync-aarch64-unknown-linux-musl.tar.gz
+            [LINUX_X86_64]=git-sync-x86_64-unknown-linux-musl.tar.gz
+          )
+          for placeholder in "${!targets[@]}"; do
+            sha256=$(checksum "${targets[$placeholder]}")
+            sed -i "s/@SHA256_${placeholder}@/${sha256}/" build/git-sync.rb
+          done
+
+          # A leftover placeholder means an asset was renamed upstream and the
+          # formula would install nothing: fail here rather than in the tap.
+          if grep -q '@[A-Z0-9_]*@' build/git-sync.rb; then
+            echo "::error::unsubstituted placeholder left in the formula"
+            exit 1
+          fi
+
+          cat build/git-sync.rb
+
+      - name: Push to the tap
+        env:
+          # A token with `contents: write` on noirbizarre/homebrew-tap only.
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/noirbizarre/homebrew-tap.git" tap
+
+          cd tap
+          mkdir -p Formula
+          cp ../build/git-sync.rb Formula/git-sync.rb
+
+          git config user.name 'git-synchronizer release bot'
+          git config user.email 'noirbizarre@gmail.com'
+
+          # Compare the index, not the worktree: `git diff` alone ignores
+          # untracked files, so the very first import would look like a no-op.
+          git add Formula/git-sync.rb
+          if git diff --cached --quiet; then
+            echo "::notice::the tap already carries git-sync ${TAG}"
+            exit 0
+          fi
+
+          git commit -m "git-sync ${TAG#v}"
+          git push

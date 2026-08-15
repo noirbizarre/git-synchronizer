@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Deliberately no `environment:`. This job needs no release secret — the
     # default GITHUB_TOKEN can upload to a release in its own repository — and
-    # gating eight matrix legs on the environment would demand eight approvals
+    # gating every matrix leg on the environment would demand one approval each
     # if it ever gains a required reviewer. The gate belongs on `crates-io`.
     permissions:
       contents: write
@@ -53,6 +53,12 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-compiled from the Apple Silicon runner rather than built on an
+          # Intel one: the macOS SDK is universal, so this only needs the target
+          # — which `upload-rust-binary-action` installs itself — and it does not
+          # depend on the availability of an Intel runner image.
+          - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-pc-windows-msvc
             os: windows-latest
@@ -115,17 +121,70 @@ jobs:
           # starting with `refs/tags/`. It is passed explicitly because this
           # workflow is dispatched, so GITHUB_REF names a branch, not the tag.
           ref: refs/tags/${{ inputs.tag }}
-          include: dist/man,dist/completions
+          # LICENSE ships too: MIT is not one of the common licenses Arch keeps
+          # in /usr/share/licenses/common, so `git-synchronizer-bin` has to
+          # install the file itself and can only take it from here.
+          include: dist/man,dist/completions,LICENSE,README.md
           tar: all
           zip: windows
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # The source tarball is what distribution packagers build from — the
+  # `git-synchronizer` and `git-synchronizer-git` AUR packages consume it. It is
+  # published here rather than relying on GitHub's auto-generated tag archive,
+  # whose bytes (and therefore its checksum) are not guaranteed to be stable
+  # over time, which a PKGBUILD's `sha256sums` cannot tolerate.
+  source:
+    name: 📦 Source tarball
+    runs-on: ubuntu-latest
+    # Same reasoning as `build`: uploading to a release in this repository needs
+    # no secret beyond the default token.
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          # `git archive` resolves the tag object, which a shallow clone lacks.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The prefix and the file name carry the bare version, so a PKGBUILD can
+      # `cd "$pkgname-$pkgver"` with the pkgver it already declares. The tag
+      # itself keeps its `v`, which is why the two are not interchangeable.
+      - name: Build the source tarball
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          mkdir -p dist
+          git archive --format=tar.gz \
+            --prefix="git-synchronizer-${version}/" \
+            -o "dist/git-synchronizer-${version}.tar.gz" "$TAG"
+          # Cargo.lock is tracked, so the archive supports `cargo build --locked`.
+          tar -tzf "dist/git-synchronizer-${version}.tar.gz" \
+            | grep -qx "git-synchronizer-${version}/Cargo.lock"
+          cd dist
+          sha256sum "git-synchronizer-${version}.tar.gz" \
+            > "git-synchronizer-${version}.tar.gz.sha256"
+
+      # The release exists as a DRAFT: gh-ship created it before dispatching
+      # this workflow and undrafts it once we succeed. Upload, never create.
+      - name: Upload to the draft release
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" dist/* --clobber
+
   # Publishing to crates.io is irreversible, so it happens while the release is
   # still a draft: if it fails, gh-ship never makes the release visible.
   crates-io:
     name: 📤 Publish to crates.io
-    needs: build
+    needs: [build, source]
     runs-on: ubuntu-latest
 
     # This is the deployment. The `url:` registers it in the repository's
