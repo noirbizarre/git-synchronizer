@@ -946,6 +946,56 @@ fn min_age_keeps_a_freshly_created_worktree() {
     );
 }
 
+// ── Forced worktree removal ──────────────────────────────────────────
+
+/// Make `path` dirty with an untracked file.
+fn dirty_worktree(path: &std::path::Path) {
+    std::fs::write(path.join("untracked.log"), "noise").unwrap();
+}
+
+#[test]
+fn yes_alone_keeps_a_dirty_worktree() {
+    let dir = init_repo();
+    configure(&dir);
+    let wt_path = add_merged_worktree(&dir, "feature/dirty", "wt-dirty");
+    dirty_worktree(&wt_path);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--local-only"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Skipping"));
+
+    assert!(
+        wt_path.exists(),
+        "--yes without --force must not destroy uncommitted work"
+    );
+    assert!(git_branches(&dir).contains(&"feature/dirty".to_string()));
+}
+
+#[test]
+fn yes_with_force_removes_a_dirty_worktree() {
+    let dir = init_repo();
+    configure(&dir);
+    let wt_path = add_merged_worktree(&dir, "feature/dirty", "wt-dirty");
+    dirty_worktree(&wt_path);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--force", "--no-fetch", "--local-only"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    assert!(
+        !wt_path.exists(),
+        "--yes --force should force-remove the dirty worktree"
+    );
+    assert!(!git_branches(&dir).contains(&"feature/dirty".to_string()));
+}
+
 #[test]
 fn config_set_minage_roundtrips() {
     let dir = init_repo();

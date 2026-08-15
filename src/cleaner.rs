@@ -59,6 +59,8 @@ fn join_with_and(parts: &[String]) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct CleanerOptions {
     pub yes: bool,
+    /// Force-remove worktrees that are dirty or hold unmerged commits.
+    pub force: bool,
     pub dry_run: bool,
     pub no_fetch: bool,
     pub no_pull: bool,
@@ -541,7 +543,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             //
             // Selected entries get the appropriate force flag(s); unselected
             // entries are skipped entirely (no worktree removal, no branch
-            // deletion).
+            // deletion). `--force` drives this prompt alone: it pre-selects
+            // every entry interactively, and non-interactively (`--yes`) it is
+            // what decides between force-removing everything and skipping it
+            // all. `--yes` on its own never destroys a dirty worktree.
             let mut force_map: HashMap<String, (bool, bool)> = HashMap::new();
             let mut skip_set: HashSet<String> = HashSet::new();
             // Auto force-delete branches whose commits are unreachable from any
@@ -574,14 +579,18 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         _ => String::new(),
                     })
                     .collect();
-                let f_defaults: Vec<bool> = vec![false; problematic.len()];
+                let f_defaults: Vec<bool> = vec![opts.force; problematic.len()];
 
                 ui.heading(&format!(
                     "{} worktree(s) need forced removal:",
                     problematic.len()
                 ));
                 let f_selected = if opts.yes {
-                    f_values.clone()
+                    if opts.force {
+                        f_values.clone()
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     ui.multi_select(
                         "Select worktrees to force-remove (unselected will be skipped)",
@@ -1085,6 +1094,7 @@ mod tests {
     fn opts_yes_skip_network() -> CleanerOptions {
         CleanerOptions {
             yes: true,
+            force: false,
             dry_run: false,
             no_fetch: true,
             no_pull: true,
@@ -1172,6 +1182,7 @@ mod tests {
         let ui = Ui::new();
         let opts = CleanerOptions {
             yes: true,
+            force: false,
             dry_run: false,
             no_fetch: false,
             no_pull: true,
@@ -2157,9 +2168,10 @@ mod tests {
     }
 
     #[test]
-    fn run_force_removes_dirty_worktree_with_yes() -> Result<()> {
-        // With opts.yes, the force-confirmation prompt is auto-accepted, so a
-        // merged branch whose worktree contains an untracked file is removed.
+    fn run_force_removes_dirty_worktree_with_yes_and_force() -> Result<()> {
+        // With opts.yes + opts.force, the force-confirmation prompt is
+        // auto-accepted, so a merged branch whose worktree contains an
+        // untracked file is removed.
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2204,7 +2216,8 @@ mod tests {
         let git = Git::with_workdir(false, path);
         let config = default_config();
         let ui = Ui::new();
-        let opts = opts_yes_skip_network();
+        let mut opts = opts_yes_skip_network();
+        opts.force = true;
 
         run(&git, &config, &ui, &opts)?;
 
@@ -2213,6 +2226,65 @@ mod tests {
         assert!(
             !branches.contains(&"feature/dirty-wt".to_string()),
             "branch should be deleted after worktree force-removal"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_yes_without_force_skips_dirty_worktree() -> Result<()> {
+        // --yes accepts the deletions git-sync proposed, but it must not
+        // silently destroy uncommitted work: without --force the dirty
+        // worktree and its branch are left untouched and reported as skipped.
+        let (dir, _git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        crate::test_helpers::git_in(path, &["checkout", "-b", "feature/keep-dirty"])?;
+        std::fs::write(path.join("dirty.txt"), "dirty feature")?;
+        commit_all(path, "dirty feature")?;
+        crate::test_helpers::git_in(path, &["checkout", "main"])?;
+        crate::test_helpers::git_in(path, &["merge", "feature/keep-dirty"])?;
+
+        let wt_path = path.join("wt-keep-dirty");
+        crate::test_helpers::git_in(
+            path,
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "feature/keep-dirty",
+            ],
+        )?;
+        std::fs::write(wt_path.join("untracked.log"), "noise")?;
+
+        let git = Git::with_workdir(false, path);
+        let opts = opts_yes_skip_network();
+        assert!(!opts.force);
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(
+            wt_path.exists(),
+            "dirty worktree must survive --yes without --force"
+        );
+        assert!(
+            git.local_branches()?
+                .contains(&"feature/keep-dirty".to_string()),
+            "branch of a skipped worktree must survive"
+        );
+        assert!(
+            report.local.worktrees.iter().any(|w| {
+                w.branch.as_deref() == Some("feature/keep-dirty") && w.status == ItemStatus::Skipped
+            }),
+            "skipped worktree should be reported: {:?}",
+            report.local.worktrees
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("feature/keep-dirty")),
+            "a warning should explain the skip: {:?}",
+            report.warnings
         );
         Ok(())
     }
@@ -2264,6 +2336,7 @@ mod tests {
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();
         opts.dry_run = true;
+        opts.force = true;
 
         run(&git, &config, &ui, &opts)?;
 
@@ -2280,7 +2353,7 @@ mod tests {
     #[test]
     fn run_modified_file_in_merged_worktree() -> Result<()> {
         // Test that a merged branch's worktree with a modified (not untracked)
-        // file is detected as dirty and force-removed with opts.yes
+        // file is detected as dirty and force-removed with opts.force
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2336,14 +2409,15 @@ mod tests {
         let git = Git::with_workdir(false, path);
         let config = default_config();
         let ui = Ui::new();
-        let opts = opts_yes_skip_network();
+        let mut opts = opts_yes_skip_network();
+        opts.force = true;
 
         run(&git, &config, &ui, &opts)?;
 
-        // Dirty worktree and branch should be force-removed with opts.yes
+        // Dirty worktree and branch should be force-removed with opts.force
         assert!(
             !wt_path.exists(),
-            "modified worktree should be force-removed with opts.yes"
+            "modified worktree should be force-removed with opts.force"
         );
         let branches = git.local_branches()?;
         assert!(

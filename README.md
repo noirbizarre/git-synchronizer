@@ -107,6 +107,9 @@ git sync
 # Auto-confirm everything
 git sync --yes
 
+# Also force-remove worktrees with uncommitted changes or unmerged commits
+git sync --yes --force
+
 # Dry run (show what would be done)
 git sync --dry-run
 
@@ -161,7 +164,8 @@ git sync config list --json | jq '.protected'
 ```
 
 Because prompts would hang a non-interactive caller, `--json` implies `--yes`:
-deleted-upstream branches stay opt-in behind `--delete-gone`, and a repository
+deleted-upstream branches stay opt-in behind `--delete-gone`, forced removal of
+dirty worktrees stays opt-in behind `--force`, and a repository
 that has never been configured is an error rather than a setup wizard (run
 `git sync` once interactively first).
 
@@ -389,8 +393,11 @@ CLI flags:
    (uncommitted or untracked changes) or hold unmerged commits are collected
    into a **second multiselect** for forced removal, defaulting to unselected;
    anything left unselected there is skipped entirely, with neither the
-   worktree removed nor the branch deleted. Under `--yes` all of them are
-   force-removed without prompting. Separately, a selected branch whose
+   worktree removed nor the branch deleted. `--force` drives this prompt and
+   nothing else: interactively it pre-selects every entry (each can still be
+   unchecked), and under `--yes` it force-removes them all without prompting.
+   `--yes` on its own — including via `--json` — skips them, so a
+   non-interactive run never destroys uncommitted work. Separately, a selected branch whose
    commits are unreachable from any merge target is force-deleted
    automatically, with an informational line rather than a prompt.
 
