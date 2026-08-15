@@ -15,8 +15,24 @@ use crate::branches::{
 };
 use crate::config::Config;
 use crate::git::{Git, Worktree};
+use crate::report::{
+    BranchReason, ItemStatus, LocalBranch, PulledBranch, RemoteBranch, RemoteFetch, RemoteReport,
+    Report, WorktreeEntry, WorktreeKind, path_string,
+};
 use crate::ui::Ui;
 use crate::worktrees::find_orphan_worktrees;
+
+/// Report a failed operation to both the user and the JSON report.
+fn fail(ui: &Ui, report: &mut Report, action: &str, target: &str, err: &anyhow::Error) {
+    ui.report_failure(action, target, err);
+    report.push_error(action, target, err);
+}
+
+/// Emit a warning to both the user and the JSON report.
+fn warn(ui: &Ui, report: &mut Report, message: &str) {
+    ui.warning(message);
+    report.push_warning(message);
+}
 
 /// Return a display-friendly path with `$HOME` replaced by `~`.
 fn tilde_path(abs: &Path) -> String {
@@ -55,7 +71,12 @@ pub struct CleanerOptions {
 }
 
 /// Run the full clean-up workflow.
-pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result<()> {
+///
+/// Returns a structured [`Report`] of everything that was detected and done;
+/// text mode discards it, `--json` serializes it to stdout.
+pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result<Report> {
+    let mut report = Report::new(opts.dry_run, opts.effort);
+
     // Read protection and ignore rules once; every detection pass shares them.
     let filter = Filter::load(git, config)?;
 
@@ -65,6 +86,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
     // detection is only trustworthy when remote-tracking refs are up to date.
     let mut fetch_succeeded = false;
 
+    report.fetch.skipped = opts.no_fetch;
     if !opts.no_fetch {
         let remotes = effective_remotes(git, config)?;
         if !remotes.is_empty() {
@@ -75,6 +97,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             ui.bullet_list(&remotes);
             if opts.dry_run {
                 ui.dry_run("Skipping remote update.");
+                for remote in &remotes {
+                    report.fetch.remotes.push(RemoteFetch {
+                        name: remote.clone(),
+                        status: ItemStatus::DryRun,
+                    });
+                }
             } else {
                 let mut failed: Vec<String> = Vec::new();
                 let mut succeeded = 0usize;
@@ -86,19 +114,31 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         Ok(()) => {
                             succeeded += 1;
                             ui.success(&format!("{} updated.", console::style(remote).cyan()));
+                            report.fetch.remotes.push(RemoteFetch {
+                                name: remote.clone(),
+                                status: ItemStatus::Updated,
+                            });
                         }
                         Err(e) => {
-                            ui.report_failure("fetch from", remote, &e);
+                            fail(ui, &mut report, "fetch from", remote, &e);
                             failed.push(remote.clone());
+                            report.fetch.remotes.push(RemoteFetch {
+                                name: remote.clone(),
+                                status: ItemStatus::Failed,
+                            });
                         }
                     }
                 }
                 if !failed.is_empty() {
-                    ui.warning(&format!(
-                        "Continuing without {} remote(s); detection results for {} may be stale.",
-                        failed.len(),
-                        failed.join(", ")
-                    ));
+                    warn(
+                        ui,
+                        &mut report,
+                        &format!(
+                            "Continuing without {} remote(s); detection results for {} may be stale.",
+                            failed.len(),
+                            failed.join(", ")
+                        ),
+                    );
                 } else if succeeded > 0 {
                     fetch_succeeded = true;
                     ui.success("Remotes updated.");
@@ -109,6 +149,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
     // ── 2. Pull / fast-forward target branches ─────────────────────
 
+    report.pull.skipped = opts.no_pull;
     if !opts.no_pull {
         let targets = resolve_merge_targets(git, &filter)?;
         if !targets.is_empty() {
@@ -145,6 +186,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         ui.dry_run(&format!(
                             "Would pull '{branch}' from {remote}/{upstream_branch}."
                         ));
+                        report.pull.branches.push(PulledBranch {
+                            branch: branch.clone(),
+                            remote: remote.clone(),
+                            upstream: upstream_branch.clone(),
+                            status: ItemStatus::DryRun,
+                        });
                         continue;
                     }
 
@@ -161,14 +208,22 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         }
                     });
 
-                    match result {
+                    let status = match result {
                         Ok(()) => {
-                            ui.success(&format!("{} updated.", console::style(&branch).cyan()))
+                            ui.success(&format!("{} updated.", console::style(&branch).cyan()));
+                            ItemStatus::Updated
                         }
                         Err(e) => {
-                            ui.report_failure("pull", branch, &e);
+                            fail(ui, &mut report, "pull", branch, &e);
+                            ItemStatus::Failed
                         }
-                    }
+                    };
+                    report.pull.branches.push(PulledBranch {
+                        branch: branch.clone(),
+                        remote: remote.clone(),
+                        upstream: upstream_branch.clone(),
+                        status,
+                    });
                 }
             }
         }
@@ -182,6 +237,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
     // worktrees are presented in a single unified multiselect so the
     // user confirms everything in one pass.
 
+    report.local.skipped = opts.remote_only;
     if !opts.remote_only {
         let merged = ui.spinner("Scanning local branches…", || {
             find_merged_local(git, &filter, opts.effort)
@@ -189,7 +245,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         // Surfaced after the spinner: printing inside it would corrupt the
         // spinner's own line.
         for warning in &merged.warnings {
-            ui.warning(warning);
+            warn(ui, &mut report, warning);
         }
         let merged = merged.candidates;
 
@@ -202,13 +258,20 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 find_gone_local(git, &filter, &merged)
             })?;
             if !gone.is_empty() && !fetch_succeeded {
-                ui.warning("Remotes were not fetched; deleted-upstream detection may be stale.");
+                warn(
+                    ui,
+                    &mut report,
+                    "Remotes were not fetched; deleted-upstream detection may be stale.",
+                );
             }
             gone
         } else {
             Vec::new()
         };
         let gone_set: HashSet<String> = gone.iter().cloned().collect();
+
+        report.local.merged = merged.clone();
+        report.local.gone = gone.clone();
 
         // Everything the user may act on, in display order: content-merged
         // branches first, deleted-upstream ones after.
@@ -239,16 +302,33 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     && wt.is_locked
                 {
                     ui.muted(&format_locked_skip_message(wt));
+                    report.local.worktrees.push(WorktreeEntry {
+                        path: path_string(&wt.path),
+                        branch: wt.branch.clone(),
+                        kind: WorktreeKind::Branch,
+                        status: ItemStatus::Locked,
+                    });
                 }
             }
             for wt in &orphan_locked {
                 ui.muted(&format_locked_skip_message(wt));
+                report.local.worktrees.push(WorktreeEntry {
+                    path: path_string(&wt.path),
+                    branch: wt.branch.clone(),
+                    kind: WorktreeKind::Orphan,
+                    status: ItemStatus::Locked,
+                });
             }
         }
 
         let has_merged = !merged.is_empty();
         let has_gone = !gone.is_empty();
         let has_orphans = !orphan_unlocked.is_empty();
+
+        // Outcome per candidate branch, filled in as the selections are
+        // processed; anything left out stays `Skipped`.
+        let mut branch_status: HashMap<String, ItemStatus> = HashMap::new();
+        let mut selected_branches: HashSet<String> = HashSet::new();
 
         if !has_merged && !has_gone && !has_orphans {
             ui.muted("No merged local branches to delete.");
@@ -343,6 +423,11 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 ui.multi_select(&prompt, &values, &labels, &defaults, &hints)?
             };
 
+            selected_branches = selected
+                .iter()
+                .filter_map(|value| value.strip_prefix("branch:").map(str::to_string))
+                .collect();
+
             // --- Detect worktrees that would fail a plain removal ---
             //
             // For each selected merged branch whose worktree is unlocked,
@@ -355,10 +440,14 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 match resolve_merge_targets(git, &filter) {
                     Ok(targets) => targets,
                     Err(e) => {
-                        ui.warning(&format!(
-                            "Could not resolve merge targets, \
-                             treating worktree branches as unmerged: {e}"
-                        ));
+                        warn(
+                            ui,
+                            &mut report,
+                            &format!(
+                                "Could not resolve merge targets, \
+                                 treating worktree branches as unmerged: {e}"
+                            ),
+                        );
                         Vec::new()
                     }
                 }
@@ -388,10 +477,11 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 let dirty = match git.worktree_dirty(&wt.path) {
                     Ok(v) => v,
                     Err(e) => {
-                        ui.warning(&format!(
-                            "Could not check status of '{}': {e}",
-                            tilde_path(&wt.path)
-                        ));
+                        warn(
+                            ui,
+                            &mut report,
+                            &format!("Could not check status of '{}': {e}", tilde_path(&wt.path)),
+                        );
                         false
                     }
                 };
@@ -402,9 +492,13 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             // Assume unmerged: that only means the worktree is
                             // surfaced for explicit confirmation rather than
                             // silently force-removed.
-                            ui.warning(&format!(
-                                "Could not check whether '{branch}' has unmerged commits: {e}"
-                            ));
+                            warn(
+                                ui,
+                                &mut report,
+                                &format!(
+                                    "Could not check whether '{branch}' has unmerged commits: {e}"
+                                ),
+                            );
                             true
                         }
                     }
@@ -482,11 +576,22 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     } else {
                         let wt = &wt_map[branch];
                         skip_set.insert(branch.clone());
-                        ui.warning(&format!(
-                            "Skipping '{}' ({}); worktree and branch left untouched.",
-                            console::style(branch).yellow(),
-                            tilde_path(&wt.path),
-                        ));
+                        branch_status.insert(branch.clone(), ItemStatus::Skipped);
+                        report.local.worktrees.push(WorktreeEntry {
+                            path: path_string(&wt.path),
+                            branch: Some(branch.clone()),
+                            kind: WorktreeKind::Branch,
+                            status: ItemStatus::Skipped,
+                        });
+                        warn(
+                            ui,
+                            &mut report,
+                            &format!(
+                                "Skipping '{}' ({}); worktree and branch left untouched.",
+                                console::style(branch).yellow(),
+                                tilde_path(&wt.path),
+                            ),
+                        );
                     }
                 }
             }
@@ -519,6 +624,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             if opts.use_worktrunk {
                                 wt_handled_branches.insert(branch.clone());
                             }
+                            report.local.worktrees.push(WorktreeEntry {
+                                path: path_string(&wt.path),
+                                branch: Some(branch.clone()),
+                                kind: WorktreeKind::Branch,
+                                status: ItemStatus::DryRun,
+                            });
                         } else {
                             let result = ui.spinner(
                                 &format!("Removing worktree {}…", tilde_path(&wt.path)),
@@ -532,7 +643,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                     )
                                 },
                             );
-                            match result {
+                            let status = match result {
                                 Ok(()) => {
                                     wt_removed += 1;
                                     if opts.use_worktrunk {
@@ -542,11 +653,19 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                         "{} removed.",
                                         console::style(tilde_path(&wt.path)).cyan(),
                                     ));
+                                    ItemStatus::Removed
                                 }
                                 Err(e) => {
-                                    ui.report_failure("remove", &tilde_path(&wt.path), &e);
+                                    fail(ui, &mut report, "remove", &tilde_path(&wt.path), &e);
+                                    ItemStatus::Failed
                                 }
-                            }
+                            };
+                            report.local.worktrees.push(WorktreeEntry {
+                                path: path_string(&wt.path),
+                                branch: Some(branch.clone()),
+                                kind: WorktreeKind::Branch,
+                                status,
+                            });
                         }
                     }
                 }
@@ -559,25 +678,40 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                     if opts.dry_run {
                         ui.dry_run(&format!("Would remove worktree '{}'.", wt.path.display()));
+                        report.local.worktrees.push(WorktreeEntry {
+                            path: path_string(&wt.path),
+                            branch: wt.branch.clone(),
+                            kind: WorktreeKind::Orphan,
+                            status: ItemStatus::DryRun,
+                        });
                     } else {
                         let result = ui.spinner(
                             &format!("Removing worktree {}…", tilde_path(&wt.path)),
                             || remove_worktree(git, wt, opts.use_worktrunk, true, false),
                         );
-                        match result {
+                        let status = match result {
                             Ok(()) => {
                                 wt_removed += 1;
                                 ui.success(&format!(
                                     "{} removed.",
                                     console::style(tilde_path(&wt.path)).cyan(),
                                 ));
+                                ItemStatus::Removed
                             }
                             Err(e) => {
-                                ui.report_failure("remove", &tilde_path(&wt.path), &e);
+                                fail(ui, &mut report, "remove", &tilde_path(&wt.path), &e);
+                                ItemStatus::Failed
                             }
-                        }
+                        };
+                        report.local.worktrees.push(WorktreeEntry {
+                            path: path_string(&wt.path),
+                            branch: wt.branch.clone(),
+                            kind: WorktreeKind::Orphan,
+                            status,
+                        });
                     }
                 }
+                report.summary.worktrees_removed = wt_removed;
                 if !opts.dry_run && wt_removed > 0 {
                     ui.summary(wt_removed, "worktree", "worktrees", "removed");
                 }
@@ -603,6 +737,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 }
                 if opts.dry_run {
                     ui.dry_run(&format!("Would delete local branch '{branch}'."));
+                    branch_status.insert(branch.clone(), ItemStatus::DryRun);
                     continue;
                 }
                 if wt_handled_branches.contains(branch) {
@@ -613,6 +748,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     match git.branch_exists(branch) {
                         Ok(false) => {
                             total_deleted += 1;
+                            branch_status.insert(branch.clone(), ItemStatus::Deleted);
                             continue;
                         }
                         Ok(true) => {
@@ -624,22 +760,31 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             // the -D can succeed.
                             let _ = git.worktree_prune();
                             match git.branch_delete(branch) {
-                                Ok(()) => total_deleted += 1,
+                                Ok(()) => {
+                                    total_deleted += 1;
+                                    branch_status.insert(branch.clone(), ItemStatus::Deleted);
+                                }
                                 Err(e) => {
-                                    ui.report_failure("delete", branch, &e);
+                                    fail(ui, &mut report, "delete", branch, &e);
+                                    branch_status.insert(branch.clone(), ItemStatus::Failed);
                                 }
                             }
                         }
                         Err(e) => {
-                            ui.report_failure("verify the existence of", branch, &e);
+                            fail(ui, &mut report, "verify the existence of", branch, &e);
+                            branch_status.insert(branch.clone(), ItemStatus::Failed);
                         }
                     }
                     continue;
                 }
                 match git.branch_delete(branch) {
-                    Ok(()) => total_deleted += 1,
+                    Ok(()) => {
+                        total_deleted += 1;
+                        branch_status.insert(branch.clone(), ItemStatus::Deleted);
+                    }
                     Err(e) => {
-                        ui.report_failure("delete", branch, &e);
+                        fail(ui, &mut report, "delete", branch, &e);
+                        branch_status.insert(branch.clone(), ItemStatus::Failed);
                     }
                 }
             }
@@ -647,10 +792,30 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 ui.summary(total_deleted, "local branch", "local branches", "deleted");
             }
         }
+
+        // Record every candidate, selected or not, with its final outcome.
+        for branch in &candidates {
+            report.local.branches.push(LocalBranch {
+                branch: branch.clone(),
+                reason: if gone_set.contains(branch) {
+                    BranchReason::Gone
+                } else {
+                    BranchReason::Merged
+                },
+                selected: selected_branches.contains(branch),
+                status: branch_status
+                    .get(branch)
+                    .copied()
+                    .unwrap_or(ItemStatus::Skipped),
+                worktree: wt_map.get(branch).map(|wt| path_string(&wt.path)),
+            });
+        }
+        report.summary.local_branches_deleted = total_deleted;
     }
 
     // ── 4. Remote branches ───────────────────────────────────────────
 
+    report.remotes_skipped = opts.local_only;
     if !opts.local_only {
         let remotes = effective_remotes(git, config)?;
 
@@ -661,6 +826,11 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
             if merged.is_empty() {
                 ui.muted(&format!("No merged remote branches on '{remote}'."));
+                report.remotes.push(RemoteReport {
+                    remote: remote.clone(),
+                    merged: Vec::new(),
+                    branches: Vec::new(),
+                });
                 continue;
             }
 
@@ -683,22 +853,40 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     &[],
                 )?
             };
+            let selected: HashSet<&String> = to_delete.iter().collect();
 
             let mut remote_deleted = 0usize;
-            for branch in &to_delete {
-                if opts.dry_run {
+            let mut entries: Vec<RemoteBranch> = Vec::new();
+            for branch in &merged {
+                if !selected.contains(branch) {
+                    entries.push(RemoteBranch {
+                        branch: branch.clone(),
+                        status: ItemStatus::Skipped,
+                    });
+                    continue;
+                }
+                let status = if opts.dry_run {
                     ui.dry_run(&format!("Would delete '{remote}/{branch}'."));
+                    ItemStatus::DryRun
                 } else {
                     let result = ui.spinner(&format!("Deleting {remote}/{branch}…"), || {
                         git.remote_branch_delete(remote, branch)
                     });
                     match result {
-                        Ok(()) => remote_deleted += 1,
+                        Ok(()) => {
+                            remote_deleted += 1;
+                            ItemStatus::Deleted
+                        }
                         Err(e) => {
-                            ui.report_failure("delete", &format!("{remote}/{branch}"), &e);
+                            fail(ui, &mut report, "delete", &format!("{remote}/{branch}"), &e);
+                            ItemStatus::Failed
                         }
                     }
-                }
+                };
+                entries.push(RemoteBranch {
+                    branch: branch.clone(),
+                    status,
+                });
             }
             if !opts.dry_run && remote_deleted > 0 {
                 ui.summary(
@@ -708,6 +896,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     "deleted",
                 );
             }
+            report.summary.remote_branches_deleted += remote_deleted;
+            report.remotes.push(RemoteReport {
+                remote: remote.clone(),
+                merged,
+                branches: entries,
+            });
         }
     }
 
@@ -720,7 +914,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         ui.success("Done.");
     }
 
-    Ok(())
+    Ok(report)
 }
 
 /// Determine which remotes to operate on.
@@ -2146,6 +2340,293 @@ mod tests {
             git.branch_exists("feature/dry")?,
             "dry run must not delete the branch"
         );
+        Ok(())
+    }
+
+    // ── Report contents ──────────────────────────────────────────────
+
+    /// Push a branch that is already merged into `main` to the local remote,
+    /// so the remote-branch phase has something to delete.
+    fn push_merged_branch(work_path: &std::path::Path, branch: &str) -> Result<()> {
+        Command::new("git")
+            .args(["checkout", "-b", branch])
+            .current_dir(work_path)
+            .output()?;
+        Command::new("git")
+            .args(["push", "-u", "origin", branch])
+            .current_dir(work_path)
+            .output()?;
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(work_path)
+            .output()?;
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_deleted_local_branches() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
+
+        let report = run(
+            &git,
+            &default_config(),
+            &Ui::new(),
+            &opts_yes_skip_network(),
+        )?;
+
+        assert_eq!(report.version, Report::VERSION);
+        assert!(!report.dry_run);
+        assert_eq!(report.effort, Effort::Standard);
+        assert!(report.fetch.skipped);
+        assert!(report.pull.skipped);
+        assert!(!report.local.skipped);
+        assert_eq!(report.local.merged, vec!["feature/done".to_string()]);
+        assert!(report.local.gone.is_empty());
+
+        let branch = &report.local.branches[0];
+        assert_eq!(branch.branch, "feature/done");
+        assert_eq!(branch.reason, BranchReason::Merged);
+        assert!(branch.selected);
+        assert_eq!(branch.status, ItemStatus::Deleted);
+        assert!(branch.worktree.is_none());
+
+        assert_eq!(report.summary.local_branches_deleted, 1);
+        assert_eq!(report.summary.errors, 0);
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_dry_run_candidates_without_deleting() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
+        let mut opts = opts_yes_skip_network();
+        opts.dry_run = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(report.dry_run);
+        assert_eq!(report.local.branches[0].status, ItemStatus::DryRun);
+        assert_eq!(report.summary.local_branches_deleted, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_a_worktree_removal() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
+
+        let report = run(
+            &git,
+            &default_config(),
+            &Ui::new(),
+            &opts_yes_skip_network(),
+        )?;
+
+        let entry = report
+            .local
+            .worktrees
+            .iter()
+            .find(|wt| wt.path.ends_with("worktree-feature"))
+            .expect("the branch worktree must be reported");
+        assert_eq!(entry.branch.as_deref(), Some("feature/wt"));
+        assert_eq!(entry.kind, WorktreeKind::Branch);
+        assert_eq!(entry.status, ItemStatus::Removed);
+        assert_eq!(report.summary.worktrees_removed, 1);
+
+        let reported = report
+            .local
+            .branches
+            .iter()
+            .find(|b| b.branch == "feature/wt")
+            .expect("the branch must be reported");
+        assert!(
+            reported.worktree.is_some(),
+            "a branch with a worktree must expose its path"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_a_locked_worktree_as_skipped() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_locked_worktree()?;
+
+        let report = run(
+            &git,
+            &default_config(),
+            &Ui::new(),
+            &opts_yes_skip_network(),
+        )?;
+
+        let entry = report
+            .local
+            .worktrees
+            .iter()
+            .find(|wt| wt.path.ends_with("worktree-locked"))
+            .expect("the locked worktree must be reported");
+        assert_eq!(entry.branch.as_deref(), Some("feature/locked-wt"));
+        assert_eq!(entry.status, ItemStatus::Locked);
+        assert_eq!(report.summary.worktrees_removed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_a_failed_fetch() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
+        Command::new("git")
+            .args(["remote", "add", "broken", "/this/path/does/not/exist.git"])
+            .current_dir(dir.path())
+            .output()?;
+
+        let config = Config {
+            remotes: Some(vec!["broken".to_string()]),
+            ..default_config()
+        };
+        let mut opts = opts_yes_skip_network();
+        opts.no_fetch = false;
+        opts.local_only = true;
+
+        let report = run(&git, &config, &Ui::new(), &opts)?;
+
+        assert!(!report.fetch.skipped);
+        assert_eq!(report.fetch.remotes[0].name, "broken");
+        assert_eq!(report.fetch.remotes[0].status, ItemStatus::Failed);
+        assert_eq!(report.errors[0].action, "fetch from");
+        assert_eq!(report.errors[0].target, "broken");
+        assert_eq!(report.summary.errors, 1);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Continuing without 1 remote(s)")),
+            "the staleness warning must reach the report: {:?}",
+            report.warnings
+        );
+        assert!(report.remotes_skipped, "--local-only must be reported");
+        assert!(report.remotes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_deleted_remote_branches() -> Result<()> {
+        let (_dir, work_path, _bare_path) = crate::test_helpers::init_repo_with_local_remote()?;
+        push_merged_branch(&work_path, "feature/remote-done")?;
+
+        let git = Git::with_workdir(false, &work_path);
+        let mut opts = opts_yes_skip_network();
+        opts.remote_only = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(report.local.skipped);
+        assert!(!report.remotes_skipped);
+        let remote = &report.remotes[0];
+        assert_eq!(remote.remote, "origin");
+        assert_eq!(remote.merged, vec!["feature/remote-done".to_string()]);
+        assert_eq!(remote.branches[0].branch, "feature/remote-done");
+        assert_eq!(remote.branches[0].status, ItemStatus::Deleted);
+        assert_eq!(report.summary.remote_branches_deleted, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_remote_branches_left_alone_in_dry_run() -> Result<()> {
+        let (_dir, work_path, _bare_path) = crate::test_helpers::init_repo_with_local_remote()?;
+        push_merged_branch(&work_path, "feature/remote-dry")?;
+
+        let git = Git::with_workdir(false, &work_path);
+        let mut opts = opts_yes_skip_network();
+        opts.remote_only = true;
+        opts.dry_run = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert_eq!(report.remotes[0].branches[0].status, ItemStatus::DryRun);
+        assert_eq!(report.summary.remote_branches_deleted, 0);
+        assert!(
+            git.merged_remote_branches("main", "origin")?
+                .contains(&"feature/remote-dry".to_string()),
+            "dry run must not delete the remote branch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_a_remote_without_merged_branches() -> Result<()> {
+        let (_dir, work_path, _bare_path) = crate::test_helpers::init_repo_with_local_remote()?;
+
+        let git = Git::with_workdir(false, &work_path);
+        let mut opts = opts_yes_skip_network();
+        opts.remote_only = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert_eq!(report.remotes[0].remote, "origin");
+        assert!(report.remotes[0].merged.is_empty());
+        assert!(report.remotes[0].branches.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_a_failed_remote_branch_deletion() -> Result<()> {
+        let (_dir, work_path, _bare_path) = crate::test_helpers::init_repo_with_local_remote()?;
+        push_merged_branch(&work_path, "feature/remote-fail")?;
+
+        // Detection reads remote-tracking refs, which stay valid; only the
+        // deletion (a push) reaches the remote, and now cannot find it.
+        Command::new("git")
+            .args([
+                "remote",
+                "set-url",
+                "origin",
+                "/this/path/does/not/exist.git",
+            ])
+            .current_dir(&work_path)
+            .output()?;
+
+        let git = Git::with_workdir(false, &work_path);
+        let mut opts = opts_yes_skip_network();
+        opts.remote_only = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert_eq!(report.remotes[0].branches[0].status, ItemStatus::Failed);
+        assert_eq!(report.summary.remote_branches_deleted, 0);
+        assert_eq!(report.errors[0].action, "delete");
+        assert_eq!(report.errors[0].target, "origin/feature/remote-fail");
+        assert_eq!(report.summary.errors, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn run_reports_a_failed_pull() -> Result<()> {
+        let (dir, work_path, bare_path) = crate::test_helpers::init_repo_with_local_remote()?;
+
+        // Diverge: the remote gains a commit while `main` gains a different
+        // one locally, so the fast-forward-only pull must fail.
+        crate::test_helpers::advance_remote(&bare_path, dir.path())?;
+        std::fs::write(work_path.join("local.txt"), "local")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&work_path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "local divergence"])
+            .current_dir(&work_path)
+            .output()?;
+
+        let git = Git::with_workdir(false, &work_path);
+        let mut opts = opts_yes_skip_network();
+        opts.no_pull = false;
+        opts.local_only = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(!report.pull.skipped);
+        let pulled = &report.pull.branches[0];
+        assert_eq!(pulled.branch, "main");
+        assert_eq!(pulled.remote, "origin");
+        assert_eq!(pulled.status, ItemStatus::Failed);
+        assert_eq!(report.errors[0].action, "pull");
+        assert_eq!(report.errors[0].target, "main");
         Ok(())
     }
 }

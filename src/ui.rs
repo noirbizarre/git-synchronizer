@@ -14,6 +14,9 @@ pub struct Ui {
     heading_style: Style,
     muted_style: Style,
     bold_style: Style,
+    /// Suppress every output method (used by `--json`, where the machine
+    /// readable document is the only output).
+    quiet: bool,
 }
 
 impl Default for Ui {
@@ -30,7 +33,33 @@ impl Ui {
             heading_style: Style::new().cyan().bold(),
             muted_style: Style::new().dim(),
             bold_style: Style::new().bold(),
+            quiet: false,
         }
+    }
+
+    /// Create a handle that prints nothing.
+    ///
+    /// Used by `--json`, where human-readable output would be noise. Prompt
+    /// methods return an error instead: JSON mode implies `--yes`, so they are
+    /// unreachable, and silently answering on the user's behalf would be worse
+    /// than failing loudly.
+    pub fn quiet() -> Self {
+        Self {
+            quiet: true,
+            ..Self::new()
+        }
+    }
+
+    /// Write a line unless muted. Every output method funnels through this.
+    fn write_line(&self, line: &str) {
+        if self.quiet {
+            return;
+        }
+        let _ = self.term.write_line(line);
+    }
+
+    fn prompt_unavailable<T>(&self) -> anyhow::Result<T> {
+        anyhow::bail!("cannot prompt in --json mode")
     }
 
     // Output methods below are best-effort: I/O errors (e.g. broken pipe)
@@ -40,9 +69,7 @@ impl Ui {
 
     /// Print a section heading.
     pub fn heading(&self, text: &str) {
-        let _ = self
-            .term
-            .write_line(&format!("\n{}", self.heading_style.apply_to(text)));
+        self.write_line(&format!("\n{}", self.heading_style.apply_to(text)));
     }
 
     /// Print a success message with a green checkmark prefix.
@@ -50,27 +77,21 @@ impl Ui {
     /// The text is printed as-is (not re-colored), so callers can embed
     /// pre-styled fragments via `console::style()`.
     pub fn success(&self, text: &str) {
-        let _ = self
-            .term
-            .write_line(&format!("{} {text}", console::style("✔").green()));
+        self.write_line(&format!("{} {text}", console::style("✔").green()));
     }
 
     /// Print a warning with a yellow ⚠ prefix.
     ///
     /// The text is printed as-is, so callers can embed pre-styled fragments.
     pub fn warning(&self, text: &str) {
-        let _ = self
-            .term
-            .write_line(&format!("{} {text}", console::style("⚠").yellow()));
+        self.write_line(&format!("{} {text}", console::style("⚠").yellow()));
     }
 
     /// Print an error with a red ✘ prefix.
     ///
     /// The text is printed as-is, so callers can embed pre-styled fragments.
     pub fn error(&self, text: &str) {
-        let _ = self
-            .term
-            .write_line(&format!("{} {text}", console::style("✘").red()));
+        self.write_line(&format!("{} {text}", console::style("✘").red()));
     }
 
     /// Render a failed git operation with a friendly classification.
@@ -118,22 +139,18 @@ impl Ui {
 
     /// Print muted/dim text.
     pub fn muted(&self, text: &str) {
-        let _ = self
-            .term
-            .write_line(&self.muted_style.apply_to(text).to_string());
+        self.write_line(&self.muted_style.apply_to(text).to_string());
     }
 
     /// Print a blank line.
     pub fn blank(&self) {
-        let _ = self.term.write_line("");
+        self.write_line("");
     }
 
     /// Print a list of items with a bullet prefix.
     pub fn bullet_list(&self, items: &[String]) {
         for item in items {
-            let _ = self
-                .term
-                .write_line(&format!("  {} {}", self.muted_style.apply_to("-"), item));
+            self.write_line(&format!("  {} {}", self.muted_style.apply_to("-"), item));
         }
     }
 
@@ -151,7 +168,7 @@ impl Ui {
     /// Owns both the indentation and the label styling so callers never need
     /// to reach for the style presets themselves.
     pub fn field(&self, label: &str, value: &str) {
-        let _ = self.term.write_line(&format!(
+        self.write_line(&format!(
             "  {} {}",
             self.bold_style.apply_to(format!("{label}:")),
             value
@@ -160,6 +177,9 @@ impl Ui {
 
     /// Ask for confirmation, pre-selecting `default`.
     pub fn confirm(&self, prompt: &str, default: bool) -> anyhow::Result<bool> {
+        if self.quiet {
+            return self.prompt_unavailable();
+        }
         Ok(Confirm::new(prompt).selected(default).run()?)
     }
 
@@ -179,6 +199,9 @@ impl Ui {
         defaults: &[bool],
         hints: &[String],
     ) -> anyhow::Result<Vec<String>> {
+        if self.quiet {
+            return self.prompt_unavailable();
+        }
         let mut ms = MultiSelect::new(prompt).min(0);
         for (i, val) in values.iter().enumerate() {
             let label = labels.get(i).unwrap_or(val);
@@ -195,6 +218,9 @@ impl Ui {
 
     /// Ask for a text input.
     pub fn input(&self, prompt: &str, default: &str) -> anyhow::Result<String> {
+        if self.quiet {
+            return self.prompt_unavailable();
+        }
         Ok(Input::new(prompt).default_value(default).run()?)
     }
 
@@ -213,7 +239,7 @@ impl Ui {
         F: FnOnce() -> T + Send,
         T: Send,
     {
-        if !self.term.is_term() {
+        if self.quiet || !self.term.is_term() {
             return op();
         }
         Spinner::new(title.to_string())
@@ -348,5 +374,41 @@ mod tests {
         });
         assert!(ran.load(Ordering::SeqCst));
         assert_eq!(out, 42);
+    }
+
+    #[test]
+    fn quiet_output_methods_do_not_panic() {
+        let ui = Ui::quiet();
+        ui.heading("heading");
+        ui.success("success");
+        ui.warning("warning");
+        ui.error("error");
+        ui.muted("muted");
+        ui.blank();
+        ui.bullet_list(&["one".to_string()]);
+        ui.dry_run("would do something");
+        ui.field("label", "value");
+        ui.summary(2, "branch", "branches", "deleted");
+        assert_eq!(
+            ui.report_failure("pull", "feature", &anyhow::anyhow!("boom")),
+            GitErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn quiet_spinner_still_runs_the_operation() {
+        let ui = Ui::quiet();
+        assert_eq!(ui.spinner("work", || 7), 7);
+    }
+
+    #[test]
+    fn quiet_prompts_fail() {
+        let ui = Ui::quiet();
+        assert!(ui.confirm("ok?", true).is_err());
+        assert!(ui.input("name", "default").is_err());
+        assert!(
+            ui.multi_select("pick", &["a".to_string()], &[], &[], &[])
+                .is_err()
+        );
     }
 }

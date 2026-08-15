@@ -1537,3 +1537,181 @@ fn config_list_renders_empty_sections_as_none() {
         .stderr(predicate::str::contains("ignore: wip/*"))
         .stderr(predicate::str::contains("branch ignored: (none)"));
 }
+
+// ── JSON output ──────────────────────────────────────────────────────
+
+/// Run the binary and parse its stdout as the single JSON document it must be.
+fn json_output(dir: &TempDir, args: &[&str]) -> serde_json::Value {
+    let output = Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(args)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "piped output must be a single compact JSON line, got: {stdout}"
+    );
+    serde_json::from_str(&stdout).expect("stdout must be valid JSON")
+}
+
+#[test]
+fn json_dry_run_reports_candidates_without_deleting() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    let doc = json_output(&dir, &["--json", "--dry-run", "--no-fetch"]);
+
+    assert_eq!(doc["version"], 1);
+    assert_eq!(doc["status"], "success");
+    assert_eq!(doc["dry_run"], true);
+    assert_eq!(doc["effort"], 2, "the default effort level is reported");
+    assert_eq!(doc["local"]["merged"][0], "feature/done");
+    assert_eq!(doc["local"]["branches"][0]["branch"], "feature/done");
+    assert_eq!(doc["local"]["branches"][0]["reason"], "merged");
+    assert_eq!(doc["local"]["branches"][0]["selected"], true);
+    assert_eq!(doc["local"]["branches"][0]["status"], "dry_run");
+    assert_eq!(doc["summary"]["local_branches_deleted"], 0);
+    assert_eq!(doc["errors"].as_array().unwrap().len(), 0);
+
+    // Nothing was touched.
+    let branches = git_branches(&dir);
+    assert!(branches.contains(&"feature/done".to_string()));
+}
+
+#[test]
+fn json_run_reports_deleted_branches() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    let doc = json_output(&dir, &["--json", "--no-fetch"]);
+
+    assert_eq!(doc["status"], "success");
+    assert_eq!(doc["dry_run"], false);
+    assert_eq!(doc["summary"]["local_branches_deleted"], 1);
+    assert_eq!(doc["local"]["branches"][0]["branch"], "feature/done");
+    assert_eq!(doc["local"]["branches"][0]["status"], "deleted");
+
+    let branches = git_branches(&dir);
+    assert!(!branches.contains(&"feature/done".to_string()));
+    assert!(branches.contains(&"feature/wip".to_string()));
+}
+
+#[test]
+fn json_implies_yes_without_prompting() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    // No `-y`: the run must still complete non-interactively.
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["--json", "--no-fetch"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    assert!(!git_branches(&dir).contains(&"feature/done".to_string()));
+}
+
+#[test]
+fn json_keeps_stdout_free_of_human_output() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    let output = Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["--json", "--dry-run", "--no-fetch"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.stderr.is_empty(),
+        "stderr must stay silent in JSON mode"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.starts_with('{') && stdout.trim_end().ends_with('}'));
+}
+
+#[test]
+fn json_reports_fatal_error_outside_a_repository() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["--json", "--no-fetch"])
+        .current_dir(dir.path())
+        .env("GIT_CEILING_DIRECTORIES", dir.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "a fatal error must exit non-zero");
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["status"], "error");
+    assert_eq!(doc["errors"][0]["kind"], "other");
+    assert!(
+        doc["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Not a git repository")
+    );
+}
+
+#[test]
+fn json_requires_an_existing_configuration() {
+    let dir = init_repo();
+    // No `[sync]` section: the wizard cannot run without a human.
+
+    let output = Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["--json", "--no-fetch"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["status"], "error");
+    assert!(
+        doc["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not configured")
+    );
+}
+
+#[test]
+fn config_list_json_reports_values() {
+    let dir = init_repo();
+    configure(&dir);
+
+    let doc = json_output(&dir, &["config", "list", "--json"]);
+
+    assert_eq!(doc["configured"], true);
+    assert_eq!(doc["protected"][0], "main");
+    assert_eq!(doc["ignore"].as_array().unwrap().len(), 0);
+    assert!(
+        doc["remotes"].is_null(),
+        "no configured remote means all remotes"
+    );
+    assert!(
+        doc["worktrunk"].is_null(),
+        "unset worktrunk means auto-detect"
+    );
+}
+
+#[test]
+fn config_list_json_reports_unconfigured_repository() {
+    let dir = init_repo();
+
+    let doc = json_output(&dir, &["config", "list", "--json"]);
+
+    assert_eq!(doc["configured"], false);
+    assert_eq!(doc["protected"].as_array().unwrap().len(), 0);
+}

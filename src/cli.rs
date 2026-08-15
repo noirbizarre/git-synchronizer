@@ -82,8 +82,28 @@ pub struct Cli {
     #[arg(long, overrides_with = "worktrunk")]
     pub no_worktrunk: bool,
 
+    /// Output a single JSON document to stdout (implies --yes)
+    ///
+    /// Human-readable logs keep going to stderr. The document is pretty-printed
+    /// on a terminal and compact when piped or redirected.
+    ///
+    /// Global so it can be given before or after a subcommand
+    /// (`git sync config list --json`).
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    /// Whether prompts should be skipped.
+    ///
+    /// JSON output implies `--yes`: prompts would corrupt the document and
+    /// hang non-interactive callers.
+    pub fn effective_yes(&self) -> bool {
+        self.yes || self.json
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -199,7 +219,24 @@ mod tests {
         assert!(!cli.worktrunk);
         assert!(!cli.no_worktrunk);
         assert!(cli.effort.is_none());
+        assert!(!cli.json);
+        assert!(!cli.effective_yes());
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_json_flag_implies_yes() {
+        let cli = Cli::parse_from(["git-sync", "--json"]);
+        assert!(cli.json);
+        assert!(!cli.yes);
+        assert!(cli.effective_yes());
+    }
+
+    #[test]
+    fn cli_effective_yes_follows_yes_flag() {
+        let cli = Cli::parse_from(["git-sync", "-y"]);
+        assert!(!cli.json);
+        assert!(cli.effective_yes());
     }
 
     #[test]
