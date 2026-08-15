@@ -233,7 +233,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_load_returns_none_when_not_configured() -> Result<()> {
+    fn config_load_returns_none_when_not_configured() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
         let config = Config::load(&git)?;
         assert!(config.is_none());
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_save_and_load_roundtrip() -> Result<()> {
+    fn config_save_and_load_roundtrip() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
@@ -260,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_save_without_remotes() -> Result<()> {
+    fn config_save_without_remotes() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_default() {
+    fn config_default() {
         let config = Config::default();
         assert_eq!(config.protected, vec!["main", "master"]);
         assert!(config.ignore.is_empty());
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_ignore_roundtrip() -> Result<()> {
+    fn config_ignore_roundtrip() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_ignore_defaults_to_empty_when_key_absent() -> Result<()> {
+    fn config_ignore_defaults_to_empty_when_key_absent() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         Config {
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_save_clears_removed_ignore_patterns() -> Result<()> {
+    fn config_save_clears_removed_ignore_patterns() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         Config {
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_save_overwrites_previous() -> Result<()> {
+    fn config_save_overwrites_previous() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config1 = Config {
@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_worktrunk_roundtrip() -> Result<()> {
+    fn config_worktrunk_roundtrip() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Save with worktrunk enabled
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_or_setup_returns_existing_config() -> Result<()> {
+    fn load_or_setup_returns_existing_config() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config = Config {

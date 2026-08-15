@@ -810,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_deletes_merged_local_branches() -> Result<()> {
+    fn run_deletes_merged_local_branches() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_branches() -> Result<()> {
+    fn run_dry_run_preserves_branches() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -847,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_merged_branches() -> Result<()> {
+    fn run_no_merged_branches() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
         let config = default_config();
         let ui = Ui::new();
@@ -861,7 +861,7 @@ mod tests {
     /// reached (its URL points to a non-existent path). The fetch must
     /// fail, but the cleaner workflow must continue and return Ok.
     #[test]
-    fn test_run_continues_when_a_remote_fetch_fails() -> Result<()> {
+    fn run_continues_when_a_remote_fetch_fails() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Add a bogus remote whose URL cannot resolve. Fetching it will
@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_remote_only_skips_local_deletion() -> Result<()> {
+    fn run_remote_only_skips_local_deletion() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_local_only_skips_remote_deletion() -> Result<()> {
+    fn run_local_only_skips_remote_deletion() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -927,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_worktrees_skips_worktree_cleanup() -> Result<()> {
+    fn run_no_worktrees_skips_worktree_cleanup() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -955,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_keeps_gone_branch_without_delete_gone() -> Result<()> {
+    fn run_keeps_gone_branch_without_delete_gone() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let opts = opts_yes_with_fetch();
 
@@ -974,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_delete_gone_removes_branch_with_deleted_upstream() -> Result<()> {
+    fn run_delete_gone_removes_branch_with_deleted_upstream() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let mut opts = opts_yes_with_fetch();
         opts.delete_gone = true;
@@ -992,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_fetch_disables_gone_detection() -> Result<()> {
+    fn run_no_fetch_disables_gone_detection() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let mut opts = opts_yes_with_fetch();
         opts.no_fetch = true;
@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_gone_branch() -> Result<()> {
+    fn run_dry_run_preserves_gone_branch() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let mut opts = opts_yes_with_fetch();
         opts.delete_gone = true;
@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_delete_gone_removes_worktree_and_branch() -> Result<()> {
+    fn run_delete_gone_removes_worktree_and_branch() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let work = dir.path().join("work");
         let wt_path = dir.path().join("wt-gone");
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_remotes_uses_config() -> Result<()> {
+    fn effective_remotes_uses_config() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config_with = Config {
@@ -1067,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_with_worktree_for_merged_branch() -> Result<()> {
+    fn run_with_worktree_for_merged_branch() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1120,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_skips_locked_worktree() -> Result<()> {
+    fn run_skips_locked_worktree() -> Result<()> {
         let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_locked_worktree()?;
         let config = default_config();
         let ui = Ui::new();
@@ -1147,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_locked_skip_message_no_reason() {
+    fn format_locked_skip_message_no_reason() {
         let wt = Worktree {
             path: "/tmp/wt".to_string(),
             head: None,
@@ -1163,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_locked_skip_message_with_reason() {
+    fn format_locked_skip_message_with_reason() {
         let wt = Worktree {
             path: "/tmp/wt".to_string(),
             head: None,
@@ -1180,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_handles_orphan_worktrees() -> Result<()> {
+    fn run_handles_orphan_worktrees() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1237,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_removes_clean_orphan_worktree() -> Result<()> {
+    fn run_removes_clean_orphan_worktree() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1280,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_skips_locked_orphan_worktree() -> Result<()> {
+    fn run_skips_locked_orphan_worktree() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1347,7 +1347,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_tilde_path_replaces_home() {
+    fn tilde_path_replaces_home() {
         let home = std::env::var("HOME").expect("HOME must be set for this test");
         assert_eq!(
             tilde_path(&format!("{home}/projects/repo")),
@@ -1357,20 +1357,20 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_tilde_path_preserves_non_home_path() {
+    fn tilde_path_preserves_non_home_path() {
         assert_eq!(tilde_path("/tmp/some/path"), "/tmp/some/path");
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_tilde_path_exact_home() {
+    fn tilde_path_exact_home() {
         let home = std::env::var("HOME").expect("HOME must be set for this test");
         // Exact HOME path (no trailing slash) should become just "~"
         assert_eq!(tilde_path(&home), "~");
     }
 
     #[test]
-    fn test_run_removes_multiple_worktrees_with_merged_branches() -> Result<()> {
+    fn run_removes_multiple_worktrees_with_merged_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1436,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_worktrees() -> Result<()> {
+    fn run_dry_run_preserves_worktrees() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_unified_cleanup_branches_and_orphan_worktrees() -> Result<()> {
+    fn run_unified_cleanup_branches_and_orphan_worktrees() -> Result<()> {
         // This test verifies that merged branches (with worktrees) and orphan
         // worktrees are all cleaned up in a single unified pass (no separate
         // orphan worktree phase).
@@ -1591,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_worktrees_skips_orphan_cleanup() -> Result<()> {
+    fn run_no_worktrees_skips_orphan_cleanup() -> Result<()> {
         // When --no-worktrees is set, orphan worktrees should not be touched
         // even though they share the same phase as branch deletion.
         let (dir, _git) = crate::test_helpers::init_repo()?;
@@ -1638,7 +1638,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_orphan_worktrees() -> Result<()> {
+    fn run_dry_run_preserves_orphan_worktrees() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1683,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_force_removes_dirty_worktree_with_yes() -> Result<()> {
+    fn run_force_removes_dirty_worktree_with_yes() -> Result<()> {
         // With opts.yes, the force-confirmation prompt is auto-accepted, so a
         // merged branch whose worktree contains an untracked file is removed.
         let (dir, _git) = crate::test_helpers::init_repo()?;
@@ -1744,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_dirty_worktree_not_removed() -> Result<()> {
+    fn run_dry_run_dirty_worktree_not_removed() -> Result<()> {
         // With dry-run, even force-removal candidates are preserved
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
@@ -1804,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_unselected_dirty_worktree_skipped() -> Result<()> {
+    fn run_unselected_dirty_worktree_skipped() -> Result<()> {
         // When user says "no" to force-removing a dirty worktree,
         // the worktree and branch should be preserved
         let (dir, _git) = crate::test_helpers::init_repo()?;
@@ -1877,7 +1877,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_modified_file_in_merged_worktree() -> Result<()> {
+    fn run_modified_file_in_merged_worktree() -> Result<()> {
         // Test that a merged branch's worktree with a modified (not untracked)
         // file is detected as dirty and force-removed with opts.yes
         let (dir, _git) = crate::test_helpers::init_repo()?;
@@ -2005,7 +2005,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_auto_force_squash_merged_worktree_no_prompt() -> Result<()> {
+    fn run_auto_force_squash_merged_worktree_no_prompt() -> Result<()> {
         // A squash-merged branch is detected as merged by find_merged_local
         // but reported as having unmerged commits by branch_has_unmerged_commits.
         // With use_worktrunk=true and a clean worktree, the cleaner should
@@ -2041,7 +2041,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dirty_and_unmerged_goes_to_prompt_not_auto_force() -> Result<()> {
+    fn run_dirty_and_unmerged_goes_to_prompt_not_auto_force() -> Result<()> {
         // When a worktree is BOTH dirty and unmerged (squash-merged), the
         // dirty path wins: the entry must reach the second prompt rather
         // than being auto force-deleted. With opts.yes=true the prompt is
@@ -2083,7 +2083,7 @@ mod tests {
     // platform-independent.
     #[cfg(unix)]
     #[test]
-    fn test_run_worktrunk_deletes_branch_wt_leaves_behind() -> Result<()> {
+    fn run_worktrunk_deletes_branch_wt_leaves_behind() -> Result<()> {
         // Regression test: when worktrunk removes a worktree but leaves the
         // branch behind (because `wt`'s merge check is narrower than
         // git-sync's), git-sync must delete the surviving branch itself.
@@ -2177,7 +2177,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_run_dry_run_with_worktrunk_touches_nothing() -> Result<()> {
+    fn run_dry_run_with_worktrunk_touches_nothing() -> Result<()> {
         // Regression test: under worktrunk, branches recorded as
         // `wt_handled_branches` used to bypass the dry-run guard entirely and
         // were really passed to `git worktree prune` + `git branch -D`.

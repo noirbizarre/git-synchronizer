@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_protected_patterns_match() -> Result<()> {
+    fn protected_patterns_match() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local() -> Result<()> {
+    fn find_merged_local_returns_only_merged_unprotected_branches() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_gone_local() -> Result<()> {
+    fn find_gone_local_returns_branches_whose_upstream_was_deleted() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_gone_local_excludes_already_merged() -> Result<()> {
+    fn find_gone_local_excludes_already_merged() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_gone_local_excludes_current_and_protected() -> Result<()> {
+    fn find_gone_local_excludes_current_and_protected() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
 
         // Protected by pattern.
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_excludes_current_branch() -> Result<()> {
+    fn find_merged_local_excludes_current_branch() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_cherry_picked_branches() -> Result<()> {
+    fn find_merged_local_detects_cherry_picked_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_squash_merged_branches() -> Result<()> {
+    fn find_merged_local_detects_squash_merged_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_tree_match_branches() -> Result<()> {
+    fn find_merged_local_detects_tree_match_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_patch_id_branches() -> Result<()> {
+    fn find_merged_local_detects_patch_id_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_simulated_merge_branches() -> Result<()> {
+    fn find_merged_local_detects_simulated_merge_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_multi_commit_squash_via_patch_id() -> Result<()> {
+    fn find_merged_local_detects_multi_commit_squash_via_patch_id() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_merge_targets_with_globs() -> Result<()> {
+    fn resolve_merge_targets_with_globs() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_no_targets() -> Result<()> {
+    fn find_merged_local_no_targets() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         // Use a pattern that matches nothing
         let config = Config {
@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_respects_branch_protected() -> Result<()> {
+    fn find_merged_local_respects_branch_protected() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -819,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn test_branch_protected_serves_as_merge_target() -> Result<()> {
+    fn branch_protected_serves_as_merge_target() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         // Only use per-branch protection on "main" (no global patterns match anything)
         let config = Config {
@@ -853,7 +853,7 @@ mod tests {
     /// would find through cherry / tree / patch-id / simulated-merge probes.
     /// This test pins that behaviour so extending it is a deliberate change.
     #[test]
-    fn test_find_merged_remote_only_detects_ancestor_merges() -> Result<()> {
+    fn find_merged_remote_only_detects_ancestor_merges() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let origin = dir.path().join("origin.git");
         let work = dir.path().join("work");

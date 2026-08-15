@@ -57,7 +57,7 @@ mod tests {
     use std::process::Command as StdCommand;
 
     #[test]
-    fn test_find_worktrees_for_branches() -> Result<()> {
+    fn find_worktrees_for_branches_matches_linked_worktrees() -> Result<()> {
         let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
         let worktrees = find_worktrees_for_branches(&git, &["feature/wt".to_string()])?;
@@ -67,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_worktrees_for_branches_no_match() -> Result<()> {
+    fn find_worktrees_for_branches_no_match() -> Result<()> {
         let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
         let worktrees = find_worktrees_for_branches(&git, &["nonexistent".to_string()])?;
@@ -76,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_orphan_worktrees_none_initially() -> Result<()> {
+    fn find_orphan_worktrees_none_initially() -> Result<()> {
         let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
         // All worktrees have existing branches, so no orphans
@@ -86,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_orphan_worktrees_detects_orphan() -> Result<()> {
+    fn find_orphan_worktrees_detects_orphan() -> Result<()> {
         let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
         let path = _dir.path();
 

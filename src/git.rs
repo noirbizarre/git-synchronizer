@@ -1253,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_network_signatures() {
+    fn classify_network_signatures() {
         let cases = [
             "ssh: connect to host github.com port 22: No route to host\nfatal: Could not read from remote repository.",
             "ssh: Could not resolve hostname github.com: Temporary failure in name resolution",
@@ -1271,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_auth_signatures() {
+    fn classify_auth_signatures() {
         let cases = [
             "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
             "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://example.com/foo.git/'",
@@ -1286,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_other() {
+    fn classify_other() {
         let cases = [
             "",
             "fatal: ambiguous argument 'HEAD~10': unknown revision",
@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_git_command_error_display_has_no_double_exit() {
+    fn git_command_error_display_has_no_double_exit() {
         let err = GitCommandError {
             program: "git".into(),
             args: vec!["fetch".into(), "origin".into()],
@@ -1316,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn test_git_command_error_short_cause_skips_blank_lines() {
+    fn git_command_error_short_cause_skips_blank_lines() {
         let err = GitCommandError {
             program: "git".into(),
             args: vec!["fetch".into()],
@@ -1332,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_git_failure_returns_command_error() {
+    fn run_git_failure_returns_command_error() {
         // Run `git` against a non-existent option to provoke a guaranteed
         // non-zero exit without depending on a workdir.
         let err = run_git(&["--definitely-not-a-real-flag"], false, None).unwrap_err();
@@ -1344,27 +1344,27 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_branch_list() {
+    fn parse_branch_list_excludes_the_current_branch() {
         let output = "  feature/foo\n* main\n  bugfix/bar\n";
         let branches = parse_branch_list(output);
         assert_eq!(branches, vec!["feature/foo", "bugfix/bar"]);
     }
 
     #[test]
-    fn test_parse_branch_list_strips_worktree_marker() {
+    fn parse_branch_list_strips_worktree_marker() {
         let output = "  feature/foo\n* main\n+ feature/wt\n  bugfix/bar\n";
         let branches = parse_branch_list(output);
         assert_eq!(branches, vec!["feature/foo", "feature/wt", "bugfix/bar"]);
     }
 
     #[test]
-    fn test_parse_branch_list_empty() {
+    fn parse_branch_list_empty() {
         let branches = parse_branch_list("");
         assert!(branches.is_empty());
     }
 
     #[test]
-    fn test_parse_gone_upstreams() {
+    fn parse_gone_upstreams_finds_branches_whose_remote_ref_vanished() {
         let heads = "\
 main\0refs/remotes/origin/main
 feature/gone\0refs/remotes/origin/feature/gone
@@ -1378,13 +1378,13 @@ local-only\0";
     }
 
     #[test]
-    fn test_parse_gone_upstreams_ignores_branches_without_upstream() {
+    fn parse_gone_upstreams_ignores_branches_without_upstream() {
         let heads = "solo\0\nother\0";
         assert_eq!(parse_gone_upstreams(heads, ""), Vec::<String>::new());
     }
 
     #[test]
-    fn test_parse_gone_upstreams_all_gone_when_no_remote_refs() {
+    fn parse_gone_upstreams_all_gone_when_no_remote_refs() {
         let heads = "a\0refs/remotes/origin/a\nb\0refs/remotes/origin/b";
         assert_eq!(
             parse_gone_upstreams(heads, ""),
@@ -1393,7 +1393,7 @@ local-only\0";
     }
 
     #[test]
-    fn test_parse_gone_upstreams_handles_slashed_names_and_empty_input() {
+    fn parse_gone_upstreams_handles_slashed_names_and_empty_input() {
         let heads = "feat/a/b/c\0refs/remotes/upstream/feat/a/b/c";
         assert_eq!(
             parse_gone_upstreams(heads, "refs/remotes/origin/feat/a/b/c"),
@@ -1403,7 +1403,7 @@ local-only\0";
     }
 
     #[test]
-    fn test_parse_worktree_list() {
+    fn parse_worktree_list_reads_the_porcelain_format() {
         let output = "\
 worktree /home/user/project
 HEAD abc1234
@@ -1435,13 +1435,13 @@ bare
     }
 
     #[test]
-    fn test_parse_worktree_list_empty() {
+    fn parse_worktree_list_empty() {
         let worktrees = parse_worktree_list("");
         assert!(worktrees.is_empty());
     }
 
     #[test]
-    fn test_parse_worktree_list_locked_no_reason() {
+    fn parse_worktree_list_locked_no_reason() {
         let output = "\
 worktree /home/user/project
 HEAD abc1234
@@ -1464,7 +1464,7 @@ locked
     }
 
     #[test]
-    fn test_parse_worktree_list_locked_with_reason() {
+    fn parse_worktree_list_locked_with_reason() {
         let output = "\
 worktree /home/user/project
 HEAD abc1234
@@ -1490,7 +1490,7 @@ locked work in progress, do not remove
 
     /// Integration test: verify basic git operations in a temporary repo.
     #[test]
-    fn test_git_in_temp_repo() -> Result<()> {
+    fn git_in_temp_repo() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1541,7 +1541,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_delete() -> Result<()> {
+    fn branch_delete_removes_a_merged_branch() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1580,7 +1580,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_remotes_empty() -> Result<()> {
+    fn remotes_empty() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let remotes = git.remotes()?;
@@ -1590,7 +1590,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_cherry_merged() -> Result<()> {
+    fn cherry_merged_detects_a_rebase_merged_branch() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1662,7 +1662,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_diff_empty() -> Result<()> {
+    fn diff_empty_detects_a_branch_that_nets_out_to_no_change() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1737,7 +1737,7 @@ locked work in progress, do not remove
     /// the branch's changes. This case is covered by `squash_patch_id_match` /
     /// `merge_adds_nothing` instead.
     #[test]
-    fn test_diff_empty_does_not_claim_squash_merges() -> Result<()> {
+    fn diff_empty_does_not_claim_squash_merges() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1777,7 +1777,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_trees_match() -> Result<()> {
+    fn trees_match_detects_an_identical_tree() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1834,7 +1834,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_merge_adds_nothing() -> Result<()> {
+    fn merge_adds_nothing_detects_a_fully_contained_branch() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -1917,7 +1917,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_squash_patch_id_match() -> Result<()> {
+    fn squash_patch_id_match_detects_a_squash_merge() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2017,7 +2017,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_worktree_list_integration() -> Result<()> {
+    fn worktree_list_integration() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2046,7 +2046,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_protected_list_empty() -> Result<()> {
+    fn branch_protected_list_empty() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let protected = git.branch_protected_list()?;
@@ -2056,7 +2056,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_protected_list() -> Result<()> {
+    fn branch_protected_list_returns_flagged_branches() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2078,7 +2078,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_set_branch_protected_and_unset() -> Result<()> {
+    fn set_branch_protected_and_unset() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Set protection
@@ -2100,7 +2100,7 @@ locked work in progress, do not remove
     // ── Worktree-config tests ────────────────────────────────────────
 
     #[test]
-    fn test_config_set_from_linked_worktree_writes_to_shared_config() -> Result<()> {
+    fn config_set_from_linked_worktree_writes_to_shared_config() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Write config from the linked worktree
@@ -2116,7 +2116,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_config_add_from_linked_worktree_writes_to_shared_config() -> Result<()> {
+    fn config_add_from_linked_worktree_writes_to_shared_config() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Add config values from the linked worktree
@@ -2133,7 +2133,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_config_unset_all_from_linked_worktree_clears_shared_config() -> Result<()> {
+    fn config_unset_all_from_linked_worktree_clears_shared_config() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Set some values from the main worktree
@@ -2153,7 +2153,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_set_branch_protected_from_linked_worktree() -> Result<()> {
+    fn set_branch_protected_from_linked_worktree() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Set per-branch protection from the linked worktree
@@ -2174,7 +2174,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_config_section_exists_across_worktrees() -> Result<()> {
+    fn config_section_exists_across_worktrees() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Write from linked worktree
@@ -2192,7 +2192,7 @@ locked work in progress, do not remove
     // ── Pull / fast-forward tests ────────────────────────────────────
 
     #[test]
-    fn test_branch_upstream_with_tracking() -> Result<()> {
+    fn branch_upstream_with_tracking() -> Result<()> {
         let (_dir, work_path, _bare_path) = init_repo_with_local_remote()?;
         let git = Git::with_workdir(false, &work_path);
 
@@ -2206,7 +2206,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_upstream_without_tracking() -> Result<()> {
+    fn branch_upstream_without_tracking() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let git = Git::with_workdir(false, dir.path());
 
@@ -2218,7 +2218,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_pull_ff_only() -> Result<()> {
+    fn pull_ff_only_fast_forwards_the_current_branch() -> Result<()> {
         let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
 
         // Advance the remote with a new commit
@@ -2244,7 +2244,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_pull_ff_only_in() -> Result<()> {
+    fn pull_ff_only_in_fast_forwards_a_linked_worktree() -> Result<()> {
         let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
 
         // Create a branch and a linked worktree
@@ -2316,7 +2316,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_fetch_update_branch() -> Result<()> {
+    fn fetch_update_branch_advances_a_branch_without_checkout() -> Result<()> {
         let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
 
         // Create a branch, push it, then check out main
@@ -2383,7 +2383,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_worktree_dirty_detects_untracked() -> Result<()> {
+    fn worktree_dirty_detects_untracked() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2398,7 +2398,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_worktree_dirty_detects_modified() -> Result<()> {
+    fn worktree_dirty_detects_modified() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2423,7 +2423,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_has_unmerged_commits() -> Result<()> {
+    fn branch_has_unmerged_commits_detects_commits_outside_every_target() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let path = dir.path();
 
@@ -2444,7 +2444,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_patch_id_match() -> Result<()> {
+    fn patch_id_match_detects_commits_reapplied_with_new_shas() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 

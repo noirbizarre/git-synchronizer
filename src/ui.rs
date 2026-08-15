@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ui_default() {
+    fn ui_default() {
         let ui = Ui::default();
         // Smoke test: styles should be constructable
         let styled = ui.heading_style.apply_to("test");
@@ -285,14 +285,14 @@ mod tests {
     }
 
     #[test]
-    fn test_success_does_not_panic() {
+    fn success_does_not_panic() {
         let ui = Ui::new();
         ui.success("plain message");
         ui.success(&format!("with {} styling", console::style("cyan").cyan()));
     }
 
     #[test]
-    fn test_warning_does_not_panic() {
+    fn warning_does_not_panic() {
         let ui = Ui::new();
         ui.warning("plain warning");
         ui.warning(&format!(
@@ -302,20 +302,20 @@ mod tests {
     }
 
     #[test]
-    fn test_error_does_not_panic() {
+    fn error_does_not_panic() {
         let ui = Ui::new();
         ui.error("plain error");
         ui.error(&format!("with {} styling", console::style("red").red()));
     }
 
     #[test]
-    fn test_summary_singular() {
+    fn summary_singular() {
         let ui = Ui::new();
         ui.summary(1, "branch", "branches", "deleted");
     }
 
     #[test]
-    fn test_summary_plural() {
+    fn summary_plural() {
         let ui = Ui::new();
         ui.summary(5, "branch", "branches", "deleted");
     }
