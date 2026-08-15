@@ -83,3 +83,29 @@ run = "gh ship validate"
 [tasks.setup]
 description = "Install locally"
 run = "cargo install --path . --force"
+
+# --- Artwork ----------------------------------------------------------------
+#
+# Not part of `default` or `check`: it rewrites a committed binary, so a routine
+# run would dirty the working tree every time. Run it when the artwork changes,
+# i.e. after editing logo.svg, since the social preview embeds the logo.
+
+[tasks.social]
+description = "Render the GitHub social preview image"
+# GitHub has no API for the social preview, so this is generated here and
+# uploaded by hand, once, under:
+#   Settings -> General -> Social preview
+#
+# The canvas lives in social-preview.svg rather than being passed as flags:
+# resvg scales to fit rather than padding, so --width 1280 --height 640 on a
+# non-2:1 source yields the wrong size, not GitHub's required 1280x640.
+#
+# resvg is declared on the task rather than in `[tools]` because `mise install`
+# — what CI runs — installs `[tools]` only, and cargo-binstall has no prebuilt
+# artifact for resvg: a global entry would make every CI job build it from
+# source.
+tools = { "cargo:resvg" = "latest" }
+run = """
+resvg docs/images/social-preview.svg docs/images/social-preview.png
+echo "docs/images/social-preview.png — upload under Settings > General > Social preview"
+"""

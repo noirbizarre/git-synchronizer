@@ -1,10 +1,30 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/noirbizarre/git-synchronizer/main/docs/images/logo.svg" alt="git-synchronizer" width="520">
+</p>
+
+<p align="center"><strong>Easily synchronize your local branches and worktrees</strong></p>
+
+<p align="center">
+  <a href="https://github.com/noirbizarre/git-synchronizer/actions/workflows/ci.yml">
+    <img src="https://github.com/noirbizarre/git-synchronizer/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+  <a href="https://codecov.io/gh/noirbizarre/git-synchronizer">
+    <img src="https://codecov.io/gh/noirbizarre/git-synchronizer/graph/badge.svg" alt="Codecov">
+  </a>
+  <a href="https://crates.io/crates/git-synchronizer">
+    <img src="https://img.shields.io/crates/v/git-synchronizer" alt="crates.io">
+  </a>
+  <img src="https://img.shields.io/github/v/release/noirbizarre/git-synchronizer" alt="Release">
+  <img src="https://img.shields.io/github/license/noirbizarre/git-synchronizer" alt="License">
+</p>
+
+---
+
 # git-synchronizer (git-sync)
 
-Easily synchronize your local branches and worktrees.
-
-A command-line tool that detects branches merged into your main branch(es) and
-offers to delete them -- both locally and on configured remotes. Also handles
-orphaned worktree cleanup.
+`git-synchronizer` provides the `git sync` command: it detects branches merged
+into your main branch(es) and offers to delete them -- both locally and on
+configured remotes. It also handles orphaned worktree cleanup.
 
 ## Features
 
