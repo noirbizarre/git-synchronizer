@@ -202,12 +202,21 @@ impl Git {
     }
 
     /// Create a Git instance that operates in a specific directory.
-    #[cfg(test)]
     pub fn with_workdir(verbose: bool, workdir: &Path) -> Self {
         Self {
             verbose,
             workdir: Some(workdir.to_path_buf()),
         }
+    }
+
+    /// Re-root this instance at `dir`, preserving the verbose setting.
+    ///
+    /// Preferred over passing `git -C <dir>`: mixing `-C` with a configured
+    /// working directory makes a relative `-C` resolve against the latter,
+    /// which is surprising. Keeping the directory in one place removes the
+    /// interaction entirely.
+    pub fn in_dir(&self, dir: &Path) -> Self {
+        Self::with_workdir(self.verbose, dir)
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
@@ -438,14 +447,9 @@ impl Git {
     /// Run `git pull --ff-only` in the given directory.
     ///
     /// Used for target branches checked out in a different worktree
-    /// (the one we are running from is handled by [`pull_ff_only`]).
-    pub fn pull_ff_only_in(&self, dir: &str) -> Result<()> {
-        run_git(
-            &["-C", dir, "pull", "--ff-only"],
-            self.verbose,
-            self.workdir.as_deref(),
-        )?;
-        Ok(())
+    /// (the one we are running from is handled by [`Self::pull_ff_only`]).
+    pub fn pull_ff_only_in(&self, dir: &Path) -> Result<()> {
+        self.in_dir(dir).pull_ff_only()
     }
 
     /// Fast-forward a local branch ref to match its remote-tracking branch.
@@ -767,15 +771,16 @@ impl Git {
 
     /// Check whether the worktree at `path` has untracked or uncommitted changes.
     ///
-    /// Runs `git -C <path> status --porcelain`; a non-empty output means the
-    /// worktree is dirty.
-    pub fn worktree_dirty(&self, path: &str) -> Result<bool> {
-        let out = run_git(
-            &["-C", path, "status", "--porcelain"],
-            self.verbose,
-            self.workdir.as_deref(),
-        )?;
+    /// Runs `git status --porcelain` from `path`; a non-empty output means
+    /// the worktree is dirty.
+    pub fn worktree_dirty(&self, path: &Path) -> Result<bool> {
+        let out = self.in_dir(path).status_porcelain()?;
         Ok(!out.trim().is_empty())
+    }
+
+    /// Return the porcelain status of the current working directory.
+    pub fn status_porcelain(&self) -> Result<String> {
+        self.run(&["status", "--porcelain"])
     }
 
     /// Check whether `branch` has at least one commit not present in **any**
@@ -2670,8 +2675,7 @@ locked work in progress, do not remove
             .output()?;
 
         // Pull in the linked worktree
-        let wt_path_str = wt_path.to_str().unwrap();
-        git.pull_ff_only_in(wt_path_str)?;
+        git.pull_ff_only_in(&wt_path)?;
 
         // The new file should exist in the worktree
         assert!(wt_path.join("wt-new.txt").exists());
@@ -2752,11 +2756,11 @@ locked work in progress, do not remove
         let path = dir.path();
 
         // Clean repo → not dirty
-        assert!(!git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(!git.worktree_dirty(path)?);
 
         // Add an untracked file → dirty
         std::fs::write(path.join("untracked.txt"), "noise")?;
-        assert!(git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(git.worktree_dirty(path)?);
 
         Ok(())
     }
@@ -2777,11 +2781,11 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        assert!(!git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(!git.worktree_dirty(path)?);
 
         // Modify it → dirty
         std::fs::write(path.join("file.txt"), "v2")?;
-        assert!(git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(git.worktree_dirty(path)?);
 
         Ok(())
     }

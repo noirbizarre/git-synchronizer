@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 
@@ -183,7 +184,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             git.pull_ff_only()
                         } else if let Some(wt_path) = wt_map.get(branch) {
                             // Checked out in another worktree
-                            git.pull_ff_only_in(wt_path)
+                            git.pull_ff_only_in(Path::new(wt_path))
                         } else {
                             // Not checked out anywhere — fast-forward via fetch
                             git.fetch_update_branch(remote, upstream_branch, branch)
@@ -399,7 +400,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 if wt.is_locked {
                     continue;
                 }
-                let dirty = match git.worktree_dirty(&wt.path) {
+                let dirty = match git.worktree_dirty(Path::new(&wt.path)) {
                     Ok(v) => v,
                     Err(e) => {
                         ui.warning(&format!(
