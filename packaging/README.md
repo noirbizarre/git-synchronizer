@@ -47,30 +47,34 @@ change together:
 - `git-synchronizer-<version>.tar.gz` is produced by the `source` job, with a
   `git-synchronizer-<version>/` prefix so a PKGBUILD can `cd "$pkgname-$pkgver"`.
 
-## One-off bootstrap
+## One-off setup
 
-None of this works until the following exist. All of it is manual, once.
+Only the credentials are manual. The pkgbases and the formula create
+themselves on the first run.
 
 ### AUR
 
-The AUR creates a repository on the first push, so each pkgbase has to be
-imported by hand before the workflow can update it:
-
-```sh
-git clone ssh://aur@aur.archlinux.org/git-synchronizer-bin.git
-cd git-synchronizer-bin
-# render the PKGBUILD as aur.yml does, then:
-makepkg --printsrcinfo > .SRCINFO
-git add PKGBUILD .SRCINFO && git commit -m "Initial import" && git push
-```
-
-Repeat for `git-synchronizer` and `git-synchronizer-git`.
-
-Then create an `aur` environment on the repository holding a single secret,
+Create an `aur` environment on the repository holding a single secret,
 `AUR_SSH_PRIVATE_KEY`: the private half of an SSH key registered on the AUR
 account that maintains the three pkgbases. It is kept out of the `release`
 environment on purpose — a key that can push to the AUR has no business sitting
 next to the GitHub App credentials.
+
+That is the whole setup. The AUR creates a pkgbase on its first push, so the
+workflow imports the three packages itself as long as the names are free and
+the key belongs to the account claiming them — which is exactly what happened
+for v0.3.0. Expect the AUR's RPC metadata to lag the package page by a few
+minutes after an import: `aur.archlinux.org/packages/<name>` is authoritative,
+`rpc/v5/info` is a cache.
+
+### Homebrew
+
+Create the public repository `noirbizarre/homebrew-tap` (the `homebrew-`
+prefix is what makes `brew install noirbizarre/tap/git-sync` work). An empty
+repository is enough; the workflow creates `Formula/` on the first push.
+
+Then create a `homebrew` environment holding `TAP_TOKEN`, a fine-grained token
+with `contents: write` on that repository and nothing else.
 
 ### Homebrew
 

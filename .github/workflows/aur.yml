@@ -5,9 +5,8 @@ name: 📦 AUR
 # undrafts the release after that workflow succeeds — waiting means the URLs
 # baked into the PKGBUILDs already resolve when the packages land.
 #
-# The pkgbases must exist before this can push: the AUR creates a repository on
-# its first push, so `git-synchronizer`, `git-synchronizer-bin` and
-# `git-synchronizer-git` are bootstrapped manually once. See packaging/README.md.
+# The AUR creates a pkgbase on its first push, so this workflow imports the
+# three packages itself — no manual bootstrap. See packaging/README.md.
 run-name: 📦 AUR ${{ inputs.tag || github.event.release.tag_name }}
 
 on:
