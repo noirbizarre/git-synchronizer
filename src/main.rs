@@ -1,3 +1,16 @@
+//! `git-sync`: synchronize local branches and worktrees with their remotes.
+//!
+//! This is a binary crate, so nothing is exported to downstream users and
+//! `pub` therefore means "visible to the other modules" — it carries no
+//! stability promise. Items used only within their own module stay private;
+//! everything crossing a module boundary is plain `pub` rather than
+//! `pub(crate)`, since in a binary the two are equivalent.
+//!
+//! `main` stays thin: it parses the CLI, dispatches, and renders errors. The
+//! work lives in [`cleaner`] (workflow), [`branches`] and [`worktrees`]
+//! (detection), [`config`] (settings), [`git`] (git access) and [`ui`]
+//! (output).
+
 mod branches;
 mod cleaner;
 mod cli;

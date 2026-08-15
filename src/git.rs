@@ -1,3 +1,10 @@
+//! Thin, typed wrapper around the git command line.
+//!
+//! Everything that shells out to git funnels through [`Git`], so verbose
+//! echoing, the working directory and error classification are decided in one
+//! place. Failures surface as [`GitCommandError`], whose [`GitErrorKind`] lets
+//! callers tell a network or auth problem from a genuine git error.
+
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -218,6 +225,7 @@ pub struct Git {
 }
 
 impl Git {
+    /// Create a handle operating in the process's current directory.
     pub fn new(verbose: bool) -> Self {
         Self {
             verbose,
@@ -761,7 +769,7 @@ impl Git {
     }
 
     /// Delete a branch on a remote (with --force-with-lease for safety).
-    pub fn push_delete(&self, remote: &str, branch: &str) -> Result<()> {
+    pub fn remote_branch_delete(&self, remote: &str, branch: &str) -> Result<()> {
         self.run(&["push", "--delete", "--force-with-lease", remote, branch])?;
         Ok(())
     }
@@ -1043,10 +1051,15 @@ fn refspec_safe(pattern: &str) -> bool {
 /// A worktree entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
+    /// Absolute path of the worktree directory.
     pub path: PathBuf,
+    /// Checked-out branch, or `None` for a detached HEAD.
     pub branch: Option<String>,
+    /// Whether this entry is the bare repository itself.
     pub is_bare: bool,
+    /// Whether the worktree is locked; locked worktrees are never removed.
     pub is_locked: bool,
+    /// Reason recorded with the lock, when one was given.
     pub lock_reason: Option<String>,
 }
 

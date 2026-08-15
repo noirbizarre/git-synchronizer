@@ -1,3 +1,9 @@
+//! The `[sync]` git config section, and the first-run setup wizard.
+//!
+//! Configuration is read from any git config scope but always written to the
+//! repository-local `.git/config`. [`Config::try_load`] returns `None` when the
+//! section is absent, which is what triggers [`run_setup_wizard`].
+
 use anyhow::Result;
 
 use crate::git::Git;

@@ -1,3 +1,8 @@
+//! Discovery of linked worktrees, including orphans.
+//!
+//! An orphan is a worktree whose branch no longer exists locally — the residue
+//! of a branch deleted without removing its worktree first.
+
 use anyhow::Result;
 
 use crate::branches::Filter;
@@ -31,7 +36,7 @@ pub fn find_orphan_worktrees(git: &Git, filter: &Filter) -> Result<Vec<Worktree>
 
 /// Find worktrees whose branch is in the list of branches about to be deleted.
 #[cfg(test)]
-pub fn find_worktrees_for_branches(git: &Git, branches: &[String]) -> Result<Vec<Worktree>> {
+fn find_branch_worktrees(git: &Git, branches: &[String]) -> Result<Vec<Worktree>> {
     let worktrees = git.worktree_list()?;
 
     let matching: Vec<Worktree> = worktrees
@@ -54,23 +59,23 @@ pub fn find_worktrees_for_branches(git: &Git, branches: &[String]) -> Result<Vec
 mod tests {
     use super::*;
     use crate::config::Config;
-    use std::process::Command as StdCommand;
+    use std::process::Command;
 
     #[test]
-    fn find_worktrees_for_branches_matches_linked_worktrees() -> Result<()> {
+    fn find_branch_worktrees_matches_linked_worktrees() -> Result<()> {
         let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
-        let worktrees = find_worktrees_for_branches(&git, &["feature/wt".to_string()])?;
+        let worktrees = find_branch_worktrees(&git, &["feature/wt".to_string()])?;
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].branch.as_deref(), Some("feature/wt"));
         Ok(())
     }
 
     #[test]
-    fn find_worktrees_for_branches_no_match() -> Result<()> {
+    fn find_branch_worktrees_returns_nothing_without_a_match() -> Result<()> {
         let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
 
-        let worktrees = find_worktrees_for_branches(&git, &["nonexistent".to_string()])?;
+        let worktrees = find_branch_worktrees(&git, &["nonexistent".to_string()])?;
         assert!(worktrees.is_empty());
         Ok(())
     }
@@ -92,7 +97,7 @@ mod tests {
 
         // Use update-ref to delete the branch ref directly, bypassing the
         // check that prevents deleting a branch checked out in a worktree.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/wt"])
             .current_dir(path)
             .output()?;

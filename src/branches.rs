@@ -1,3 +1,10 @@
+//! Branch classification and merge detection.
+//!
+//! [`Filter`] decides which branches are protected or ignored;
+//! [`find_merged_local`] and its siblings decide which are merged. Merge
+//! detection runs several strategies from cheapest to most expensive, because
+//! no single git command recognises rebases, squashes and plain merges alike.
+
 use std::collections::HashSet;
 
 use anyhow::Result;
@@ -22,9 +29,13 @@ fn build_matcher(patterns: &[String]) -> Result<GlobSet> {
 /// (`branch.<name>.sync-protected` / `branch.<name>.sync-ignored`).
 #[derive(Debug)]
 pub struct Filter {
+    /// Glob patterns from `sync.protected`.
     protected: GlobSet,
+    /// Branches flagged with `branch.<name>.sync-protected`.
     protected_branches: HashSet<String>,
+    /// Glob patterns from `sync.ignore`.
     ignored: GlobSet,
+    /// Branches flagged with `branch.<name>.sync-ignored`.
     ignored_branches: HashSet<String>,
 }
 
@@ -237,17 +248,17 @@ pub fn find_merged_remote(git: &Git, filter: &Filter, remote: &str) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as StdCommand;
+    use std::process::Command;
 
     /// Create a repo with branches plus an additional `release/1.0` branch.
     fn init_repo_with_release() -> Result<(tempfile::TempDir, Git)> {
         let (dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let path = dir.path();
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "release/1.0"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
@@ -354,7 +365,7 @@ mod tests {
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
 
         // Checked out: never proposed for deletion.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "feature/gone"])
             .current_dir(dir.path().join("work"))
             .output()?;
@@ -390,22 +401,22 @@ mod tests {
         let path = dir.path();
 
         // Create a feature branch with a commit
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/cherry"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("cherry.txt"), "cherry")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "cherry feature"])
             .current_dir(path)
             .output()?;
 
         // Cherry-pick onto main (simulating a rebase merge)
-        let log_output = StdCommand::new("git")
+        let log_output = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(path)
             .output()?;
@@ -413,23 +424,23 @@ mod tests {
             .trim()
             .to_string();
 
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
 
         // Add a diverging commit on main so cherry-pick creates a distinct commit
         std::fs::write(path.join("diverge.txt"), "diverge")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "diverge"])
             .current_dir(path)
             .output()?;
 
-        StdCommand::new("git")
+        Command::new("git")
             .args(["cherry-pick", &commit_sha])
             .current_dir(path)
             .output()?;
@@ -454,30 +465,30 @@ mod tests {
         let path = dir.path();
 
         // Create a feature branch with a commit
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/squash"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("squash.txt"), "squash")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash feature"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main (creates a single squash commit, not a merge commit)
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/squash"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge"])
             .current_dir(path)
             .output()?;
@@ -506,30 +517,30 @@ mod tests {
         let path = dir.path();
 
         // Create a feature branch with a commit
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/tree-match"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("tree.txt"), "tree content")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "tree feature"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main so both tips share the same tree object
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/tree-match"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge tree"])
             .current_dir(path)
             .output()?;
@@ -557,21 +568,21 @@ mod tests {
         let path = dir.path();
 
         // Feature branch with one commit.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/patch-id"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("patch.txt"), "patch content\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "patch-id feature"])
             .current_dir(path)
             .output()?;
         let sha = String::from_utf8_lossy(
-            &StdCommand::new("git")
+            &Command::new("git")
                 .args(["rev-parse", "HEAD"])
                 .current_dir(path)
                 .output()?
@@ -584,24 +595,24 @@ mod tests {
         // the diff (and therefore the patch-id) is preserved. `git cherry`
         // should miss it (different author/committer date after amend may
         // still be matched, so we also tweak the message).
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("diverge.txt"), "diverge\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "diverge"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["cherry-pick", &sha])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "--amend", "-m", "patch-id feature (reworded)"])
             .current_dir(path)
             .output()?;
@@ -627,30 +638,30 @@ mod tests {
         let path = dir.path();
 
         // Create a feature branch that touches a.txt
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/squash-advanced"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("a.txt"), "feature content")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature: a.txt"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/squash-advanced"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge"])
             .current_dir(path)
             .output()?;
@@ -658,11 +669,11 @@ mod tests {
         // Advance main with an unrelated commit touching a different file,
         // so neither trees_match nor diff_empty would detect the branch.
         std::fs::write(path.join("b.txt"), "unrelated")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "main: unrelated b.txt"])
             .current_dir(path)
             .output()?;
@@ -693,50 +704,50 @@ mod tests {
         // (per-commit) cannot resolve and where `merge_adds_nothing` may
         // also miss when the squashed commit on target differs textually
         // from the branch's commits.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/multi-commit-squash"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("a.txt"), "line1\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature: line1"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("a.txt"), "line1\nline2\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature: line2"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main as a single commit.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/multi-commit-squash"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge"])
             .current_dir(path)
             .output()?;
 
         // Unrelated advance on main (defeats trees_match / diff_empty).
         std::fs::write(path.join("b.txt"), "unrelated")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "main: unrelated b.txt"])
             .current_dir(path)
             .output()?;

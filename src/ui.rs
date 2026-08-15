@@ -1,3 +1,9 @@
+//! Terminal output and prompts.
+//!
+//! All user-facing output goes through [`Ui`] so styling, indentation and
+//! error classification stay consistent. Output methods are best-effort and
+//! swallow I/O errors; prompts propagate them, since they need an answer.
+
 use console::{Style, Term};
 use demand::{Confirm, DemandOption, Input, MultiSelect, Spinner, SpinnerStyle};
 
@@ -17,6 +23,7 @@ impl Default for Ui {
 }
 
 impl Ui {
+    /// Create a handle writing to stderr, so output never pollutes a pipe.
     pub fn new() -> Self {
         Self {
             term: Term::stderr(),
@@ -128,6 +135,15 @@ impl Ui {
                 .term
                 .write_line(&format!("  {} {}", self.muted_style.apply_to("-"), item));
         }
+    }
+
+    /// Print an indented, dimmed line describing an action `--dry-run`
+    /// suppressed.
+    ///
+    /// Owns both the indentation and the `(dry-run)` marker so every preview
+    /// line is formatted identically.
+    pub fn dry_run(&self, text: &str) {
+        self.muted(&format!("  (dry-run) {text}"));
     }
 
     /// Print an indented `label: value` pair, with the label emphasised.

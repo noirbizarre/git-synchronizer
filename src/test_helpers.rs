@@ -3,7 +3,7 @@
 //! These helpers are only compiled in test builds.
 
 use std::path::Path;
-use std::process::Command as StdCommand;
+use std::process::Command;
 
 use anyhow::Result;
 use tempfile::TempDir;
@@ -15,10 +15,7 @@ use crate::git::Git;
 /// Fixture setup only: the exit status is deliberately not checked, because
 /// several fixtures run commands that are allowed to be no-ops.
 pub fn git_in(cwd: &Path, args: &[&str]) -> Result<()> {
-    StdCommand::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()?;
+    Command::new("git").args(args).current_dir(cwd).output()?;
     Ok(())
 }
 
@@ -27,25 +24,25 @@ pub fn init_repo() -> Result<(TempDir, Git)> {
     let dir = tempfile::tempdir()?;
     let path = dir.path();
 
-    StdCommand::new("git")
+    Command::new("git")
         .args(["init", "--initial-branch=main"])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.email", "test@test.com"])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.name", "Test"])
         .current_dir(path)
         .output()?;
 
     std::fs::write(path.join("README.md"), "# test")?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["add", "."])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["commit", "-m", "init"])
         .current_dir(path)
         .output()?;
@@ -60,43 +57,43 @@ pub fn init_repo_with_branches() -> Result<(TempDir, Git)> {
     let path = dir.path();
 
     // Create and merge a feature branch
-    StdCommand::new("git")
+    Command::new("git")
         .args(["checkout", "-b", "feature/done"])
         .current_dir(path)
         .output()?;
     std::fs::write(path.join("done.txt"), "done")?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["add", "."])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["commit", "-m", "feature done"])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["checkout", "main"])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["merge", "feature/done"])
         .current_dir(path)
         .output()?;
 
     // Create an unmerged branch
-    StdCommand::new("git")
+    Command::new("git")
         .args(["checkout", "-b", "feature/wip"])
         .current_dir(path)
         .output()?;
     std::fs::write(path.join("wip.txt"), "wip")?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["add", "."])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["commit", "-m", "work in progress"])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["checkout", "main"])
         .current_dir(path)
         .output()?;
@@ -109,13 +106,13 @@ pub fn init_repo_with_worktree() -> Result<(TempDir, Git, String)> {
     let (dir, git) = init_repo()?;
     let path = dir.path();
 
-    StdCommand::new("git")
+    Command::new("git")
         .args(["branch", "feature/wt"])
         .current_dir(path)
         .output()?;
 
     let wt_path = dir.path().join("worktree-feature");
-    StdCommand::new("git")
+    Command::new("git")
         .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
         .current_dir(path)
         .output()?;
@@ -183,31 +180,31 @@ pub fn init_repo_with_locked_worktree() -> Result<(TempDir, Git, String)> {
     let path = dir.path();
 
     // Create and merge a feature branch
-    StdCommand::new("git")
+    Command::new("git")
         .args(["checkout", "-b", "feature/locked-wt"])
         .current_dir(path)
         .output()?;
     std::fs::write(path.join("locked.txt"), "locked feature")?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["add", "."])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["commit", "-m", "locked feature"])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["checkout", "main"])
         .current_dir(path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["merge", "feature/locked-wt"])
         .current_dir(path)
         .output()?;
 
     // Create a worktree for the merged branch
     let wt_path = dir.path().join("worktree-locked");
-    StdCommand::new("git")
+    Command::new("git")
         .args([
             "worktree",
             "add",
@@ -218,7 +215,7 @@ pub fn init_repo_with_locked_worktree() -> Result<(TempDir, Git, String)> {
         .output()?;
 
     // Lock the worktree
-    StdCommand::new("git")
+    Command::new("git")
         .args(["worktree", "lock", wt_path.to_str().unwrap()])
         .current_dir(path)
         .output()?;
@@ -234,42 +231,42 @@ pub fn init_repo_with_worktree_config() -> Result<(TempDir, std::path::PathBuf, 
     let main_path = dir.path().join("main-repo");
     std::fs::create_dir_all(&main_path)?;
 
-    StdCommand::new("git")
+    Command::new("git")
         .args(["init", "--initial-branch=main"])
         .current_dir(&main_path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.email", "test@test.com"])
         .current_dir(&main_path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.name", "Test"])
         .current_dir(&main_path)
         .output()?;
 
     std::fs::write(main_path.join("README.md"), "# test")?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["add", "."])
         .current_dir(&main_path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["commit", "-m", "init"])
         .current_dir(&main_path)
         .output()?;
 
     // Enable extensions.worktreeConfig
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "extensions.worktreeConfig", "true"])
         .current_dir(&main_path)
         .output()?;
 
     // Create a branch and a linked worktree
-    StdCommand::new("git")
+    Command::new("git")
         .args(["branch", "feature/wt"])
         .current_dir(&main_path)
         .output()?;
     let wt_path = dir.path().join("linked-wt");
-    StdCommand::new("git")
+    Command::new("git")
         .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
         .current_dir(&main_path)
         .output()?;
@@ -284,7 +281,7 @@ pub fn init_repo_with_local_remote() -> Result<(TempDir, std::path::PathBuf, std
 
     // Create a bare "remote" repo
     let bare_path = dir.path().join("remote.git");
-    StdCommand::new("git")
+    Command::new("git")
         .args([
             "init",
             "--bare",
@@ -295,33 +292,33 @@ pub fn init_repo_with_local_remote() -> Result<(TempDir, std::path::PathBuf, std
 
     // Clone it to get a working repo with tracking
     let work_path = dir.path().join("work");
-    StdCommand::new("git")
+    Command::new("git")
         .args([
             "clone",
             bare_path.to_str().unwrap(),
             work_path.to_str().unwrap(),
         ])
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.email", "test@test.com"])
         .current_dir(&work_path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.name", "Test"])
         .current_dir(&work_path)
         .output()?;
 
     // Create an initial commit and push
     std::fs::write(work_path.join("README.md"), "# test")?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["add", "."])
         .current_dir(&work_path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["commit", "-m", "init"])
         .current_dir(&work_path)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["push", "-u", "origin", "main"])
         .current_dir(&work_path)
         .output()?;
@@ -332,31 +329,31 @@ pub fn init_repo_with_local_remote() -> Result<(TempDir, std::path::PathBuf, std
 /// Advance the bare remote by pushing from a temporary second clone.
 pub fn advance_remote(bare_path: &Path, dir: &Path) -> Result<()> {
     let pusher = dir.join("pusher");
-    StdCommand::new("git")
+    Command::new("git")
         .args([
             "clone",
             bare_path.to_str().unwrap(),
             pusher.to_str().unwrap(),
         ])
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.email", "test@test.com"])
         .current_dir(&pusher)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["config", "user.name", "Test"])
         .current_dir(&pusher)
         .output()?;
     std::fs::write(pusher.join("new.txt"), "new content")?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["add", "."])
         .current_dir(&pusher)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["commit", "-m", "remote advance"])
         .current_dir(&pusher)
         .output()?;
-    StdCommand::new("git")
+    Command::new("git")
         .args(["push"])
         .current_dir(&pusher)
         .output()?;

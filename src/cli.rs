@@ -1,3 +1,7 @@
+//! Command-line surface: flags, subcommands and their help text.
+//!
+//! Parsed with clap into [`Cli`] and [`ConfigAction`], which `main` dispatches.
+
 use clap::{Parser, Subcommand};
 
 /// Easily synchronize your local branches and worktrees.
