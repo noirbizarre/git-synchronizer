@@ -74,9 +74,24 @@ pub fn resolve_merge_targets(git: &Git, filter: &Filter) -> Result<Vec<String>> 
     Ok(targets)
 }
 
+/// Outcome of a merged-branch scan.
+///
+/// Merge detection deliberately survives the failure of an individual
+/// strategy — `merge_adds_nothing` needs git >= 2.38, and a single unreadable
+/// ref should not hide every other merged branch. Those failures are collected
+/// here instead of being discarded, so the caller can surface them once the
+/// scan (and its spinner) has finished.
+#[derive(Debug, Default)]
+pub struct MergedLocal {
+    /// Branches detected as merged into a protected target.
+    pub candidates: Vec<String>,
+    /// One message per distinct merge-detection failure.
+    pub warnings: Vec<String>,
+}
+
 /// Return local branches that are merged into *any* of the protected branches
 /// and are neither protected nor ignored.
-pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<Vec<String>> {
+pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<MergedLocal> {
     let current = git.current_branch()?;
     let targets = resolve_merge_targets(git, filter)?;
 
@@ -126,13 +141,30 @@ pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<Vec<String>> {
         Git::squash_patch_id_match,
     ];
 
+    let mut warnings: Vec<String> = Vec::new();
+    let mut failed_strategies: HashSet<String> = HashSet::new();
+
     for strategy in strategies {
         for branch in &all_branches {
             if seen.contains(branch) {
                 continue;
             }
             for target in &targets {
-                if strategy(git, target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
+                let merged = match strategy(git, target, branch) {
+                    Ok(merged) => merged,
+                    Err(e) => {
+                        // Keep probing the remaining strategies and branches,
+                        // but remember why this one could not answer. Dedupe
+                        // by message so one unsupported strategy does not
+                        // produce a warning per branch.
+                        let msg = format!("Merge detection partially failed: {e}");
+                        if failed_strategies.insert(msg.clone()) {
+                            warnings.push(msg);
+                        }
+                        false
+                    }
+                };
+                if merged && seen.insert(branch.clone()) {
                     candidates.push(branch.clone());
                     break;
                 }
@@ -141,7 +173,10 @@ pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<Vec<String>> {
     }
 
     candidates.sort();
-    Ok(candidates)
+    Ok(MergedLocal {
+        candidates,
+        warnings,
+    })
 }
 
 /// Return local branches whose upstream tracking branch no longer exists.
@@ -251,7 +286,7 @@ mod tests {
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
 
         // feature/done was merged, so it should appear
         assert!(merged.contains(&"feature/done".to_string()));
@@ -274,7 +309,7 @@ mod tests {
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         let gone = find_gone_local(&git, &filter_for(&git, &config)?, &merged)?;
 
         // Upstream was deleted and pruned.
@@ -343,7 +378,7 @@ mod tests {
         };
 
         let current = git.current_branch()?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(!merged.contains(&current));
         Ok(())
     }
@@ -407,7 +442,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.contains(&"feature/cherry".to_string()));
         Ok(())
     }
@@ -456,7 +491,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/squash".to_string()),
             "squash-merged branch should be detected as merged"
@@ -507,7 +542,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/tree-match".to_string()),
             "branch with matching tree SHA should be detected as merged"
@@ -577,7 +612,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/patch-id".to_string()),
             "branch with matching patch-id should be detected as merged"
@@ -639,7 +674,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/squash-advanced".to_string()),
             "squash-merged branch with advanced target should be detected via simulated merge"
@@ -713,7 +748,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/multi-commit-squash".to_string()),
             "multi-commit branch squash-merged into main should be detected \
@@ -751,7 +786,7 @@ mod tests {
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.is_empty());
         Ok(())
     }
@@ -767,12 +802,12 @@ mod tests {
         };
 
         // Without per-branch protection, feature/done should be a candidate
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.contains(&"feature/done".to_string()));
 
         // Mark feature/done as per-branch protected
         git.set_branch_protected("feature/done", true)?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             !merged.contains(&"feature/done".to_string()),
             "per-branch protected branch should not be a deletion candidate"
@@ -795,12 +830,12 @@ mod tests {
         };
 
         // Without any real protected branches, nothing is a merge target
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.is_empty());
 
         // Mark "main" as per-branch protected — it should now be a merge target
         git.set_branch_protected("main", true)?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/done".to_string()),
             "branches merged into a per-branch protected branch should be candidates"
@@ -876,7 +911,7 @@ mod tests {
             worktrunk: None,
         };
 
-        let local = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let local = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             local.contains(&"feature/squashed".to_string()),
             "local detection should catch the squash-merged branch"
@@ -914,7 +949,11 @@ mod tests {
         let filter = filter_for(&git, &config)?;
 
         assert!(filter.is_ignored("feature/done"));
-        assert!(!find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        assert!(
+            !find_merged_local(&git, &filter)?
+                .candidates
+                .contains(&"feature/done".to_string())
+        );
         Ok(())
     }
 
@@ -927,7 +966,7 @@ mod tests {
         assert!(filter.is_ignored("feature/done"));
         assert!(filter.is_ignored("feature/wip"));
         assert!(!filter.is_ignored("main"));
-        assert!(find_merged_local(&git, &filter)?.is_empty());
+        assert!(find_merged_local(&git, &filter)?.candidates.is_empty());
         Ok(())
     }
 
@@ -959,12 +998,20 @@ mod tests {
         let config = config_with_ignore(&[]);
         let filter = filter_for(&git, &config)?;
         assert!(filter.is_ignored("feature/done"));
-        assert!(!find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        assert!(
+            !find_merged_local(&git, &filter)?
+                .candidates
+                .contains(&"feature/done".to_string())
+        );
 
         git.set_branch_ignored("feature/done", false)?;
         let filter = filter_for(&git, &config)?;
         assert!(!filter.is_ignored("feature/done"));
-        assert!(find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        assert!(
+            find_merged_local(&git, &filter)?
+                .candidates
+                .contains(&"feature/done".to_string())
+        );
         Ok(())
     }
 

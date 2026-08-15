@@ -176,6 +176,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         let merged = ui.spinner("Scanning local branches…", || {
             find_merged_local(git, &filter)
         })?;
+        // Surfaced after the spinner: printing inside it would corrupt the
+        // spinner's own line.
+        for warning in &merged.warnings {
+            ui.warning(warning);
+        }
+        let merged = merged.candidates;
 
         // Branches whose upstream was deleted. Only meaningful with fresh
         // remote-tracking refs, so this requires a successful fetch — except in
@@ -336,7 +342,16 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // branches without `--force-delete`). Orphan worktrees keep the
             // existing auto-force behavior and are not surfaced here.
             let targets_for_unmerged = if opts.use_worktrunk {
-                resolve_merge_targets(git, &filter).unwrap_or_default()
+                match resolve_merge_targets(git, &filter) {
+                    Ok(targets) => targets,
+                    Err(e) => {
+                        ui.warning(&format!(
+                            "Could not resolve merge targets, \
+                             treating worktree branches as unmerged: {e}"
+                        ));
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -371,8 +386,18 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                 };
                 let unmerged = if opts.use_worktrunk {
-                    git.branch_has_unmerged_commits(branch, &targets_for_unmerged)
-                        .unwrap_or_default()
+                    match git.branch_has_unmerged_commits(branch, &targets_for_unmerged) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Assume unmerged: that only means the worktree is
+                            // surfaced for explicit confirmation rather than
+                            // silently force-removed.
+                            ui.warning(&format!(
+                                "Could not check whether '{branch}' has unmerged commits: {e}"
+                            ));
+                            true
+                        }
+                    }
                 } else {
                     false
                 };

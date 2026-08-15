@@ -177,6 +177,18 @@ fn run_cmd(bin: &str, args: &[&str], verbose: bool, workdir: Option<&Path>) -> R
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether a `git config` failure just means "the key is not set".
+///
+/// `git config --get`, `--get-all` and `--get-regexp` all exit 1 when they
+/// find nothing, which is a normal result rather than an error. Every other
+/// exit code — 128 for a broken repository, or a failure to spawn git at all —
+/// must be propagated, otherwise a genuinely broken environment is silently
+/// reported as an empty configuration.
+fn is_unset_key(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<GitCommandError>()
+        .is_some_and(|gerr| gerr.exit_code == Some(1))
+}
+
 /// Check if the worktrunk CLI (`wt`) is available on `$PATH`.
 pub fn worktrunk_available() -> bool {
     Command::new("wt")
@@ -855,7 +867,8 @@ impl Git {
                 .filter(|l| !l.is_empty())
                 .map(|l| l.to_string())
                 .collect()),
-            Err(_) => Ok(vec![]),
+            Err(e) if is_unset_key(&e) => Ok(vec![]),
+            Err(e) => Err(e),
         }
     }
 
@@ -863,7 +876,9 @@ impl Git {
     pub fn config_get(&self, key: &str) -> Result<Option<String>> {
         match self.run(&["config", "--get", key]) {
             Ok(val) if !val.is_empty() => Ok(Some(val)),
-            _ => Ok(None),
+            Ok(_) => Ok(None),
+            Err(e) if is_unset_key(&e) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -923,7 +938,8 @@ impl Git {
     pub fn config_section_exists(&self, section: &str) -> Result<bool> {
         match self.run(&["config", "--get-regexp", &format!("^{section}\\.")]) {
             Ok(out) => Ok(!out.is_empty()),
-            Err(_) => Ok(false),
+            Err(e) if is_unset_key(&e) => Ok(false),
+            Err(e) => Err(e),
         }
     }
 
@@ -954,7 +970,8 @@ impl Git {
                 }
                 Ok(branches)
             }
-            Err(_) => Ok(vec![]),
+            Err(e) if is_unset_key(&e) => Ok(vec![]),
+            Err(e) => Err(e),
         }
     }
 
@@ -1120,6 +1137,30 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_readers_propagate_failures_that_are_not_an_unset_key() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        // An invalid key pattern makes `git config --get-regexp` exit 6, not
+        // the exit 1 that means "nothing matched". It must not be reported as
+        // "the section does not exist".
+        assert!(
+            git.config_section_exists("[").is_err(),
+            "a malformed pattern must surface as an error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_readers_treat_an_unset_key_as_empty() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        assert_eq!(git.config_get("sync.never-set")?, None);
+        assert_eq!(git.config_get_all("sync.never-set")?, Vec::<String>::new());
+        assert!(!git.config_section_exists("never-set")?);
+        Ok(())
+    }
 
     #[test]
     fn config_remove_value_preserves_the_order_of_the_survivors() -> Result<()> {
