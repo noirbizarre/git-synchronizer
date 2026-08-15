@@ -63,6 +63,40 @@ cargo install --path .
 The crate is named `git-synchronizer` but installs a binary called `git-sync`,
 making it available as the `git sync` subcommand.
 
+### Man pages and completions
+
+Git rewrites `git sync --help` into `git help sync`, which runs `man git-sync`.
+That only works once the man page is installed — otherwise git reports
+*"No manual entry for git-sync"*. `cargo install` places the binary alone, so
+the pages have to be installed separately.
+
+From a checkout, `mise` does both, plus zsh completions:
+
+```sh
+mise run setup
+```
+
+Prebuilt release archives ship them under `man/` and `completions/`. Install by
+hand with:
+
+```sh
+cp man/*.1 ~/.local/share/man/man1/
+```
+
+Make sure that directory is on your `MANPATH` (most distributions add
+`~/.local/share/man` automatically). Then:
+
+```sh
+git sync --help   # full manual
+man git-sync-config-set
+```
+
+Without a man page installed, `git sync -h` still prints the short help, and
+`git-sync --help` (with a dash, bypassing git's dispatch) prints the long one.
+
+Completions are generated for bash, zsh, fish, elvish and PowerShell; drop the
+relevant file into your shell's completion directory.
+
 ## Usage
 
 ```sh

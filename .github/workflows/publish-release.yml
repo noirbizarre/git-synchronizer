@@ -90,6 +90,23 @@ jobs:
       - run: echo "RUSTFLAGS=${RUSTFLAGS} -C target-feature=+crt-static" >> "${GITHUB_ENV}"
         if: endsWith(matrix.target, 'windows-msvc')
 
+      # Ships the man pages alongside the binary: `git sync --help` is rewritten
+      # by git into `git help sync`, which runs `man git-sync` and fails when no
+      # page is installed. Built for the host rather than ${{ matrix.target }} —
+      # the output is plain text, identical for every target, and a host build
+      # avoids needing to run a cross-compiled build script.
+      - name: Generate man pages and completions
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(cargo build --message-format=json 2>/dev/null \
+            | jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("git-synchronizer")) | .out_dir' \
+            | tail -n 1)
+          test -n "$out"
+          mkdir -p dist/man dist/completions
+          cp "$out"/man/*.1 dist/man/
+          cp "$out"/completions/* dist/completions/
+
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: git-sync
@@ -98,6 +115,7 @@ jobs:
           # starting with `refs/tags/`. It is passed explicitly because this
           # workflow is dispatched, so GITHUB_REF names a branch, not the tag.
           ref: refs/tags/${{ inputs.tag }}
+          include: dist/man,dist/completions
           tar: all
           zip: windows
           checksum: sha256
