@@ -4,9 +4,9 @@ use demand::{Confirm, DemandOption, Input, MultiSelect, Spinner, SpinnerStyle};
 /// Terminal handle and style presets for consistent output.
 pub struct Ui {
     term: Term,
-    pub heading_style: Style,
-    pub muted_style: Style,
-    pub bold_style: Style,
+    heading_style: Style,
+    muted_style: Style,
+    bold_style: Style,
 }
 
 impl Default for Ui {
@@ -72,11 +72,6 @@ impl Ui {
             .write_line(&self.muted_style.apply_to(text).to_string());
     }
 
-    /// Print a plain line.
-    pub fn line(&self, text: &str) {
-        let _ = self.term.write_line(text);
-    }
-
     /// Print a blank line.
     pub fn blank(&self) {
         let _ = self.term.write_line("");
@@ -89,6 +84,18 @@ impl Ui {
                 .term
                 .write_line(&format!("  {} {}", self.muted_style.apply_to("-"), item));
         }
+    }
+
+    /// Print an indented `label: value` pair, with the label emphasised.
+    ///
+    /// Owns both the indentation and the label styling so callers never need
+    /// to reach for the style presets themselves.
+    pub fn field(&self, label: &str, value: &str) {
+        let _ = self.term.write_line(&format!(
+            "  {} {}",
+            self.bold_style.apply_to(format!("{label}:")),
+            value
+        ));
     }
 
     /// Ask for confirmation, pre-selecting `default`.

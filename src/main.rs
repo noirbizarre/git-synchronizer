@@ -99,64 +99,58 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                     ui.heading("Current configuration [sync]:");
                     ui.blank();
 
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("protected:"),
-                        if cfg.protected.is_empty() {
+                    ui.field(
+                        "protected",
+                        &if cfg.protected.is_empty() {
                             "(none)".to_string()
                         } else {
                             cfg.protected.join(", ")
-                        }
-                    ));
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("ignore:"),
-                        if cfg.ignore.is_empty() {
+                        },
+                    );
+                    ui.field(
+                        "ignore",
+                        &if cfg.ignore.is_empty() {
                             "(none)".to_string()
                         } else {
                             cfg.ignore.join(", ")
-                        }
-                    ));
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("remotes:"),
-                        match &cfg.remotes {
+                        },
+                    );
+                    ui.field(
+                        "remotes",
+                        &match &cfg.remotes {
                             Some(r) => r.join(", "),
                             None => "(all)".to_string(),
-                        }
-                    ));
+                        },
+                    );
 
                     let branch_protected = git.branch_protected_list()?;
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("branch protected:"),
-                        if branch_protected.is_empty() {
+                    ui.field(
+                        "branch protected",
+                        &if branch_protected.is_empty() {
                             "(none)".to_string()
                         } else {
                             branch_protected.join(", ")
-                        }
-                    ));
+                        },
+                    );
 
                     let branch_ignored = git.branch_ignored_list()?;
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("branch ignored:"),
-                        if branch_ignored.is_empty() {
+                    ui.field(
+                        "branch ignored",
+                        &if branch_ignored.is_empty() {
                             "(none)".to_string()
                         } else {
                             branch_ignored.join(", ")
-                        }
-                    ));
+                        },
+                    );
 
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("worktrunk:"),
+                    ui.field(
+                        "worktrunk",
                         match cfg.worktrunk {
                             Some(true) => "enabled",
                             Some(false) => "disabled",
                             None => "(auto-detect)",
-                        }
-                    ));
+                        },
+                    );
                 }
                 None => {
                     ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
