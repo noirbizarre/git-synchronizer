@@ -1,3 +1,10 @@
+//! Branch classification and merge detection.
+//!
+//! [`Filter`] decides which branches are protected or ignored;
+//! [`find_merged_local`] and its siblings decide which are merged. Merge
+//! detection runs several strategies from cheapest to most expensive, because
+//! no single git command recognises rebases, squashes and plain merges alike.
+
 use std::collections::HashSet;
 
 use anyhow::Result;
@@ -20,10 +27,15 @@ fn build_matcher(patterns: &[String]) -> Result<GlobSet> {
 /// Two independent mechanisms feed each category: global glob patterns from the
 /// `[sync]` config section, and per-branch git config flags
 /// (`branch.<name>.sync-protected` / `branch.<name>.sync-ignored`).
+#[derive(Debug)]
 pub struct Filter {
+    /// Glob patterns from `sync.protected`.
     protected: GlobSet,
+    /// Branches flagged with `branch.<name>.sync-protected`.
     protected_branches: HashSet<String>,
+    /// Glob patterns from `sync.ignore`.
     ignored: GlobSet,
+    /// Branches flagged with `branch.<name>.sync-ignored`.
     ignored_branches: HashSet<String>,
 }
 
@@ -74,9 +86,24 @@ pub fn resolve_merge_targets(git: &Git, filter: &Filter) -> Result<Vec<String>> 
     Ok(targets)
 }
 
+/// Outcome of a merged-branch scan.
+///
+/// Merge detection deliberately survives the failure of an individual
+/// strategy — `merge_adds_nothing` needs git >= 2.38, and a single unreadable
+/// ref should not hide every other merged branch. Those failures are collected
+/// here instead of being discarded, so the caller can surface them once the
+/// scan (and its spinner) has finished.
+#[derive(Debug, Default)]
+pub struct MergedLocal {
+    /// Branches detected as merged into a protected target.
+    pub candidates: Vec<String>,
+    /// One message per distinct merge-detection failure.
+    pub warnings: Vec<String>,
+}
+
 /// Return local branches that are merged into *any* of the protected branches
 /// and are neither protected nor ignored.
-pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<Vec<String>> {
+pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<MergedLocal> {
     let current = git.current_branch()?;
     let targets = resolve_merge_targets(git, filter)?;
 
@@ -126,13 +153,30 @@ pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<Vec<String>> {
         Git::squash_patch_id_match,
     ];
 
+    let mut warnings: Vec<String> = Vec::new();
+    let mut failed_strategies: HashSet<String> = HashSet::new();
+
     for strategy in strategies {
         for branch in &all_branches {
             if seen.contains(branch) {
                 continue;
             }
             for target in &targets {
-                if strategy(git, target, branch).unwrap_or(false) && seen.insert(branch.clone()) {
+                let merged = match strategy(git, target, branch) {
+                    Ok(merged) => merged,
+                    Err(e) => {
+                        // Keep probing the remaining strategies and branches,
+                        // but remember why this one could not answer. Dedupe
+                        // by message so one unsupported strategy does not
+                        // produce a warning per branch.
+                        let msg = format!("Merge detection partially failed: {e}");
+                        if failed_strategies.insert(msg.clone()) {
+                            warnings.push(msg);
+                        }
+                        false
+                    }
+                };
+                if merged && seen.insert(branch.clone()) {
                     candidates.push(branch.clone());
                     break;
                 }
@@ -141,7 +185,10 @@ pub fn find_merged_local(git: &Git, filter: &Filter) -> Result<Vec<String>> {
     }
 
     candidates.sort();
-    Ok(candidates)
+    Ok(MergedLocal {
+        candidates,
+        warnings,
+    })
 }
 
 /// Return local branches whose upstream tracking branch no longer exists.
@@ -201,17 +248,17 @@ pub fn find_merged_remote(git: &Git, filter: &Filter, remote: &str) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as StdCommand;
+    use std::process::Command;
 
     /// Create a repo with branches plus an additional `release/1.0` branch.
     fn init_repo_with_release() -> Result<(tempfile::TempDir, Git)> {
         let (dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let path = dir.path();
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "release/1.0"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
@@ -224,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_protected_patterns_match() -> Result<()> {
+    fn protected_patterns_match() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
@@ -242,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local() -> Result<()> {
+    fn find_merged_local_returns_only_merged_unprotected_branches() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
@@ -251,7 +298,7 @@ mod tests {
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
 
         // feature/done was merged, so it should appear
         assert!(merged.contains(&"feature/done".to_string()));
@@ -265,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_gone_local() -> Result<()> {
+    fn find_gone_local_returns_branches_whose_upstream_was_deleted() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -274,7 +321,7 @@ mod tests {
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         let gone = find_gone_local(&git, &filter_for(&git, &config)?, &merged)?;
 
         // Upstream was deleted and pruned.
@@ -289,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_gone_local_excludes_already_merged() -> Result<()> {
+    fn find_gone_local_excludes_already_merged() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -305,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_gone_local_excludes_current_and_protected() -> Result<()> {
+    fn find_gone_local_excludes_current_and_protected() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
 
         // Protected by pattern.
@@ -318,7 +365,7 @@ mod tests {
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
 
         // Checked out: never proposed for deletion.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "feature/gone"])
             .current_dir(dir.path().join("work"))
             .output()?;
@@ -333,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_excludes_current_branch() -> Result<()> {
+    fn find_merged_local_excludes_current_branch() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -343,33 +390,33 @@ mod tests {
         };
 
         let current = git.current_branch()?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(!merged.contains(&current));
         Ok(())
     }
 
     #[test]
-    fn test_find_merged_local_detects_cherry_picked_branches() -> Result<()> {
+    fn find_merged_local_detects_cherry_picked_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a feature branch with a commit
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/cherry"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("cherry.txt"), "cherry")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "cherry feature"])
             .current_dir(path)
             .output()?;
 
         // Cherry-pick onto main (simulating a rebase merge)
-        let log_output = StdCommand::new("git")
+        let log_output = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(path)
             .output()?;
@@ -377,23 +424,23 @@ mod tests {
             .trim()
             .to_string();
 
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
 
         // Add a diverging commit on main so cherry-pick creates a distinct commit
         std::fs::write(path.join("diverge.txt"), "diverge")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "diverge"])
             .current_dir(path)
             .output()?;
 
-        StdCommand::new("git")
+        Command::new("git")
             .args(["cherry-pick", &commit_sha])
             .current_dir(path)
             .output()?;
@@ -407,41 +454,41 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.contains(&"feature/cherry".to_string()));
         Ok(())
     }
 
     #[test]
-    fn test_find_merged_local_detects_squash_merged_branches() -> Result<()> {
+    fn find_merged_local_detects_squash_merged_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a feature branch with a commit
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/squash"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("squash.txt"), "squash")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash feature"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main (creates a single squash commit, not a merge commit)
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/squash"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge"])
             .current_dir(path)
             .output()?;
@@ -456,7 +503,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/squash".to_string()),
             "squash-merged branch should be detected as merged"
@@ -465,35 +512,35 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_tree_match_branches() -> Result<()> {
+    fn find_merged_local_detects_tree_match_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a feature branch with a commit
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/tree-match"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("tree.txt"), "tree content")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "tree feature"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main so both tips share the same tree object
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/tree-match"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge tree"])
             .current_dir(path)
             .output()?;
@@ -507,7 +554,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/tree-match".to_string()),
             "branch with matching tree SHA should be detected as merged"
@@ -516,26 +563,26 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_patch_id_branches() -> Result<()> {
+    fn find_merged_local_detects_patch_id_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Feature branch with one commit.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/patch-id"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("patch.txt"), "patch content\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "patch-id feature"])
             .current_dir(path)
             .output()?;
         let sha = String::from_utf8_lossy(
-            &StdCommand::new("git")
+            &Command::new("git")
                 .args(["rev-parse", "HEAD"])
                 .current_dir(path)
                 .output()?
@@ -548,24 +595,24 @@ mod tests {
         // the diff (and therefore the patch-id) is preserved. `git cherry`
         // should miss it (different author/committer date after amend may
         // still be matched, so we also tweak the message).
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("diverge.txt"), "diverge\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "diverge"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["cherry-pick", &sha])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "--amend", "-m", "patch-id feature (reworded)"])
             .current_dir(path)
             .output()?;
@@ -577,7 +624,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/patch-id".to_string()),
             "branch with matching patch-id should be detected as merged"
@@ -586,35 +633,35 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_simulated_merge_branches() -> Result<()> {
+    fn find_merged_local_detects_simulated_merge_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a feature branch that touches a.txt
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/squash-advanced"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("a.txt"), "feature content")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature: a.txt"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/squash-advanced"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge"])
             .current_dir(path)
             .output()?;
@@ -622,11 +669,11 @@ mod tests {
         // Advance main with an unrelated commit touching a different file,
         // so neither trees_match nor diff_empty would detect the branch.
         std::fs::write(path.join("b.txt"), "unrelated")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "main: unrelated b.txt"])
             .current_dir(path)
             .output()?;
@@ -639,7 +686,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/squash-advanced".to_string()),
             "squash-merged branch with advanced target should be detected via simulated merge"
@@ -648,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_detects_multi_commit_squash_via_patch_id() -> Result<()> {
+    fn find_merged_local_detects_multi_commit_squash_via_patch_id() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -657,50 +704,50 @@ mod tests {
         // (per-commit) cannot resolve and where `merge_adds_nothing` may
         // also miss when the squashed commit on target differs textually
         // from the branch's commits.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/multi-commit-squash"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("a.txt"), "line1\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature: line1"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("a.txt"), "line1\nline2\n")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature: line2"])
             .current_dir(path)
             .output()?;
 
         // Squash-merge onto main as a single commit.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "--squash", "feature/multi-commit-squash"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "squash merge"])
             .current_dir(path)
             .output()?;
 
         // Unrelated advance on main (defeats trees_match / diff_empty).
         std::fs::write(path.join("b.txt"), "unrelated")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "main: unrelated b.txt"])
             .current_dir(path)
             .output()?;
@@ -713,7 +760,7 @@ mod tests {
             remotes: None,
             worktrunk: None,
         };
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/multi-commit-squash".to_string()),
             "multi-commit branch squash-merged into main should be detected \
@@ -723,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_merge_targets_with_globs() -> Result<()> {
+    fn resolve_merge_targets_with_globs() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string(), "release/*".to_string()],
@@ -741,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_merged_local_no_targets() -> Result<()> {
+    fn find_merged_local_no_targets() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         // Use a pattern that matches nothing
         let config = Config {
@@ -751,13 +798,13 @@ mod tests {
             worktrunk: None,
         };
 
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.is_empty());
         Ok(())
     }
 
     #[test]
-    fn test_find_merged_local_respects_branch_protected() -> Result<()> {
+    fn find_merged_local_respects_branch_protected() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         let config = Config {
             protected: vec!["main".to_string()],
@@ -767,12 +814,12 @@ mod tests {
         };
 
         // Without per-branch protection, feature/done should be a candidate
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.contains(&"feature/done".to_string()));
 
         // Mark feature/done as per-branch protected
         git.set_branch_protected("feature/done", true)?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             !merged.contains(&"feature/done".to_string()),
             "per-branch protected branch should not be a deletion candidate"
@@ -784,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn test_branch_protected_serves_as_merge_target() -> Result<()> {
+    fn branch_protected_serves_as_merge_target() -> Result<()> {
         let (_dir, git) = init_repo_with_release()?;
         // Only use per-branch protection on "main" (no global patterns match anything)
         let config = Config {
@@ -795,12 +842,12 @@ mod tests {
         };
 
         // Without any real protected branches, nothing is a merge target
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(merged.is_empty());
 
         // Mark "main" as per-branch protected — it should now be a merge target
         git.set_branch_protected("main", true)?;
-        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             merged.contains(&"feature/done".to_string()),
             "branches merged into a per-branch protected branch should be candidates"
@@ -818,18 +865,12 @@ mod tests {
     /// would find through cherry / tree / patch-id / simulated-merge probes.
     /// This test pins that behaviour so extending it is a deliberate change.
     #[test]
-    fn test_find_merged_remote_only_detects_ancestor_merges() -> Result<()> {
+    fn find_merged_remote_only_detects_ancestor_merges() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let origin = dir.path().join("origin.git");
         let work = dir.path().join("work");
 
-        let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
-            StdCommand::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()?;
-            Ok(())
-        };
+        use crate::test_helpers::git_in;
 
         let (seed, _) = crate::test_helpers::init_repo()?;
         git_in(
@@ -876,7 +917,7 @@ mod tests {
             worktrunk: None,
         };
 
-        let local = find_merged_local(&git, &filter_for(&git, &config)?)?;
+        let local = find_merged_local(&git, &filter_for(&git, &config)?)?.candidates;
         assert!(
             local.contains(&"feature/squashed".to_string()),
             "local detection should catch the squash-merged branch"
@@ -914,7 +955,11 @@ mod tests {
         let filter = filter_for(&git, &config)?;
 
         assert!(filter.is_ignored("feature/done"));
-        assert!(!find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        assert!(
+            !find_merged_local(&git, &filter)?
+                .candidates
+                .contains(&"feature/done".to_string())
+        );
         Ok(())
     }
 
@@ -927,7 +972,7 @@ mod tests {
         assert!(filter.is_ignored("feature/done"));
         assert!(filter.is_ignored("feature/wip"));
         assert!(!filter.is_ignored("main"));
-        assert!(find_merged_local(&git, &filter)?.is_empty());
+        assert!(find_merged_local(&git, &filter)?.candidates.is_empty());
         Ok(())
     }
 
@@ -959,12 +1004,20 @@ mod tests {
         let config = config_with_ignore(&[]);
         let filter = filter_for(&git, &config)?;
         assert!(filter.is_ignored("feature/done"));
-        assert!(!find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        assert!(
+            !find_merged_local(&git, &filter)?
+                .candidates
+                .contains(&"feature/done".to_string())
+        );
 
         git.set_branch_ignored("feature/done", false)?;
         let filter = filter_for(&git, &config)?;
         assert!(!filter.is_ignored("feature/done"));
-        assert!(find_merged_local(&git, &filter)?.contains(&"feature/done".to_string()));
+        assert!(
+            find_merged_local(&git, &filter)?
+                .candidates
+                .contains(&"feature/done".to_string())
+        );
         Ok(())
     }
 
@@ -984,13 +1037,7 @@ mod tests {
         let origin = dir.path().join("origin.git");
         let work = dir.path().join("work");
 
-        let git_in = |cwd: &std::path::Path, args: &[&str]| -> Result<()> {
-            StdCommand::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()?;
-            Ok(())
-        };
+        use crate::test_helpers::git_in;
 
         let (seed, _) = crate::test_helpers::init_repo()?;
         git_in(

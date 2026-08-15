@@ -1,12 +1,19 @@
+//! Terminal output and prompts.
+//!
+//! All user-facing output goes through [`Ui`] so styling, indentation and
+//! error classification stay consistent. Output methods are best-effort and
+//! swallow I/O errors; prompts propagate them, since they need an answer.
+
 use console::{Style, Term};
 use demand::{Confirm, DemandOption, Input, MultiSelect, Spinner, SpinnerStyle};
 
 /// Terminal handle and style presets for consistent output.
+#[derive(Debug)]
 pub struct Ui {
     term: Term,
-    pub heading_style: Style,
-    pub muted_style: Style,
-    pub bold_style: Style,
+    heading_style: Style,
+    muted_style: Style,
+    bold_style: Style,
 }
 
 impl Default for Ui {
@@ -16,6 +23,7 @@ impl Default for Ui {
 }
 
 impl Ui {
+    /// Create a handle writing to stderr, so output never pollutes a pipe.
     pub fn new() -> Self {
         Self {
             term: Term::stderr(),
@@ -65,16 +73,54 @@ impl Ui {
             .write_line(&format!("{} {text}", console::style("✘").red()));
     }
 
+    /// Render a failed git operation with a friendly classification.
+    ///
+    /// Emits a single coloured line whose prefix is chosen from the
+    /// [`GitErrorKind`] of the underlying [`GitCommandError`], so a network or
+    /// auth failure reads as such instead of a bare "Failed to ...". Returns
+    /// the detected kind so callers can decide whether to surface a follow-up
+    /// warning (e.g. "detection may be stale").
+    ///
+    /// `action` is an infinitive phrase ("fetch from", "delete", "remove") and
+    /// `target` the thing acted upon.
+    pub fn report_failure(
+        &self,
+        action: &str,
+        target: &str,
+        err: &anyhow::Error,
+    ) -> crate::git::GitErrorKind {
+        use crate::git::{GitCommandError, GitErrorKind};
+
+        let styled = console::style(target).red();
+        if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
+            let cause = gerr.short_cause();
+            match gerr.kind {
+                GitErrorKind::Network => {
+                    self.error(&format!(
+                        "Network error: cannot {action} '{styled}' ({cause})."
+                    ));
+                }
+                GitErrorKind::Auth => {
+                    self.error(&format!(
+                        "Authentication failed while trying to {action} '{styled}': {cause}"
+                    ));
+                }
+                GitErrorKind::Other => {
+                    self.error(&format!("Failed to {action} '{styled}': {cause}"));
+                }
+            }
+            gerr.kind
+        } else {
+            self.error(&format!("Failed to {action} '{styled}': {err}"));
+            GitErrorKind::Other
+        }
+    }
+
     /// Print muted/dim text.
     pub fn muted(&self, text: &str) {
         let _ = self
             .term
             .write_line(&self.muted_style.apply_to(text).to_string());
-    }
-
-    /// Print a plain line.
-    pub fn line(&self, text: &str) {
-        let _ = self.term.write_line(text);
     }
 
     /// Print a blank line.
@@ -91,7 +137,28 @@ impl Ui {
         }
     }
 
-    /// Ask for confirmation, defaulting to "no" for safety.
+    /// Print an indented, dimmed line describing an action `--dry-run`
+    /// suppressed.
+    ///
+    /// Owns both the indentation and the `(dry-run)` marker so every preview
+    /// line is formatted identically.
+    pub fn dry_run(&self, text: &str) {
+        self.muted(&format!("  (dry-run) {text}"));
+    }
+
+    /// Print an indented `label: value` pair, with the label emphasised.
+    ///
+    /// Owns both the indentation and the label styling so callers never need
+    /// to reach for the style presets themselves.
+    pub fn field(&self, label: &str, value: &str) {
+        let _ = self.term.write_line(&format!(
+            "  {} {}",
+            self.bold_style.apply_to(format!("{label}:")),
+            value
+        ));
+    }
+
+    /// Ask for confirmation, pre-selecting `default`.
     pub fn confirm(&self, prompt: &str, default: bool) -> anyhow::Result<bool> {
         Ok(Confirm::new(prompt).selected(default).run()?)
     }
@@ -171,9 +238,63 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::{GitCommandError, GitErrorKind};
+
+    fn git_err(kind: GitErrorKind, stderr: &str) -> anyhow::Error {
+        anyhow::Error::new(GitCommandError {
+            program: "git".into(),
+            args: vec!["fetch".into(), "--prune".into(), "origin".into()],
+            exit_code: Some(1),
+            stderr: stderr.into(),
+            kind,
+        })
+    }
 
     #[test]
-    fn test_ui_default() {
+    fn report_failure_classifies_network() {
+        let ui = Ui::new();
+        let err = git_err(
+            GitErrorKind::Network,
+            "ssh: connect to host github.com port 22: No route to host",
+        );
+        assert_eq!(
+            ui.report_failure("fetch from", "origin", &err),
+            GitErrorKind::Network
+        );
+    }
+
+    #[test]
+    fn report_failure_classifies_auth() {
+        let ui = Ui::new();
+        let err = git_err(GitErrorKind::Auth, "Permission denied (publickey).");
+        assert_eq!(
+            ui.report_failure("fetch from", "origin", &err),
+            GitErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn report_failure_classifies_other() {
+        let ui = Ui::new();
+        let err = git_err(GitErrorKind::Other, "fatal: refusing to fetch");
+        assert_eq!(
+            ui.report_failure("fetch from", "origin", &err),
+            GitErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn report_failure_handles_non_git_error() {
+        let ui = Ui::new();
+        let err = anyhow::anyhow!("something went wrong");
+        assert_eq!(
+            ui.report_failure("pull", "feature", &err),
+            GitErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn ui_default() {
         let ui = Ui::default();
         // Smoke test: styles should be constructable
         let styled = ui.heading_style.apply_to("test");
@@ -181,14 +302,14 @@ mod tests {
     }
 
     #[test]
-    fn test_success_does_not_panic() {
+    fn success_does_not_panic() {
         let ui = Ui::new();
         ui.success("plain message");
         ui.success(&format!("with {} styling", console::style("cyan").cyan()));
     }
 
     #[test]
-    fn test_warning_does_not_panic() {
+    fn warning_does_not_panic() {
         let ui = Ui::new();
         ui.warning("plain warning");
         ui.warning(&format!(
@@ -198,20 +319,20 @@ mod tests {
     }
 
     #[test]
-    fn test_error_does_not_panic() {
+    fn error_does_not_panic() {
         let ui = Ui::new();
         ui.error("plain error");
         ui.error(&format!("with {} styling", console::style("red").red()));
     }
 
     #[test]
-    fn test_summary_singular() {
+    fn summary_singular() {
         let ui = Ui::new();
         ui.summary(1, "branch", "branches", "deleted");
     }
 
     #[test]
-    fn test_summary_plural() {
+    fn summary_plural() {
         let ui = Ui::new();
         ui.summary(5, "branch", "branches", "deleted");
     }

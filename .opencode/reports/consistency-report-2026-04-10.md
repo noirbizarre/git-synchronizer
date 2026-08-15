@@ -1,4 +1,14 @@
-# Consistency Report
+# Consistency Report (SUPERSEDED)
+
+> **This report is superseded and its recommendations must not be acted on.**
+> It predates the migration from release-plz to gh-ship + git-cliff and
+> references files and dependencies that no longer exist: `release-plz.toml`
+> (removed), and `thiserror` (no longer a dependency). Its suggestion to remove
+> `git-cliff` from `mise.toml` is now actively wrong -- git-cliff derives both
+> the next version and the changelog. All `README.md:NNN` line references are
+> also stale by roughly 80 lines.
+>
+> See `consistency-report-2026-08-15.md` for the current review.
 
 **Date**: 2026-04-10
 **Project**: git-synchronizer (git-sync)

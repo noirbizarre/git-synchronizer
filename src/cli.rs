@@ -1,3 +1,7 @@
+//! Command-line surface: flags, subcommands and their help text.
+//!
+//! Parsed with clap into [`Cli`] and [`ConfigAction`], which `main` dispatches.
+
 use clap::{Parser, Subcommand};
 
 /// Easily synchronize your local branches and worktrees.
@@ -85,7 +89,11 @@ pub enum ConfigAction {
 
     /// Set a configuration value
     Set {
-        /// Configuration key (e.g. protected)
+        /// Configuration key (e.g. worktrunk)
+        ///
+        /// For multi-valued keys (protected, ignore, remote) this replaces
+        /// every existing value; use the add-*/remove-* subcommands to edit
+        /// them individually.
         key: String,
         /// Value to set
         value: String,
@@ -164,7 +172,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn test_cli_default_flags() {
+    fn cli_default_flags() {
         let cli = Cli::parse_from(["git-sync"]);
         assert!(!cli.yes);
         assert!(!cli.dry_run);
@@ -181,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_flag_parsing() {
+    fn cli_flag_parsing() {
         let cli = Cli::parse_from(["git-sync", "-y", "-n", "-v", "--no-fetch", "--local-only"]);
         assert!(cli.yes);
         assert!(cli.dry_run);
@@ -192,28 +200,28 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_no_pull_flag() {
+    fn cli_no_pull_flag() {
         let cli = Cli::parse_from(["git-sync", "--no-pull"]);
         assert!(cli.no_pull);
         assert!(!cli.no_fetch);
     }
 
     #[test]
-    fn test_cli_worktrunk_flag() {
+    fn cli_worktrunk_flag() {
         let cli = Cli::parse_from(["git-sync", "--worktrunk"]);
         assert!(cli.worktrunk);
         assert!(!cli.no_worktrunk);
     }
 
     #[test]
-    fn test_cli_no_worktrunk_flag() {
+    fn cli_no_worktrunk_flag() {
         let cli = Cli::parse_from(["git-sync", "--no-worktrunk"]);
         assert!(!cli.worktrunk);
         assert!(cli.no_worktrunk);
     }
 
     #[test]
-    fn test_cli_worktrunk_overrides() {
+    fn cli_worktrunk_overrides() {
         // Last flag wins with overrides_with
         let cli = Cli::parse_from(["git-sync", "--worktrunk", "--no-worktrunk"]);
         assert!(!cli.worktrunk);
@@ -225,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_config_subcommand() {
+    fn cli_config_subcommand() {
         let cli = Cli::parse_from(["git-sync", "config", "list"]);
         assert!(cli.command.is_some());
         match cli.command.unwrap() {

@@ -1,3 +1,16 @@
+//! `git-sync`: synchronize local branches and worktrees with their remotes.
+//!
+//! This is a binary crate, so nothing is exported to downstream users and
+//! `pub` therefore means "visible to the other modules" — it carries no
+//! stability promise. Items used only within their own module stay private;
+//! everything crossing a module boundary is plain `pub` rather than
+//! `pub(crate)`, since in a binary the two are equivalent.
+//!
+//! `main` stays thin: it parses the CLI, dispatches, and renders errors. The
+//! work lives in [`cleaner`] (workflow), [`branches`] and [`worktrees`]
+//! (detection), [`config`] (settings), [`git`] (git access) and [`ui`]
+//! (output).
+
 mod branches;
 mod cleaner;
 mod cli;
@@ -69,17 +82,17 @@ fn is_cancelled(err: &anyhow::Error) -> bool {
 ///
 /// When the root cause is a [`GitCommandError`] classified as a network or
 /// auth failure, the headline gets a matching prefix so users can tell at a
-/// glance "this is my network, not a bug".
+/// glance "this is my network, not a bug". The classification itself lives in
+/// [`ui::Ui::report_failure`] so every failure path agrees on it.
 fn report_error(ui: &ui::Ui, err: &anyhow::Error) {
-    let headline = if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
-        let cause = gerr.short_cause();
-        match gerr.kind {
-            GitErrorKind::Network => format!("Network error: {cause}"),
-            GitErrorKind::Auth => format!("Authentication error: {cause}"),
-            GitErrorKind::Other => format!("{err}"),
+    let headline = match err.downcast_ref::<GitCommandError>().map(|gerr| gerr.kind) {
+        Some(GitErrorKind::Network) => {
+            format!("Network error: {}", short_cause(err))
         }
-    } else {
-        format!("{err}")
+        Some(GitErrorKind::Auth) => {
+            format!("Authentication error: {}", short_cause(err))
+        }
+        _ => format!("{err}"),
     };
 
     ui.error(&headline);
@@ -91,72 +104,81 @@ fn report_error(ui: &ui::Ui, err: &anyhow::Error) {
     }
 }
 
+/// Short, single-line cause of a git failure, when the error is one.
+fn short_cause(err: &anyhow::Error) -> String {
+    err.downcast_ref::<GitCommandError>()
+        .map(|gerr| gerr.short_cause().to_string())
+        .unwrap_or_else(|| err.to_string())
+}
+
+/// Whether a `[sync]` key is stored as repeated git config entries.
+///
+/// Multi-valued keys cannot be written with a plain `git config <key> <value>`
+/// once they hold more than one entry.
+fn is_multi_valued(key: &str) -> bool {
+    matches!(key, "protected" | "ignore" | "remote")
+}
+
 fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::List => {
-            match config::Config::load(git)? {
+            match config::Config::try_load(git)? {
                 Some(cfg) => {
                     ui.heading("Current configuration [sync]:");
                     ui.blank();
 
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("protected:"),
-                        if cfg.protected.is_empty() {
+                    ui.field(
+                        "protected",
+                        &if cfg.protected.is_empty() {
                             "(none)".to_string()
                         } else {
                             cfg.protected.join(", ")
-                        }
-                    ));
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("ignore:"),
-                        if cfg.ignore.is_empty() {
+                        },
+                    );
+                    ui.field(
+                        "ignore",
+                        &if cfg.ignore.is_empty() {
                             "(none)".to_string()
                         } else {
                             cfg.ignore.join(", ")
-                        }
-                    ));
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("remotes:"),
-                        match &cfg.remotes {
+                        },
+                    );
+                    ui.field(
+                        "remotes",
+                        &match &cfg.remotes {
                             Some(r) => r.join(", "),
                             None => "(all)".to_string(),
-                        }
-                    ));
+                        },
+                    );
 
                     let branch_protected = git.branch_protected_list()?;
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("branch protected:"),
-                        if branch_protected.is_empty() {
+                    ui.field(
+                        "branch protected",
+                        &if branch_protected.is_empty() {
                             "(none)".to_string()
                         } else {
                             branch_protected.join(", ")
-                        }
-                    ));
+                        },
+                    );
 
                     let branch_ignored = git.branch_ignored_list()?;
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("branch ignored:"),
-                        if branch_ignored.is_empty() {
+                    ui.field(
+                        "branch ignored",
+                        &if branch_ignored.is_empty() {
                             "(none)".to_string()
                         } else {
                             branch_ignored.join(", ")
-                        }
-                    ));
+                        },
+                    );
 
-                    ui.line(&format!(
-                        "  {} {}",
-                        ui.bold_style.apply_to("worktrunk:"),
+                    ui.field(
+                        "worktrunk",
                         match cfg.worktrunk {
                             Some(true) => "enabled",
                             Some(false) => "disabled",
                             None => "(auto-detect)",
-                        }
-                    ));
+                        },
+                    );
                 }
                 None => {
                     ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
@@ -167,7 +189,15 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
 
         ConfigAction::Set { key, value } => {
             let full_key = format!("{}.{key}", config::SECTION);
-            git.config_set(&full_key, &value)?;
+            if is_multi_valued(&key) {
+                // `git config --local <key> <value>` refuses a key that already
+                // holds several values. Treat `set` as "replace every value"
+                // so the outcome matches the verb regardless of prior state.
+                git.config_unset_all(&full_key)?;
+                git.config_add(&full_key, &value)?;
+            } else {
+                git.config_set(&full_key, &value)?;
+            }
             ui.success(&format!("Set {key} = {value}"));
             Ok(())
         }
@@ -182,13 +212,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         }
 
         ConfigAction::RemoveProtected { pattern } => {
-            let key = format!("{}.protected", config::SECTION);
-            let mut protected = git.config_get_all(&key)?;
-            protected.retain(|p| p != &pattern);
-            git.config_unset_all(&key)?;
-            for p in &protected {
-                git.config_add(&key, p)?;
-            }
+            git.config_remove_value(&format!("{}.protected", config::SECTION), &pattern)?;
             ui.success(&format!(
                 "Removed protected pattern: {}",
                 console::style(pattern).cyan()
@@ -206,13 +230,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         }
 
         ConfigAction::RemoveIgnore { pattern } => {
-            let key = format!("{}.ignore", config::SECTION);
-            let mut ignore = git.config_get_all(&key)?;
-            ignore.retain(|p| p != &pattern);
-            git.config_unset_all(&key)?;
-            for p in &ignore {
-                git.config_add(&key, p)?;
-            }
+            git.config_remove_value(&format!("{}.ignore", config::SECTION), &pattern)?;
             ui.success(&format!(
                 "Removed ignore pattern: {}",
                 console::style(pattern).cyan()
@@ -227,13 +245,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         }
 
         ConfigAction::RemoveRemote { name } => {
-            let key = format!("{}.remote", config::SECTION);
-            let mut remotes = git.config_get_all(&key)?;
-            remotes.retain(|r| r != &name);
-            git.config_unset_all(&key)?;
-            for r in &remotes {
-                git.config_add(&key, r)?;
-            }
+            git.config_remove_value(&format!("{}.remote", config::SECTION), &name)?;
             ui.success(&format!("Removed remote: {}", console::style(&name).cyan()));
             Ok(())
         }

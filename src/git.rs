@@ -1,6 +1,13 @@
+//! Thin, typed wrapper around the git command line.
+//!
+//! Everything that shells out to git funnels through [`Git`], so verbose
+//! echoing, the working directory and error classification are decided in one
+//! place. Failures surface as [`GitCommandError`], whose [`GitErrorKind`] lets
+//! callers tell a network or auth problem from a genuine git error.
+
 use std::collections::HashSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -177,6 +184,27 @@ fn run_cmd(bin: &str, args: &[&str], verbose: bool, workdir: Option<&Path>) -> R
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether a `git config` failure just means "the key is not set".
+///
+/// `git config --get`, `--get-all` and `--get-regexp` all exit 1 when they
+/// find nothing, which is a normal result rather than an error. Every other
+/// exit code — 128 for a broken repository, or a failure to spawn git at all —
+/// must be propagated, otherwise a genuinely broken environment is silently
+/// reported as an empty configuration.
+fn is_unset_key(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<GitCommandError>()
+        .is_some_and(|gerr| gerr.exit_code == Some(1))
+}
+
+/// Render a path as a git command-line argument.
+///
+/// git arguments must be UTF-8; a path that is not is a hard error rather than
+/// something to silently mangle with `to_string_lossy`.
+fn path_arg(path: &Path) -> Result<&str> {
+    path.to_str()
+        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
 /// Check if the worktrunk CLI (`wt`) is available on `$PATH`.
 pub fn worktrunk_available() -> bool {
     Command::new("wt")
@@ -184,16 +212,20 @@ pub fn worktrunk_available() -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        // `is_ok` alone only proves the process was spawned; a `wt` that exists
+        // but fails to run would still be reported as available.
+        .is_ok_and(|status| status.success())
 }
 
 /// A thin wrapper around git CLI invocations.
+#[derive(Debug, Clone)]
 pub struct Git {
     verbose: bool,
-    workdir: Option<std::path::PathBuf>,
+    workdir: Option<PathBuf>,
 }
 
 impl Git {
+    /// Create a handle operating in the process's current directory.
     pub fn new(verbose: bool) -> Self {
         Self {
             verbose,
@@ -202,12 +234,21 @@ impl Git {
     }
 
     /// Create a Git instance that operates in a specific directory.
-    #[cfg(test)]
     pub fn with_workdir(verbose: bool, workdir: &Path) -> Self {
         Self {
             verbose,
             workdir: Some(workdir.to_path_buf()),
         }
+    }
+
+    /// Re-root this instance at `dir`, preserving the verbose setting.
+    ///
+    /// Preferred over passing `git -C <dir>`: mixing `-C` with a configured
+    /// working directory makes a relative `-C` resolve against the latter,
+    /// which is surprising. Keeping the directory in one place removes the
+    /// interaction entirely.
+    pub fn in_dir(&self, dir: &Path) -> Self {
+        Self::with_workdir(self.verbose, dir)
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
@@ -216,6 +257,118 @@ impl Git {
 
     fn run_wt(&self, args: &[&str]) -> Result<String> {
         run_cmd("wt", args, self.verbose, self.workdir.as_deref())
+    }
+
+    /// Spawn a git command to completion and return its raw [`Output`].
+    ///
+    /// Owns the verbose echo and the working-directory wiring so that every
+    /// git invocation in this module behaves identically. Callers that need
+    /// the trimmed stdout and a bail-on-failure contract should use
+    /// [`Self::run`]; this is for the handful of commands that encode their
+    /// result in the exit status.
+    fn spawn(&self, args: &[&str]) -> Result<std::process::Output> {
+        if self.verbose {
+            eprintln!("  $ git {}", args.join(" "));
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        if let Some(dir) = &self.workdir {
+            cmd.current_dir(dir);
+        }
+
+        cmd.output()
+            .with_context(|| format!("failed to execute: git {}", args.join(" ")))
+    }
+
+    /// Pipe the stdout of one git command into the stdin of another and
+    /// return the second command's trimmed stdout.
+    ///
+    /// Both commands inherit the verbose echo and working directory from
+    /// `self`. A failure of either side is reported as a [`GitCommandError`].
+    fn run_piped(&self, first: &[&str], second: &[&str]) -> Result<String> {
+        if self.verbose {
+            eprintln!("  $ git {} | git {}", first.join(" "), second.join(" "));
+        }
+
+        let mut first_cmd = Command::new("git");
+        first_cmd.args(first);
+        if let Some(dir) = &self.workdir {
+            first_cmd.current_dir(dir);
+        }
+        first_cmd.stdout(std::process::Stdio::piped());
+        first_cmd.stderr(std::process::Stdio::piped());
+
+        let mut first_child = first_cmd
+            .spawn()
+            .with_context(|| format!("failed to execute: git {}", first.join(" ")))?;
+
+        let first_stdout = first_child
+            .stdout
+            .take()
+            .with_context(|| format!("failed to capture stdout of: git {}", first.join(" ")))?;
+
+        let mut second_cmd = Command::new("git");
+        second_cmd.args(second);
+        if let Some(dir) = &self.workdir {
+            second_cmd.current_dir(dir);
+        }
+        second_cmd.stdin(first_stdout);
+        second_cmd.stdout(std::process::Stdio::piped());
+        second_cmd.stderr(std::process::Stdio::piped());
+
+        let second_output = second_cmd
+            .spawn()
+            .with_context(|| format!("failed to execute: git {}", second.join(" ")))?
+            .wait_with_output()
+            .with_context(|| format!("failed to wait for: git {}", second.join(" ")))?;
+
+        let first_status = first_child
+            .wait()
+            .with_context(|| format!("failed to wait for: git {}", first.join(" ")))?;
+
+        if !first_status.success() {
+            anyhow::bail!(
+                "git {} failed (exit status: {})",
+                first.join(" "),
+                first_status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            );
+        }
+        if !second_output.status.success() {
+            return Err(anyhow::Error::new(command_error(
+                "git",
+                second,
+                &second_output,
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&second_output.stdout)
+            .trim_end()
+            .to_string())
+    }
+
+    /// Resolve the merge-base of two refs.
+    ///
+    /// Returns `Ok(None)` when the refs have no common ancestor (unrelated
+    /// histories, which `git merge-base` signals with exit code 1). Any other
+    /// failure — a bad ref, a missing git binary — is propagated so it is not
+    /// silently mistaken for "not merged".
+    fn merge_base(&self, target: &str, branch: &str) -> Result<Option<String>> {
+        let args = ["merge-base", target, branch];
+        let output = self.spawn(&args)?;
+
+        match output.status.code() {
+            Some(0) => {
+                let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok((!merge_base.is_empty()).then_some(merge_base))
+            }
+            // Exit 1: no merge base found (unrelated histories).
+            Some(1) => Ok(None),
+            _ => Err(anyhow::Error::new(command_error("git", &args, &output))),
+        }
     }
 
     /// Run a git command and return whether it exited successfully.
@@ -227,19 +380,7 @@ impl Git {
     /// This is useful for commands like `git diff --quiet` that encode their
     /// result in the exit status rather than in stdout.
     fn run_exit_code(&self, args: &[&str]) -> Result<bool> {
-        if self.verbose {
-            eprintln!("  $ git {}", args.join(" "));
-        }
-
-        let mut cmd = Command::new("git");
-        cmd.args(args);
-        if let Some(dir) = &self.workdir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to execute: git {}", args.join(" ")))?;
+        let output = self.spawn(args)?;
 
         match output.status.code() {
             Some(0) => Ok(true),
@@ -256,15 +397,7 @@ impl Git {
     /// This intentionally swallows stderr so callers can show a friendly
     /// error message instead of raw git output.
     pub fn is_inside_work_tree(&self) -> Result<bool> {
-        let mut cmd = Command::new("git");
-        cmd.args(["rev-parse", "--is-inside-work-tree"]);
-        if let Some(dir) = &self.workdir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd
-            .output()
-            .context("failed to execute: git rev-parse --is-inside-work-tree")?;
+        let output = self.spawn(&["rev-parse", "--is-inside-work-tree"])?;
 
         Ok(output.status.success())
     }
@@ -346,14 +479,9 @@ impl Git {
     /// Run `git pull --ff-only` in the given directory.
     ///
     /// Used for target branches checked out in a different worktree
-    /// (the one we are running from is handled by [`pull_ff_only`]).
-    pub fn pull_ff_only_in(&self, dir: &str) -> Result<()> {
-        run_git(
-            &["-C", dir, "pull", "--ff-only"],
-            self.verbose,
-            self.workdir.as_deref(),
-        )?;
-        Ok(())
+    /// (the one we are running from is handled by [`Self::pull_ff_only`]).
+    pub fn pull_ff_only_in(&self, dir: &Path) -> Result<()> {
+        self.in_dir(dir).pull_ff_only()
     }
 
     /// Fast-forward a local branch ref to match its remote-tracking branch.
@@ -423,7 +551,10 @@ impl Git {
 
     /// Use `git cherry` to detect rebase-merged branches.
     ///
-    /// Returns branch names whose commits have all been applied upstream.
+    /// Returns `true` when every commit of `branch` has already been applied
+    /// on `upstream` — that is, when `git cherry` prefixes every line with
+    /// `-`. Returns `false` when the output is empty, which means the branch
+    /// has no commits ahead of `upstream`.
     pub fn cherry_merged(&self, upstream: &str, branch: &str) -> Result<bool> {
         let out = self.run(&["cherry", upstream, branch])?;
         // If all lines start with `-`, every commit was cherry-picked upstream.
@@ -467,62 +598,11 @@ impl Git {
     /// and returns the first column (the patch-id) of each output line.
     /// Merge commits are filtered out — they have no meaningful patch-id.
     fn patch_ids_for_range(&self, range: &str) -> Result<Vec<String>> {
-        if self.verbose {
-            eprintln!("  $ git log -p --no-merges {range} | git patch-id --stable");
-        }
+        let stdout = self.run_piped(
+            &["log", "-p", "--no-merges", range],
+            &["patch-id", "--stable"],
+        )?;
 
-        let mut log_cmd = Command::new("git");
-        log_cmd.args(["log", "-p", "--no-merges", range]);
-        if let Some(dir) = &self.workdir {
-            log_cmd.current_dir(dir);
-        }
-        log_cmd.stdout(std::process::Stdio::piped());
-        log_cmd.stderr(std::process::Stdio::piped());
-
-        let mut log_child = log_cmd
-            .spawn()
-            .with_context(|| format!("failed to execute: git log {range}"))?;
-
-        let log_stdout = log_child
-            .stdout
-            .take()
-            .context("failed to capture git log stdout")?;
-
-        let mut pid_cmd = Command::new("git");
-        pid_cmd.args(["patch-id", "--stable"]);
-        if let Some(dir) = &self.workdir {
-            pid_cmd.current_dir(dir);
-        }
-        pid_cmd.stdin(log_stdout);
-        pid_cmd.stdout(std::process::Stdio::piped());
-        pid_cmd.stderr(std::process::Stdio::piped());
-
-        let pid_output = pid_cmd
-            .spawn()
-            .with_context(|| "failed to execute: git patch-id --stable".to_string())?
-            .wait_with_output()
-            .with_context(|| "failed to wait for git patch-id".to_string())?;
-
-        let log_status = log_child
-            .wait()
-            .with_context(|| format!("failed to wait for git log {range}"))?;
-
-        if !log_status.success() {
-            // Capturing stderr after wait is tricky; surface a generic error.
-            anyhow::bail!(
-                "git log {range} failed (exit status: {})",
-                log_status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".into())
-            );
-        }
-        if !pid_output.status.success() {
-            let args = ["patch-id", "--stable"];
-            return Err(anyhow::Error::new(command_error("git", &args, &pid_output)));
-        }
-
-        let stdout = String::from_utf8_lossy(&pid_output.stdout);
         let ids: Vec<String> = stdout
             .lines()
             .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
@@ -556,23 +636,10 @@ impl Git {
         }
 
         // Resolve merge-base; if unrelated histories, bail out as "no match".
-        let mut mb_cmd = Command::new("git");
-        mb_cmd.args(["merge-base", target, branch]);
-        if let Some(dir) = &self.workdir {
-            mb_cmd.current_dir(dir);
-        }
-        let mb_output = mb_cmd
-            .output()
-            .with_context(|| format!("failed to execute: git merge-base {target} {branch}"))?;
-        if !mb_output.status.success() {
-            return Ok(false);
-        }
-        let merge_base = String::from_utf8_lossy(&mb_output.stdout)
-            .trim()
-            .to_string();
-        if merge_base.is_empty() {
-            return Ok(false);
-        }
+        let merge_base = match self.merge_base(target, branch)? {
+            Some(mb) => mb,
+            None => return Ok(false),
+        };
 
         let target_range = format!("{merge_base}..{target}");
         let target_ids: std::collections::HashSet<String> = self
@@ -604,19 +671,7 @@ impl Git {
     /// `git >= 2.38` for the `--write-tree` option.
     pub fn merge_adds_nothing(&self, target: &str, branch: &str) -> Result<bool> {
         let args = ["merge-tree", "--write-tree", target, branch];
-        if self.verbose {
-            eprintln!("  $ git {}", args.join(" "));
-        }
-
-        let mut cmd = Command::new("git");
-        cmd.args(args);
-        if let Some(dir) = &self.workdir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to execute: git {}", args.join(" ")))?;
+        let output = self.spawn(&args)?;
 
         match output.status.code() {
             Some(0) => {
@@ -643,61 +698,8 @@ impl Git {
     /// Returns `Ok(None)` when the diff is empty (branch is identical to
     /// `base`).
     fn squash_patch_id(&self, base: &str, branch: &str) -> Result<Option<String>> {
-        if self.verbose {
-            eprintln!("  $ git diff {base} {branch} | git patch-id --stable");
-        }
+        let stdout = self.run_piped(&["diff", base, branch], &["patch-id", "--stable"])?;
 
-        let mut diff_cmd = Command::new("git");
-        diff_cmd.args(["diff", base, branch]);
-        if let Some(dir) = &self.workdir {
-            diff_cmd.current_dir(dir);
-        }
-        diff_cmd.stdout(std::process::Stdio::piped());
-        diff_cmd.stderr(std::process::Stdio::piped());
-
-        let mut diff_child = diff_cmd
-            .spawn()
-            .with_context(|| format!("failed to execute: git diff {base} {branch}"))?;
-
-        let diff_stdout = diff_child
-            .stdout
-            .take()
-            .context("failed to capture git diff stdout")?;
-
-        let mut pid_cmd = Command::new("git");
-        pid_cmd.args(["patch-id", "--stable"]);
-        if let Some(dir) = &self.workdir {
-            pid_cmd.current_dir(dir);
-        }
-        pid_cmd.stdin(diff_stdout);
-        pid_cmd.stdout(std::process::Stdio::piped());
-        pid_cmd.stderr(std::process::Stdio::piped());
-
-        let pid_output = pid_cmd
-            .spawn()
-            .with_context(|| "failed to execute: git patch-id --stable".to_string())?
-            .wait_with_output()
-            .with_context(|| "failed to wait for git patch-id".to_string())?;
-
-        let diff_status = diff_child
-            .wait()
-            .with_context(|| format!("failed to wait for git diff {base} {branch}"))?;
-
-        if !diff_status.success() {
-            anyhow::bail!(
-                "git diff {base} {branch} failed (exit status: {})",
-                diff_status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".into())
-            );
-        }
-        if !pid_output.status.success() {
-            let args = ["patch-id", "--stable"];
-            return Err(anyhow::Error::new(command_error("git", &args, &pid_output)));
-        }
-
-        let stdout = String::from_utf8_lossy(&pid_output.stdout);
         let id = stdout
             .lines()
             .next()
@@ -719,23 +721,10 @@ impl Git {
     /// (unrelated histories).
     pub fn squash_patch_id_match(&self, target: &str, branch: &str) -> Result<bool> {
         // Resolve merge-base; unrelated histories ⇒ no match.
-        let mut mb_cmd = Command::new("git");
-        mb_cmd.args(["merge-base", target, branch]);
-        if let Some(dir) = &self.workdir {
-            mb_cmd.current_dir(dir);
-        }
-        let mb_output = mb_cmd
-            .output()
-            .with_context(|| format!("failed to execute: git merge-base {target} {branch}"))?;
-        if !mb_output.status.success() {
-            return Ok(false);
-        }
-        let merge_base = String::from_utf8_lossy(&mb_output.stdout)
-            .trim()
-            .to_string();
-        if merge_base.is_empty() {
-            return Ok(false);
-        }
+        let merge_base = match self.merge_base(target, branch)? {
+            Some(mb) => mb,
+            None => return Ok(false),
+        };
 
         // Combined patch-id of the whole branch as a single squashed diff.
         let branch_pid = match self.squash_patch_id(&merge_base, branch)? {
@@ -780,21 +769,22 @@ impl Git {
     }
 
     /// Delete a branch on a remote (with --force-with-lease for safety).
-    pub fn push_delete(&self, remote: &str, branch: &str) -> Result<()> {
+    pub fn remote_branch_delete(&self, remote: &str, branch: &str) -> Result<()> {
         self.run(&["push", "--delete", "--force-with-lease", remote, branch])?;
         Ok(())
     }
 
     // ── Worktree operations ──────────────────────────────────────────
 
-    /// Parsed worktree entry from `git worktree list --porcelain`.
+    /// Return the parsed entries of `git worktree list --porcelain`.
     pub fn worktree_list(&self) -> Result<Vec<Worktree>> {
         let out = self.run(&["worktree", "list", "--porcelain"])?;
         Ok(parse_worktree_list(&out))
     }
 
     /// Remove a worktree by path.
-    pub fn worktree_remove(&self, path: &str, force: bool) -> Result<()> {
+    pub fn worktree_remove(&self, path: &Path, force: bool) -> Result<()> {
+        let path = path_arg(path)?;
         if force {
             self.run(&["worktree", "remove", "--force", path])?;
         } else {
@@ -817,15 +807,16 @@ impl Git {
 
     /// Check whether the worktree at `path` has untracked or uncommitted changes.
     ///
-    /// Runs `git -C <path> status --porcelain`; a non-empty output means the
-    /// worktree is dirty.
-    pub fn worktree_dirty(&self, path: &str) -> Result<bool> {
-        let out = run_git(
-            &["-C", path, "status", "--porcelain"],
-            self.verbose,
-            self.workdir.as_deref(),
-        )?;
+    /// Runs `git status --porcelain` from `path`; a non-empty output means
+    /// the worktree is dirty.
+    pub fn worktree_dirty(&self, path: &Path) -> Result<bool> {
+        let out = self.in_dir(path).status_porcelain()?;
         Ok(!out.trim().is_empty())
+    }
+
+    /// Return the porcelain status of the current working directory.
+    pub fn status_porcelain(&self) -> Result<String> {
+        self.run(&["status", "--porcelain"])
     }
 
     /// Check whether `branch` has at least one commit not present in **any**
@@ -861,6 +852,11 @@ impl Git {
 
     /// Remove a worktree via the worktrunk CLI, triggering pre/post-remove hooks.
     ///
+    /// `target` is either a branch name or a worktree path — `wt remove`
+    /// accepts both in the same positional slot, so path-based removal (for
+    /// detached-HEAD worktrees and orphans, where no branch name is
+    /// available) needs no separate entry point.
+    ///
     /// Uses `--foreground` to wait for hooks to complete and `--yes` to skip
     /// wt's approval prompts (git-sync already confirmed with the user).
     /// `wt` deletes the associated branch itself; git-sync skips its own
@@ -870,30 +866,8 @@ impl Git {
     /// untracked/uncommitted changes. When `force_delete` is true, passes
     /// `--force-delete` so branch deletion succeeds even when the branch has
     /// commits not merged into a target.
-    pub fn worktrunk_remove(&self, branch: &str, force: bool, force_delete: bool) -> Result<()> {
-        let mut args: Vec<&str> = vec!["remove", branch, "--foreground", "--yes"];
-        if force {
-            args.push("--force");
-        }
-        if force_delete {
-            args.push("--force-delete");
-        }
-        self.run_wt(&args)?;
-        Ok(())
-    }
-
-    /// Remove a worktree via the worktrunk CLI using its path.
-    ///
-    /// Used for detached HEAD worktrees or orphans where the branch name
-    /// is not available. Falls back to path-based removal. See
-    /// [`worktrunk_remove`](Self::worktrunk_remove) for flag semantics.
-    pub fn worktrunk_remove_by_path(
-        &self,
-        path: &str,
-        force: bool,
-        force_delete: bool,
-    ) -> Result<()> {
-        let mut args: Vec<&str> = vec!["remove", path, "--foreground", "--yes"];
+    pub fn worktrunk_remove(&self, target: &str, force: bool, force_delete: bool) -> Result<()> {
+        let mut args: Vec<&str> = vec!["remove", target, "--foreground", "--yes"];
         if force {
             args.push("--force");
         }
@@ -914,7 +888,8 @@ impl Git {
                 .filter(|l| !l.is_empty())
                 .map(|l| l.to_string())
                 .collect()),
-            Err(_) => Ok(vec![]),
+            Err(e) if is_unset_key(&e) => Ok(vec![]),
+            Err(e) => Err(e),
         }
     }
 
@@ -922,7 +897,9 @@ impl Git {
     pub fn config_get(&self, key: &str) -> Result<Option<String>> {
         match self.run(&["config", "--get", key]) {
             Ok(val) if !val.is_empty() => Ok(Some(val)),
-            _ => Ok(None),
+            Ok(_) => Ok(None),
+            Err(e) if is_unset_key(&e) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -956,11 +933,34 @@ impl Git {
         Ok(())
     }
 
+    /// Remove a single value from a multi-valued config key, preserving the
+    /// order of the values that remain.
+    ///
+    /// `git config --unset` takes a value regex rather than a literal, so
+    /// removing one entry safely means rewriting the whole key: read the
+    /// values, drop the matching ones, clear the key and re-add the rest in
+    /// their original order. Removing a value that is not present is a no-op.
+    pub fn config_remove_value(&self, key: &str, value: &str) -> Result<()> {
+        let mut values = self.config_get_all(key)?;
+        let before = values.len();
+        values.retain(|v| v != value);
+        if values.len() == before {
+            return Ok(());
+        }
+
+        self.config_unset_all(key)?;
+        for remaining in &values {
+            self.config_add(key, remaining)?;
+        }
+        Ok(())
+    }
+
     /// Check whether a config section exists.
     pub fn config_section_exists(&self, section: &str) -> Result<bool> {
         match self.run(&["config", "--get-regexp", &format!("^{section}\\.")]) {
             Ok(out) => Ok(!out.is_empty()),
-            Err(_) => Ok(false),
+            Err(e) if is_unset_key(&e) => Ok(false),
+            Err(e) => Err(e),
         }
     }
 
@@ -991,7 +991,8 @@ impl Git {
                 }
                 Ok(branches)
             }
-            Err(_) => Ok(vec![]),
+            Err(e) if is_unset_key(&e) => Ok(vec![]),
+            Err(e) => Err(e),
         }
     }
 
@@ -1050,18 +1051,23 @@ fn refspec_safe(pattern: &str) -> bool {
 /// A worktree entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
-    pub path: String,
-    pub head: Option<String>,
+    /// Absolute path of the worktree directory.
+    pub path: PathBuf,
+    /// Checked-out branch, or `None` for a detached HEAD.
     pub branch: Option<String>,
+    /// Whether this entry is the bare repository itself.
     pub is_bare: bool,
+    /// Whether the worktree is locked; locked worktrees are never removed.
     pub is_locked: bool,
+    /// Reason recorded with the lock, when one was given.
     pub lock_reason: Option<String>,
 }
 
 /// Parse `git branch` output (with leading `*`, `+` and whitespace).
 ///
-/// `*` marks the current branch, `+` marks branches checked out in
-/// other linked worktrees — both are stripped.
+/// `*` marks the current branch and those entries are **excluded** from the
+/// result. `+` marks branches checked out in other linked worktrees; only its
+/// `+ ` prefix is stripped and the branch is kept.
 fn parse_branch_list(output: &str) -> Vec<String> {
     output
         .lines()
@@ -1109,17 +1115,12 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
                 worktrees.push(wt);
             }
             current = Some(Worktree {
-                path: path.to_string(),
-                head: None,
+                path: PathBuf::from(path),
                 branch: None,
                 is_bare: false,
                 is_locked: false,
                 lock_reason: None,
             });
-        } else if let Some(head) = line.strip_prefix("HEAD ") {
-            if let Some(ref mut wt) = current {
-                wt.head = Some(head.to_string());
-            }
         } else if let Some(branch) = line.strip_prefix("branch ") {
             if let Some(ref mut wt) = current {
                 // Strip refs/heads/ prefix
@@ -1156,9 +1157,123 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{
+        advance_remote, init_repo_with_local_remote, init_repo_with_worktree_config,
+    };
 
     #[test]
-    fn test_classify_network_signatures() {
+    fn config_readers_propagate_failures_that_are_not_an_unset_key() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        // An invalid key pattern makes `git config --get-regexp` exit 6, not
+        // the exit 1 that means "nothing matched". It must not be reported as
+        // "the section does not exist".
+        assert!(
+            git.config_section_exists("[").is_err(),
+            "a malformed pattern must surface as an error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_readers_treat_an_unset_key_as_empty() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        assert_eq!(git.config_get("sync.never-set")?, None);
+        assert_eq!(git.config_get_all("sync.never-set")?, Vec::<String>::new());
+        assert!(!git.config_section_exists("never-set")?);
+        Ok(())
+    }
+
+    #[test]
+    fn config_remove_value_preserves_the_order_of_the_survivors() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+        let key = "sync.protected";
+
+        for value in ["main", "develop", "release", "staging"] {
+            git.config_add(key, value)?;
+        }
+
+        git.config_remove_value(key, "release")?;
+
+        assert_eq!(
+            git.config_get_all(key)?,
+            vec!["main", "develop", "staging"],
+            "the remaining values keep their original order"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_remove_value_is_a_noop_for_an_absent_value() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+        let key = "sync.protected";
+
+        git.config_add(key, "main")?;
+        git.config_remove_value(key, "never-added")?;
+
+        assert_eq!(git.config_get_all(key)?, vec!["main"]);
+        Ok(())
+    }
+
+    #[test]
+    fn is_inside_work_tree_distinguishes_repos_from_plain_directories() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
+        assert!(git.is_inside_work_tree()?, "a git repo is a work tree");
+
+        let plain = tempfile::tempdir()?;
+        let outside = Git::with_workdir(false, plain.path());
+        assert!(
+            !outside.is_inside_work_tree()?,
+            "a plain directory is not a work tree"
+        );
+
+        drop(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_base_returns_none_for_unrelated_histories() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // An orphan branch shares no history with the initial commit.
+        Command::new("git")
+            .args(["checkout", "--orphan", "unrelated"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("other.txt"), "other")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "unrelated root"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(
+            git.merge_base("main", "unrelated")?.is_none(),
+            "unrelated histories have no merge base"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merge_base_propagates_a_bad_ref_instead_of_reporting_no_match() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        // A non-existent ref makes git exit 128, which must not be conflated
+        // with the exit-1 "no merge base" signal.
+        assert!(
+            git.merge_base("main", "does-not-exist").is_err(),
+            "a bad ref must surface as an error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classify_network_signatures() {
         let cases = [
             "ssh: connect to host github.com port 22: No route to host\nfatal: Could not read from remote repository.",
             "ssh: Could not resolve hostname github.com: Temporary failure in name resolution",
@@ -1176,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_auth_signatures() {
+    fn classify_auth_signatures() {
         let cases = [
             "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
             "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://example.com/foo.git/'",
@@ -1191,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_other() {
+    fn classify_other() {
         let cases = [
             "",
             "fatal: ambiguous argument 'HEAD~10': unknown revision",
@@ -1207,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn test_git_command_error_display_has_no_double_exit() {
+    fn git_command_error_display_has_no_double_exit() {
         let err = GitCommandError {
             program: "git".into(),
             args: vec!["fetch".into(), "origin".into()],
@@ -1221,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn test_git_command_error_short_cause_skips_blank_lines() {
+    fn git_command_error_short_cause_skips_blank_lines() {
         let err = GitCommandError {
             program: "git".into(),
             args: vec!["fetch".into()],
@@ -1237,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_git_failure_returns_command_error() {
+    fn run_git_failure_returns_command_error() {
         // Run `git` against a non-existent option to provoke a guaranteed
         // non-zero exit without depending on a workdir.
         let err = run_git(&["--definitely-not-a-real-flag"], false, None).unwrap_err();
@@ -1249,27 +1364,27 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_branch_list() {
+    fn parse_branch_list_excludes_the_current_branch() {
         let output = "  feature/foo\n* main\n  bugfix/bar\n";
         let branches = parse_branch_list(output);
         assert_eq!(branches, vec!["feature/foo", "bugfix/bar"]);
     }
 
     #[test]
-    fn test_parse_branch_list_strips_worktree_marker() {
+    fn parse_branch_list_strips_worktree_marker() {
         let output = "  feature/foo\n* main\n+ feature/wt\n  bugfix/bar\n";
         let branches = parse_branch_list(output);
         assert_eq!(branches, vec!["feature/foo", "feature/wt", "bugfix/bar"]);
     }
 
     #[test]
-    fn test_parse_branch_list_empty() {
+    fn parse_branch_list_empty() {
         let branches = parse_branch_list("");
         assert!(branches.is_empty());
     }
 
     #[test]
-    fn test_parse_gone_upstreams() {
+    fn parse_gone_upstreams_finds_branches_whose_remote_ref_vanished() {
         let heads = "\
 main\0refs/remotes/origin/main
 feature/gone\0refs/remotes/origin/feature/gone
@@ -1283,13 +1398,13 @@ local-only\0";
     }
 
     #[test]
-    fn test_parse_gone_upstreams_ignores_branches_without_upstream() {
+    fn parse_gone_upstreams_ignores_branches_without_upstream() {
         let heads = "solo\0\nother\0";
         assert_eq!(parse_gone_upstreams(heads, ""), Vec::<String>::new());
     }
 
     #[test]
-    fn test_parse_gone_upstreams_all_gone_when_no_remote_refs() {
+    fn parse_gone_upstreams_all_gone_when_no_remote_refs() {
         let heads = "a\0refs/remotes/origin/a\nb\0refs/remotes/origin/b";
         assert_eq!(
             parse_gone_upstreams(heads, ""),
@@ -1298,7 +1413,7 @@ local-only\0";
     }
 
     #[test]
-    fn test_parse_gone_upstreams_handles_slashed_names_and_empty_input() {
+    fn parse_gone_upstreams_handles_slashed_names_and_empty_input() {
         let heads = "feat/a/b/c\0refs/remotes/upstream/feat/a/b/c";
         assert_eq!(
             parse_gone_upstreams(heads, "refs/remotes/origin/feat/a/b/c"),
@@ -1308,7 +1423,7 @@ local-only\0";
     }
 
     #[test]
-    fn test_parse_worktree_list() {
+    fn parse_worktree_list_reads_the_porcelain_format() {
         let output = "\
 worktree /home/user/project
 HEAD abc1234
@@ -1325,28 +1440,31 @@ bare
         let worktrees = parse_worktree_list(output);
         assert_eq!(worktrees.len(), 3);
 
-        assert_eq!(worktrees[0].path, "/home/user/project");
+        assert_eq!(worktrees[0].path, PathBuf::from("/home/user/project"));
         assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
         assert!(!worktrees[0].is_bare);
         assert!(!worktrees[0].is_locked);
 
-        assert_eq!(worktrees[1].path, "/home/user/project-feature");
+        assert_eq!(
+            worktrees[1].path,
+            PathBuf::from("/home/user/project-feature")
+        );
         assert_eq!(worktrees[1].branch.as_deref(), Some("feature/foo"));
         assert!(!worktrees[1].is_locked);
 
-        assert_eq!(worktrees[2].path, "/home/user/project-bare");
+        assert_eq!(worktrees[2].path, PathBuf::from("/home/user/project-bare"));
         assert!(worktrees[2].is_bare);
         assert!(!worktrees[2].is_locked);
     }
 
     #[test]
-    fn test_parse_worktree_list_empty() {
+    fn parse_worktree_list_empty() {
         let worktrees = parse_worktree_list("");
         assert!(worktrees.is_empty());
     }
 
     #[test]
-    fn test_parse_worktree_list_locked_no_reason() {
+    fn parse_worktree_list_locked_no_reason() {
         let output = "\
 worktree /home/user/project
 HEAD abc1234
@@ -1369,7 +1487,7 @@ locked
     }
 
     #[test]
-    fn test_parse_worktree_list_locked_with_reason() {
+    fn parse_worktree_list_locked_with_reason() {
         let output = "\
 worktree /home/user/project
 HEAD abc1234
@@ -1395,36 +1513,9 @@ locked work in progress, do not remove
 
     /// Integration test: verify basic git operations in a temporary repo.
     #[test]
-    fn test_git_in_temp_repo() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn git_in_temp_repo() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        // Initialize a bare-minimum repo
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-
-        // Create an initial commit
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
 
         // Test current branch
         assert_eq!(git.current_branch()?, "main");
@@ -1473,31 +1564,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_delete() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn branch_delete_removes_a_merged_branch() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create and merge a branch
         Command::new("git")
@@ -1522,8 +1591,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         let branches = git.local_branches()?;
         assert!(branches.contains(&"feature/to-delete".to_string()));
 
@@ -1536,33 +1603,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_remotes_empty() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
+    fn remotes_empty() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
         let remotes = git.remotes()?;
         assert!(remotes.is_empty());
 
@@ -1570,31 +1613,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_cherry_merged() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn cherry_merged_detects_a_rebase_merged_branch() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a feature branch
         Command::new("git")
@@ -1639,8 +1660,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // The branch's commit was cherry-picked, so cherry_merged should be true
         assert!(git.cherry_merged("main", "feature/cherry-test")?);
 
@@ -1666,31 +1685,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_diff_empty() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn diff_empty_detects_a_branch_that_nets_out_to_no_change() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // A branch that adds a file and then reverts it: its commits net out to
         // no content change relative to the fork point.
@@ -1734,8 +1731,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         assert!(git.diff_empty("main", "feature/no-op")?);
 
         // Create an unmerged branch — the three-dot diff must NOT be empty.
@@ -1765,31 +1760,9 @@ locked work in progress, do not remove
     /// the branch's changes. This case is covered by `squash_patch_id_match` /
     /// `merge_adds_nothing` instead.
     #[test]
-    fn test_diff_empty_does_not_claim_squash_merges() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn diff_empty_does_not_claim_squash_merges() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         Command::new("git")
             .args(["checkout", "-b", "feature/squash-test"])
@@ -1818,8 +1791,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // diff_empty stays silent…
         assert!(!git.diff_empty("main", "feature/squash-test")?);
         // …but the branch is still detected as merged by the dedicated strategies.
@@ -1829,31 +1800,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_trees_match() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn trees_match_detects_an_identical_tree() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a feature branch with a commit
         Command::new("git")
@@ -1884,8 +1833,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // After squash-merge, main and the branch have the same tree
         assert!(git.trees_match("main", "feature/squash-test")?);
 
@@ -1910,31 +1857,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_merge_adds_nothing() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn merge_adds_nothing_detects_a_fully_contained_branch() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a feature branch that touches a.txt
         Command::new("git")
@@ -1981,8 +1906,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // Sanity check: the cheaper detectors no longer fire.
         assert!(!git.trees_match("main", "feature/squash")?);
         assert!(!git.diff_empty("main", "feature/squash")?);
@@ -2017,31 +1940,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_squash_patch_id_match() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn squash_patch_id_match_detects_a_squash_merge() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test\n")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Feature branch with TWO commits — combined diff = "line1\nline2\n"
         // on a.txt. This is the canonical case `patch_id_match` per-commit
@@ -2093,8 +1994,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
-
         // Sanity: textual detectors that compare per-commit fail here.
         // (Two branch patch-ids cannot all be found among target's
         // single squash patch-id.)
@@ -2141,31 +2040,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_worktree_list_integration() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn worktree_list_integration() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create a branch and worktree
         Command::new("git")
@@ -2178,7 +2055,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
         let worktrees = git.worktree_list()?;
 
         // Should have at least 2 worktrees: main repo + the added one
@@ -2193,33 +2069,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_protected_list_empty() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
+    fn branch_protected_list_empty() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
         let protected = git.branch_protected_list()?;
         assert!(protected.is_empty());
 
@@ -2227,31 +2079,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_protected_list() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn branch_protected_list_returns_flagged_branches() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Mark two branches as protected via per-branch config
         Command::new("git")
@@ -2263,7 +2093,6 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        let git = Git::with_workdir(false, path);
         let mut protected = git.branch_protected_list()?;
         protected.sort();
         assert_eq!(protected, vec!["develop", "staging"]);
@@ -2272,33 +2101,8 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_set_branch_protected_and_unset() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
-
-        let git = Git::with_workdir(false, path);
+    fn set_branch_protected_and_unset() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Set protection
         git.set_branch_protected("develop", true)?;
@@ -2318,59 +2122,8 @@ locked work in progress, do not remove
 
     // ── Worktree-config tests ────────────────────────────────────────
 
-    /// Helper: create a repo with `extensions.worktreeConfig = true` and
-    /// a linked worktree, returning (tempdir, main_path, worktree_path).
-    fn init_repo_with_worktree_config()
-    -> Result<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
-        let dir = tempfile::tempdir()?;
-        let main_path = dir.path().join("main-repo");
-        std::fs::create_dir_all(&main_path)?;
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(&main_path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&main_path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&main_path)
-            .output()?;
-
-        std::fs::write(main_path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&main_path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&main_path)
-            .output()?;
-
-        // Enable extensions.worktreeConfig
-        Command::new("git")
-            .args(["config", "extensions.worktreeConfig", "true"])
-            .current_dir(&main_path)
-            .output()?;
-
-        // Create a branch and a linked worktree
-        Command::new("git")
-            .args(["branch", "feature/wt"])
-            .current_dir(&main_path)
-            .output()?;
-        let wt_path = dir.path().join("linked-wt");
-        Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/wt"])
-            .current_dir(&main_path)
-            .output()?;
-
-        Ok((dir, main_path, wt_path))
-    }
-
     #[test]
-    fn test_config_set_from_linked_worktree_writes_to_shared_config() -> Result<()> {
+    fn config_set_from_linked_worktree_writes_to_shared_config() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Write config from the linked worktree
@@ -2386,7 +2139,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_config_add_from_linked_worktree_writes_to_shared_config() -> Result<()> {
+    fn config_add_from_linked_worktree_writes_to_shared_config() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Add config values from the linked worktree
@@ -2403,7 +2156,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_config_unset_all_from_linked_worktree_clears_shared_config() -> Result<()> {
+    fn config_unset_all_from_linked_worktree_clears_shared_config() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Set some values from the main worktree
@@ -2423,7 +2176,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_set_branch_protected_from_linked_worktree() -> Result<()> {
+    fn set_branch_protected_from_linked_worktree() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Set per-branch protection from the linked worktree
@@ -2444,7 +2197,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_config_section_exists_across_worktrees() -> Result<()> {
+    fn config_section_exists_across_worktrees() -> Result<()> {
         let (_dir, main_path, wt_path) = init_repo_with_worktree_config()?;
 
         // Write from linked worktree
@@ -2461,95 +2214,8 @@ locked work in progress, do not remove
 
     // ── Pull / fast-forward tests ────────────────────────────────────
 
-    /// Helper: create a repo with a local bare "remote" and tracking set up.
-    /// Returns (tempdir, workdir_path, bare_remote_path).
-    fn init_repo_with_local_remote()
-    -> Result<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
-        let dir = tempfile::tempdir()?;
-
-        // Create a bare "remote" repo
-        let bare_path = dir.path().join("remote.git");
-        Command::new("git")
-            .args([
-                "init",
-                "--bare",
-                "--initial-branch=main",
-                bare_path.to_str().unwrap(),
-            ])
-            .output()?;
-
-        // Clone it to get a working repo with tracking
-        let work_path = dir.path().join("work");
-        Command::new("git")
-            .args([
-                "clone",
-                bare_path.to_str().unwrap(),
-                work_path.to_str().unwrap(),
-            ])
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&work_path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&work_path)
-            .output()?;
-
-        // Create an initial commit and push
-        std::fs::write(work_path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&work_path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&work_path)
-            .output()?;
-        Command::new("git")
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work_path)
-            .output()?;
-
-        Ok((dir, work_path, bare_path))
-    }
-
-    /// Advance the bare remote by pushing from a temporary second clone.
-    fn advance_remote(bare_path: &Path, dir: &Path) -> Result<()> {
-        let pusher = dir.join("pusher");
-        Command::new("git")
-            .args([
-                "clone",
-                bare_path.to_str().unwrap(),
-                pusher.to_str().unwrap(),
-            ])
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&pusher)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&pusher)
-            .output()?;
-        std::fs::write(pusher.join("new.txt"), "new content")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&pusher)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "remote advance"])
-            .current_dir(&pusher)
-            .output()?;
-        Command::new("git")
-            .args(["push"])
-            .current_dir(&pusher)
-            .output()?;
-        Ok(())
-    }
-
     #[test]
-    fn test_branch_upstream_with_tracking() -> Result<()> {
+    fn branch_upstream_with_tracking() -> Result<()> {
         let (_dir, work_path, _bare_path) = init_repo_with_local_remote()?;
         let git = Git::with_workdir(false, &work_path);
 
@@ -2563,7 +2229,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_branch_upstream_without_tracking() -> Result<()> {
+    fn branch_upstream_without_tracking() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let git = Git::with_workdir(false, dir.path());
 
@@ -2575,7 +2241,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_pull_ff_only() -> Result<()> {
+    fn pull_ff_only_fast_forwards_the_current_branch() -> Result<()> {
         let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
 
         // Advance the remote with a new commit
@@ -2601,7 +2267,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_pull_ff_only_in() -> Result<()> {
+    fn pull_ff_only_in_fast_forwards_a_linked_worktree() -> Result<()> {
         let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
 
         // Create a branch and a linked worktree
@@ -2664,8 +2330,7 @@ locked work in progress, do not remove
             .output()?;
 
         // Pull in the linked worktree
-        let wt_path_str = wt_path.to_str().unwrap();
-        git.pull_ff_only_in(wt_path_str)?;
+        git.pull_ff_only_in(&wt_path)?;
 
         // The new file should exist in the worktree
         assert!(wt_path.join("wt-new.txt").exists());
@@ -2674,7 +2339,7 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_fetch_update_branch() -> Result<()> {
+    fn fetch_update_branch_advances_a_branch_without_checkout() -> Result<()> {
         let (dir, work_path, bare_path) = init_repo_with_local_remote()?;
 
         // Create a branch, push it, then check out main
@@ -2741,22 +2406,22 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_worktree_dirty_detects_untracked() -> Result<()> {
+    fn worktree_dirty_detects_untracked() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Clean repo → not dirty
-        assert!(!git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(!git.worktree_dirty(path)?);
 
         // Add an untracked file → dirty
         std::fs::write(path.join("untracked.txt"), "noise")?;
-        assert!(git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(git.worktree_dirty(path)?);
 
         Ok(())
     }
 
     #[test]
-    fn test_worktree_dirty_detects_modified() -> Result<()> {
+    fn worktree_dirty_detects_modified() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
@@ -2771,17 +2436,17 @@ locked work in progress, do not remove
             .current_dir(path)
             .output()?;
 
-        assert!(!git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(!git.worktree_dirty(path)?);
 
         // Modify it → dirty
         std::fs::write(path.join("file.txt"), "v2")?;
-        assert!(git.worktree_dirty(path.to_str().unwrap())?);
+        assert!(git.worktree_dirty(path)?);
 
         Ok(())
     }
 
     #[test]
-    fn test_branch_has_unmerged_commits() -> Result<()> {
+    fn branch_has_unmerged_commits_detects_commits_outside_every_target() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let path = dir.path();
 
@@ -2802,31 +2467,9 @@ locked work in progress, do not remove
     }
 
     #[test]
-    fn test_patch_id_match() -> Result<()> {
-        let dir = tempfile::tempdir()?;
+    fn patch_id_match_detects_commits_reapplied_with_new_shas() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
-
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("README.md"), "# test")?;
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()?;
 
         // Create feature/patch with a commit
         Command::new("git")
@@ -2875,8 +2518,6 @@ locked work in progress, do not remove
             .args(["commit", "--amend", "-m", "patch feature (reworded)"])
             .current_dir(path)
             .output()?;
-
-        let git = Git::with_workdir(false, path);
 
         // Patch-id of the reworded commit on main matches feature/patch.
         assert!(git.patch_id_match("main", "feature/patch")?);

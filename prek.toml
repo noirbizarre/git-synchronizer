@@ -36,6 +36,9 @@ pass_filenames = false
 id = "clippy"
 name = "cargo clippy"
 language = "system"
+# Must stay identical to [tasks.lint] in mise.toml. Kept as a direct cargo
+# invocation rather than `mise run lint` because cargo is on PATH via rustup,
+# unlike the mise-managed tools below.
 entry = "cargo clippy --all-targets --all-features -- -D warnings"
 files = "\\.rs$"
 pass_filenames = false

@@ -46,7 +46,10 @@ run = "cargo llvm-cov nextest --html"
 
 [tasks.lint]
 description = "Run clippy"
-run = "cargo clippy -- -D warnings"
+# Must stay identical to the clippy hook in prek.toml, which is what CI
+# enforces: linting only the default target/feature set here would let lints in
+# tests, benches or feature-gated code pass locally and fail in CI.
+run = "cargo clippy --all-targets --all-features -- -D warnings"
 
 [tasks.fmt]
 description = "Format code"

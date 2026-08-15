@@ -1,4 +1,12 @@
+//! The cleanup workflow: fetch, fast-forward, then delete what is merged.
+//!
+//! [`run`] drives the four phases described in the README and owns all the
+//! interaction: it decides what to offer, asks the user once, and reports what
+//! it did. Detection itself lives in [`crate::branches`] and
+//! [`crate::worktrees`].
+
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -6,18 +14,19 @@ use crate::branches::{
     Filter, find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
 };
 use crate::config::Config;
-use crate::git::{Git, GitCommandError, GitErrorKind, Worktree};
+use crate::git::{Git, Worktree};
 use crate::ui::Ui;
 use crate::worktrees::find_orphan_worktrees;
 
 /// Return a display-friendly path with `$HOME` replaced by `~`.
-fn tilde_path(abs: &str) -> String {
+fn tilde_path(abs: &Path) -> String {
+    let abs = abs.to_string_lossy();
     if let Ok(home) = std::env::var("HOME")
         && let Some(rest) = abs.strip_prefix(&home)
     {
         return format!("~{rest}");
     }
-    abs.to_string()
+    abs.into_owned()
 }
 
 /// Join fragments as `a`, `a and b`, or `a, b and c`.
@@ -26,46 +35,6 @@ fn join_with_and(parts: &[String]) -> String {
         [] => String::new(),
         [only] => only.clone(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
-}
-
-/// Render a per-remote operation failure with a friendly classification.
-///
-/// Emits a single coloured line via `ui.error` plus a dimmed short cause when
-/// available. When the underlying failure is a [`GitCommandError`], its
-/// [`GitErrorKind`] selects the message prefix (network / auth / generic).
-/// Returns the detected kind so callers can decide whether to surface a
-/// follow-up warning (e.g. "detection may be stale").
-fn report_remote_failure(ui: &Ui, action: &str, target: &str, err: &anyhow::Error) -> GitErrorKind {
-    if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
-        let cause = gerr.short_cause();
-        match gerr.kind {
-            GitErrorKind::Network => {
-                ui.error(&format!(
-                    "Network error: cannot {action} '{}' ({cause}).",
-                    console::style(target).red()
-                ));
-            }
-            GitErrorKind::Auth => {
-                ui.error(&format!(
-                    "Authentication failed while trying to {action} '{}': {cause}",
-                    console::style(target).red()
-                ));
-            }
-            GitErrorKind::Other => {
-                ui.error(&format!(
-                    "Failed to {action} '{}': {cause}",
-                    console::style(target).red()
-                ));
-            }
-        }
-        gerr.kind
-    } else {
-        ui.error(&format!(
-            "Failed to {action} '{}': {err}",
-            console::style(target).red()
-        ));
-        GitErrorKind::Other
     }
 }
 
@@ -103,7 +72,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             ));
             ui.bullet_list(&remotes);
             if opts.dry_run {
-                ui.muted("  (dry-run) Skipping remote update.");
+                ui.dry_run("Skipping remote update.");
             } else {
                 let mut failed: Vec<String> = Vec::new();
                 let mut succeeded = 0usize;
@@ -117,7 +86,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             ui.success(&format!("{} updated.", console::style(remote).cyan()));
                         }
                         Err(e) => {
-                            report_remote_failure(ui, "fetch from", remote, &e);
+                            ui.report_failure("fetch from", remote, &e);
                             failed.push(remote.clone());
                         }
                     }
@@ -145,7 +114,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             let worktrees = git.worktree_list()?;
 
             // Map branch name → worktree path for branches checked out somewhere.
-            let wt_map: HashMap<String, String> = worktrees
+            let wt_map: HashMap<String, PathBuf> = worktrees
                 .iter()
                 .filter(|wt| !wt.is_bare)
                 .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), wt.path.clone())))
@@ -171,8 +140,8 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
                 for (branch, remote, upstream_branch) in &pullable {
                     if opts.dry_run {
-                        ui.muted(&format!(
-                            "  (dry-run) Would pull '{branch}' from {remote}/{upstream_branch}."
+                        ui.dry_run(&format!(
+                            "Would pull '{branch}' from {remote}/{upstream_branch}."
                         ));
                         continue;
                     }
@@ -195,7 +164,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             ui.success(&format!("{} updated.", console::style(&branch).cyan()))
                         }
                         Err(e) => {
-                            report_remote_failure(ui, "pull", branch, &e);
+                            ui.report_failure("pull", branch, &e);
                         }
                     }
                 }
@@ -215,6 +184,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         let merged = ui.spinner("Scanning local branches…", || {
             find_merged_local(git, &filter)
         })?;
+        // Surfaced after the spinner: printing inside it would corrupt the
+        // spinner's own line.
+        for warning in &merged.warnings {
+            ui.warning(warning);
+        }
+        let merged = merged.candidates;
 
         // Branches whose upstream was deleted. Only meaningful with fresh
         // remote-tracking refs, so this requires a successful fetch — except in
@@ -314,7 +289,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
             // Orphan worktrees.
             for wt in &orphan_unlocked {
-                values.push(format!("orphan-wt:{}", wt.path));
+                values.push(format!("orphan-wt:{}", wt.path.display()));
                 labels.push(tilde_path(&wt.path));
                 hints.push(format!(
                     "orphan worktree, branch: {}",
@@ -375,7 +350,16 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // branches without `--force-delete`). Orphan worktrees keep the
             // existing auto-force behavior and are not surfaced here.
             let targets_for_unmerged = if opts.use_worktrunk {
-                resolve_merge_targets(git, &filter).unwrap_or_default()
+                match resolve_merge_targets(git, &filter) {
+                    Ok(targets) => targets,
+                    Err(e) => {
+                        ui.warning(&format!(
+                            "Could not resolve merge targets, \
+                             treating worktree branches as unmerged: {e}"
+                        ));
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -410,8 +394,18 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     }
                 };
                 let unmerged = if opts.use_worktrunk {
-                    git.branch_has_unmerged_commits(branch, &targets_for_unmerged)
-                        .unwrap_or_default()
+                    match git.branch_has_unmerged_commits(branch, &targets_for_unmerged) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Assume unmerged: that only means the worktree is
+                            // surfaced for explicit confirmation rather than
+                            // silently force-removed.
+                            ui.warning(&format!(
+                                "Could not check whether '{branch}' has unmerged commits: {e}"
+                            ));
+                            true
+                        }
+                    }
                 } else {
                     false
                 };
@@ -519,7 +513,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         let (force, force_delete) =
                             force_map.get(branch).copied().unwrap_or((false, false));
                         if opts.dry_run {
-                            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                            ui.dry_run(&format!("Would remove worktree '{}'.", wt.path.display()));
                             if opts.use_worktrunk {
                                 wt_handled_branches.insert(branch.clone());
                             }
@@ -548,10 +542,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                     ));
                                 }
                                 Err(e) => {
-                                    ui.error(&format!(
-                                        "Failed to remove '{}': {e}",
-                                        console::style(tilde_path(&wt.path)).red()
-                                    ));
+                                    ui.report_failure("remove", &tilde_path(&wt.path), &e);
                                 }
                             }
                         }
@@ -560,12 +551,12 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
                 // 2. Remove selected orphan worktrees.
                 for wt in &orphan_unlocked {
-                    let key = format!("orphan-wt:{}", wt.path);
+                    let key = format!("orphan-wt:{}", wt.path.display());
                     if !selected.contains(&key) {
                         continue;
                     }
                     if opts.dry_run {
-                        ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                        ui.dry_run(&format!("Would remove worktree '{}'.", wt.path.display()));
                     } else {
                         let result = ui.spinner(
                             &format!("Removing worktree {}…", tilde_path(&wt.path)),
@@ -580,10 +571,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                 ));
                             }
                             Err(e) => {
-                                ui.error(&format!(
-                                    "Failed to remove '{}': {e}",
-                                    console::style(tilde_path(&wt.path)).red()
-                                ));
+                                ui.report_failure("remove", &tilde_path(&wt.path), &e);
                             }
                         }
                     }
@@ -612,9 +600,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     continue;
                 }
                 if opts.dry_run {
-                    ui.muted(&format!(
-                        "  (dry-run) Would delete local branch '{branch}'."
-                    ));
+                    ui.dry_run(&format!("Would delete local branch '{branch}'."));
                     continue;
                 }
                 if wt_handled_branches.contains(branch) {
@@ -637,25 +623,22 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             let _ = git.worktree_prune();
                             match git.branch_delete(branch) {
                                 Ok(()) => total_deleted += 1,
-                                Err(e) => ui.error(&format!(
-                                    "Failed to delete '{}': {e}",
-                                    console::style(&branch).red()
-                                )),
+                                Err(e) => {
+                                    ui.report_failure("delete", branch, &e);
+                                }
                             }
                         }
-                        Err(e) => ui.error(&format!(
-                            "Could not verify whether '{}' still exists: {e}",
-                            console::style(&branch).red()
-                        )),
+                        Err(e) => {
+                            ui.report_failure("verify the existence of", branch, &e);
+                        }
                     }
                     continue;
                 }
                 match git.branch_delete(branch) {
                     Ok(()) => total_deleted += 1,
-                    Err(e) => ui.error(&format!(
-                        "Failed to delete '{}': {e}",
-                        console::style(&branch).red()
-                    )),
+                    Err(e) => {
+                        ui.report_failure("delete", branch, &e);
+                    }
                 }
             }
             if !opts.dry_run && total_deleted > 0 {
@@ -702,15 +685,15 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             let mut remote_deleted = 0usize;
             for branch in &to_delete {
                 if opts.dry_run {
-                    ui.muted(&format!("  (dry-run) Would delete '{remote}/{branch}'."));
+                    ui.dry_run(&format!("Would delete '{remote}/{branch}'."));
                 } else {
                     let result = ui.spinner(&format!("Deleting {remote}/{branch}…"), || {
-                        git.push_delete(remote, branch)
+                        git.remote_branch_delete(remote, branch)
                     });
                     match result {
                         Ok(()) => remote_deleted += 1,
                         Err(e) => {
-                            report_remote_failure(ui, "delete", &format!("{remote}/{branch}"), &e);
+                            ui.report_failure("delete", &format!("{remote}/{branch}"), &e);
                         }
                     }
                 }
@@ -753,13 +736,13 @@ fn format_locked_skip_message(wt: &Worktree) -> String {
         Some(reason) => {
             format!(
                 "  Skipping locked worktree '{}' (branch: {branch_label}): {reason}",
-                wt.path
+                wt.path.display()
             )
         }
         None => {
             format!(
                 "  Skipping locked worktree '{}' (branch: {branch_label}).",
-                wt.path
+                wt.path.display()
             )
         }
     }
@@ -783,10 +766,11 @@ fn remove_worktree(
     force_delete: bool,
 ) -> Result<()> {
     if use_worktrunk {
-        match &wt.branch {
-            Some(branch) => git.worktrunk_remove(branch, force, force_delete),
-            None => git.worktrunk_remove_by_path(&wt.path, force, force_delete),
-        }
+        // `wt remove` takes a branch or a path in the same slot; fall back to
+        // the path for detached-HEAD worktrees and orphans.
+        let path = wt.path.to_string_lossy();
+        let target = wt.branch.as_deref().unwrap_or(&path);
+        git.worktrunk_remove(target, force, force_delete)
     } else {
         git.worktree_remove(&wt.path, force)
     }
@@ -795,60 +779,7 @@ fn remove_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as StdCommand;
-
-    fn git_err(kind: GitErrorKind, stderr: &str) -> anyhow::Error {
-        anyhow::Error::new(GitCommandError {
-            program: "git".into(),
-            args: vec!["fetch".into(), "--prune".into(), "origin".into()],
-            exit_code: Some(1),
-            stderr: stderr.into(),
-            kind,
-        })
-    }
-
-    #[test]
-    fn report_remote_failure_classifies_network() {
-        let ui = Ui::new();
-        let err = git_err(
-            GitErrorKind::Network,
-            "ssh: connect to host github.com port 22: No route to host",
-        );
-        assert_eq!(
-            report_remote_failure(&ui, "fetch from", "origin", &err),
-            GitErrorKind::Network
-        );
-    }
-
-    #[test]
-    fn report_remote_failure_classifies_auth() {
-        let ui = Ui::new();
-        let err = git_err(GitErrorKind::Auth, "Permission denied (publickey).");
-        assert_eq!(
-            report_remote_failure(&ui, "fetch from", "origin", &err),
-            GitErrorKind::Auth
-        );
-    }
-
-    #[test]
-    fn report_remote_failure_classifies_other() {
-        let ui = Ui::new();
-        let err = git_err(GitErrorKind::Other, "fatal: refusing to fetch");
-        assert_eq!(
-            report_remote_failure(&ui, "fetch from", "origin", &err),
-            GitErrorKind::Other
-        );
-    }
-
-    #[test]
-    fn report_remote_failure_handles_non_git_error() {
-        let ui = Ui::new();
-        let err = anyhow::anyhow!("something went wrong");
-        assert_eq!(
-            report_remote_failure(&ui, "pull", "feature", &err),
-            GitErrorKind::Other
-        );
-    }
+    use std::process::Command;
 
     /// Whether the real `wt` binary is available.
     ///
@@ -886,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_deletes_merged_local_branches() -> Result<()> {
+    fn run_deletes_merged_local_branches() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -906,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_branches() -> Result<()> {
+    fn run_dry_run_preserves_branches() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -923,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_merged_branches() -> Result<()> {
+    fn run_no_merged_branches() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
         let config = default_config();
         let ui = Ui::new();
@@ -937,13 +868,13 @@ mod tests {
     /// reached (its URL points to a non-existent path). The fetch must
     /// fail, but the cleaner workflow must continue and return Ok.
     #[test]
-    fn test_run_continues_when_a_remote_fetch_fails() -> Result<()> {
+    fn run_continues_when_a_remote_fetch_fails() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         // Add a bogus remote whose URL cannot resolve. Fetching it will
         // fail with a non-network "Other" error, which is what we want
         // to exercise the failure branch of the loop.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["remote", "add", "broken", "/this/path/does/not/exist.git"])
             .current_dir(_dir.path())
             .output()?;
@@ -973,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_remote_only_skips_local_deletion() -> Result<()> {
+    fn run_remote_only_skips_local_deletion() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -988,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_local_only_skips_remote_deletion() -> Result<()> {
+    fn run_local_only_skips_remote_deletion() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -1003,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_worktrees_skips_worktree_cleanup() -> Result<()> {
+    fn run_no_worktrees_skips_worktree_cleanup() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
         let config = default_config();
         let ui = Ui::new();
@@ -1031,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_keeps_gone_branch_without_delete_gone() -> Result<()> {
+    fn run_keeps_gone_branch_without_delete_gone() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let opts = opts_yes_with_fetch();
 
@@ -1050,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_delete_gone_removes_branch_with_deleted_upstream() -> Result<()> {
+    fn run_delete_gone_removes_branch_with_deleted_upstream() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let mut opts = opts_yes_with_fetch();
         opts.delete_gone = true;
@@ -1068,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_fetch_disables_gone_detection() -> Result<()> {
+    fn run_no_fetch_disables_gone_detection() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let mut opts = opts_yes_with_fetch();
         opts.no_fetch = true;
@@ -1085,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_gone_branch() -> Result<()> {
+    fn run_dry_run_preserves_gone_branch() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let mut opts = opts_yes_with_fetch();
         opts.delete_gone = true;
@@ -1098,11 +1029,11 @@ mod tests {
     }
 
     #[test]
-    fn test_run_delete_gone_removes_worktree_and_branch() -> Result<()> {
+    fn run_delete_gone_removes_worktree_and_branch() -> Result<()> {
         let (dir, git) = crate::test_helpers::init_repo_with_gone_upstream()?;
         let work = dir.path().join("work");
         let wt_path = dir.path().join("wt-gone");
-        StdCommand::new("git")
+        Command::new("git")
             .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/gone"])
             .current_dir(&work)
             .output()?;
@@ -1119,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_remotes_uses_config() -> Result<()> {
+    fn effective_remotes_uses_config() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
         let config_with = Config {
@@ -1143,36 +1074,36 @@ mod tests {
     }
 
     #[test]
-    fn test_run_with_worktree_for_merged_branch() -> Result<()> {
+    fn run_with_worktree_for_merged_branch() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create and merge a branch
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/wt-test"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("wt.txt"), "worktree test")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "worktree feature"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/wt-test"])
             .current_dir(path)
             .output()?;
 
         // Create a worktree for the merged branch
         let wt_path = path.join("wt-feature");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1196,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_skips_locked_worktree() -> Result<()> {
+    fn run_skips_locked_worktree() -> Result<()> {
         let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_locked_worktree()?;
         let config = default_config();
         let ui = Ui::new();
@@ -1223,10 +1154,9 @@ mod tests {
     }
 
     #[test]
-    fn test_format_locked_skip_message_no_reason() {
+    fn format_locked_skip_message_no_reason() {
         let wt = Worktree {
-            path: "/tmp/wt".to_string(),
-            head: None,
+            path: PathBuf::from("/tmp/wt"),
             branch: Some("feature/x".to_string()),
             is_bare: false,
             is_locked: true,
@@ -1239,10 +1169,9 @@ mod tests {
     }
 
     #[test]
-    fn test_format_locked_skip_message_with_reason() {
+    fn format_locked_skip_message_with_reason() {
         let wt = Worktree {
-            path: "/tmp/wt".to_string(),
-            head: None,
+            path: PathBuf::from("/tmp/wt"),
             branch: Some("feature/x".to_string()),
             is_bare: false,
             is_locked: true,
@@ -1256,35 +1185,35 @@ mod tests {
     }
 
     #[test]
-    fn test_run_handles_orphan_worktrees() -> Result<()> {
+    fn run_handles_orphan_worktrees() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a branch and a worktree for it
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/orphan"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("orphan.txt"), "orphan")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "orphan feature"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/orphan"])
             .current_dir(path)
             .output()?;
 
         let wt_path = path.join("wt-orphan");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1295,7 +1224,7 @@ mod tests {
             .output()?;
 
         // Delete the branch ref, making the worktree orphaned
-        StdCommand::new("git")
+        Command::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/orphan"])
             .current_dir(path)
             .output()?;
@@ -1313,18 +1242,18 @@ mod tests {
     }
 
     #[test]
-    fn test_run_removes_clean_orphan_worktree() -> Result<()> {
+    fn run_removes_clean_orphan_worktree() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a branch at the same commit as main (no diverging content)
-        StdCommand::new("git")
+        Command::new("git")
             .args(["branch", "feature/clean-orphan"])
             .current_dir(path)
             .output()?;
 
         let wt_path = path.join("wt-clean-orphan");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1337,7 +1266,7 @@ mod tests {
         // Delete the branch ref, making the worktree orphaned.
         // Since the worktree content matches the commit, it is clean
         // and `git worktree remove` will succeed.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/clean-orphan"])
             .current_dir(path)
             .output()?;
@@ -1356,35 +1285,35 @@ mod tests {
     }
 
     #[test]
-    fn test_run_skips_locked_orphan_worktree() -> Result<()> {
+    fn run_skips_locked_orphan_worktree() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a branch and worktree, then merge the branch
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/locked-orphan"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("locked-orphan.txt"), "locked orphan")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "locked orphan feature"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/locked-orphan"])
             .current_dir(path)
             .output()?;
 
         let wt_path = path.join("wt-locked-orphan");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1395,13 +1324,13 @@ mod tests {
             .output()?;
 
         // Lock the worktree
-        StdCommand::new("git")
+        Command::new("git")
             .args(["worktree", "lock", wt_path.to_str().unwrap()])
             .current_dir(path)
             .output()?;
 
         // Delete the branch ref, making the worktree orphaned
-        StdCommand::new("git")
+        Command::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/locked-orphan"])
             .current_dir(path)
             .output()?;
@@ -1423,66 +1352,66 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_tilde_path_replaces_home() {
+    fn tilde_path_replaces_home() {
         let home = std::env::var("HOME").expect("HOME must be set for this test");
         assert_eq!(
-            tilde_path(&format!("{home}/projects/repo")),
+            tilde_path(&PathBuf::from(format!("{home}/projects/repo"))),
             "~/projects/repo"
         );
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_tilde_path_preserves_non_home_path() {
-        assert_eq!(tilde_path("/tmp/some/path"), "/tmp/some/path");
+    fn tilde_path_preserves_non_home_path() {
+        assert_eq!(tilde_path(Path::new("/tmp/some/path")), "/tmp/some/path");
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_tilde_path_exact_home() {
+    fn tilde_path_exact_home() {
         let home = std::env::var("HOME").expect("HOME must be set for this test");
         // Exact HOME path (no trailing slash) should become just "~"
-        assert_eq!(tilde_path(&home), "~");
+        assert_eq!(tilde_path(Path::new(&home)), "~");
     }
 
     #[test]
-    fn test_run_removes_multiple_worktrees_with_merged_branches() -> Result<()> {
+    fn run_removes_multiple_worktrees_with_merged_branches() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create and merge two branches, each with a worktree
         for name in &["feature/wt-a", "feature/wt-b"] {
-            StdCommand::new("git")
+            Command::new("git")
                 .args(["checkout", "-b", name])
                 .current_dir(path)
                 .output()?;
             std::fs::write(path.join(format!("{}.txt", name.replace('/', "-"))), name)?;
-            StdCommand::new("git")
+            Command::new("git")
                 .args(["add", "."])
                 .current_dir(path)
                 .output()?;
-            StdCommand::new("git")
+            Command::new("git")
                 .args(["commit", "-m", &format!("{name} feature")])
                 .current_dir(path)
                 .output()?;
-            StdCommand::new("git")
+            Command::new("git")
                 .args(["checkout", "main"])
                 .current_dir(path)
                 .output()?;
-            StdCommand::new("git")
+            Command::new("git")
                 .args(["merge", name])
                 .current_dir(path)
                 .output()?;
         }
 
         let wt_a = path.join("wt-a");
-        StdCommand::new("git")
+        Command::new("git")
             .args(["worktree", "add", wt_a.to_str().unwrap(), "feature/wt-a"])
             .current_dir(path)
             .output()?;
 
         let wt_b = path.join("wt-b");
-        StdCommand::new("git")
+        Command::new("git")
             .args(["worktree", "add", wt_b.to_str().unwrap(), "feature/wt-b"])
             .current_dir(path)
             .output()?;
@@ -1512,35 +1441,35 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_worktrees() -> Result<()> {
+    fn run_dry_run_preserves_worktrees() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create and merge a branch with a worktree
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/wt-dry"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("dry.txt"), "dry run")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "dry run feature"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/wt-dry"])
             .current_dir(path)
             .output()?;
 
         let wt_path = path.join("wt-dry");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1569,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_unified_cleanup_branches_and_orphan_worktrees() -> Result<()> {
+    fn run_unified_cleanup_branches_and_orphan_worktrees() -> Result<()> {
         // This test verifies that merged branches (with worktrees) and orphan
         // worktrees are all cleaned up in a single unified pass (no separate
         // orphan worktree phase).
@@ -1577,30 +1506,30 @@ mod tests {
         let path = dir.path();
 
         // Create a merged branch with a worktree
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/with-wt"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("with-wt.txt"), "branch with worktree")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature with worktree"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/with-wt"])
             .current_dir(path)
             .output()?;
 
         let branch_wt_path = path.join("wt-branch");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1611,13 +1540,13 @@ mod tests {
             .output()?;
 
         // Create a branch with a worktree, then orphan it by deleting the branch ref
-        StdCommand::new("git")
+        Command::new("git")
             .args(["branch", "feature/orphan-wt"])
             .current_dir(path)
             .output()?;
 
         let orphan_wt_path = path.join("wt-orphan");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1628,7 +1557,7 @@ mod tests {
             .output()?;
 
         // Delete the branch ref to make the worktree orphaned
-        StdCommand::new("git")
+        Command::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/orphan-wt"])
             .current_dir(path)
             .output()?;
@@ -1667,20 +1596,20 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_worktrees_skips_orphan_cleanup() -> Result<()> {
+    fn run_no_worktrees_skips_orphan_cleanup() -> Result<()> {
         // When --no-worktrees is set, orphan worktrees should not be touched
         // even though they share the same phase as branch deletion.
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a branch with a worktree, then orphan it
-        StdCommand::new("git")
+        Command::new("git")
             .args(["branch", "feature/orphan-skip"])
             .current_dir(path)
             .output()?;
 
         let orphan_wt_path = path.join("wt-orphan-skip");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1690,7 +1619,7 @@ mod tests {
             .current_dir(path)
             .output()?;
 
-        StdCommand::new("git")
+        Command::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/orphan-skip"])
             .current_dir(path)
             .output()?;
@@ -1714,18 +1643,18 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_preserves_orphan_worktrees() -> Result<()> {
+    fn run_dry_run_preserves_orphan_worktrees() -> Result<()> {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a branch with a worktree, then orphan it
-        StdCommand::new("git")
+        Command::new("git")
             .args(["branch", "feature/orphan-dry"])
             .current_dir(path)
             .output()?;
 
         let orphan_wt_path = path.join("wt-orphan-dry");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1735,7 +1664,7 @@ mod tests {
             .current_dir(path)
             .output()?;
 
-        StdCommand::new("git")
+        Command::new("git")
             .args(["update-ref", "-d", "refs/heads/feature/orphan-dry"])
             .current_dir(path)
             .output()?;
@@ -1759,38 +1688,38 @@ mod tests {
     }
 
     #[test]
-    fn test_run_force_removes_dirty_worktree_with_yes() -> Result<()> {
+    fn run_force_removes_dirty_worktree_with_yes() -> Result<()> {
         // With opts.yes, the force-confirmation prompt is auto-accepted, so a
         // merged branch whose worktree contains an untracked file is removed.
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a merged branch
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/dirty-wt"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("dirty.txt"), "dirty feature")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "dirty feature"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/dirty-wt"])
             .current_dir(path)
             .output()?;
 
         // Add a worktree for the merged branch
         let wt_path = path.join("wt-dirty");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1820,37 +1749,37 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dry_run_dirty_worktree_not_removed() -> Result<()> {
+    fn run_dry_run_dirty_worktree_not_removed() -> Result<()> {
         // With dry-run, even force-removal candidates are preserved
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
         // Create a merged branch
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/dry-dirty"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("file.txt"), "content")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "add file"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/dry-dirty"])
             .current_dir(path)
             .output()?;
 
         // Create worktree with dirty content
         let wt_path = path.join("wt-dry-dirty");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -1880,80 +1809,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_unselected_dirty_worktree_skipped() -> Result<()> {
-        // When user says "no" to force-removing a dirty worktree,
-        // the worktree and branch should be preserved
-        let (dir, _git) = crate::test_helpers::init_repo()?;
-        let path = dir.path();
-
-        // Create a merged branch with a dirty worktree
-        StdCommand::new("git")
-            .args(["checkout", "-b", "feature/skip-dirty"])
-            .current_dir(path)
-            .output()?;
-        std::fs::write(path.join("content.txt"), "data")?;
-        StdCommand::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["commit", "-m", "add content"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["checkout", "main"])
-            .current_dir(path)
-            .output()?;
-        StdCommand::new("git")
-            .args(["merge", "feature/skip-dirty"])
-            .current_dir(path)
-            .output()?;
-
-        let wt_path = path.join("wt-skip-dirty");
-        StdCommand::new("git")
-            .args([
-                "worktree",
-                "add",
-                wt_path.to_str().unwrap(),
-                "feature/skip-dirty",
-            ])
-            .current_dir(path)
-            .output()?;
-
-        // Make it dirty
-        std::fs::write(wt_path.join("untracked.txt"), "noise")?;
-
-        let git = Git::with_workdir(false, path);
-        let config = default_config();
-        let ui = Ui::new();
-
-        // Simulate user saying "no" by using a custom opts with no multiselect override
-        let mut opts = opts_yes_skip_network();
-        opts.yes = false; // Force the multiselect prompt, which will be "declined"
-
-        // Mock the UI to reject the force-removal prompt
-        // Since we can't easily mock UI, we'll use a different approach:
-        // Create a non-merged branch instead, so it's not presented as dirty/unmerged.
-        // Instead, let's verify the path by checking that when `yes` is false and
-        // a user would normally select, that unselected items are truly skipped.
-        //
-        // For now, test that with yes=true but no dirty files to begin with,
-        // we can verify the skip logic doesn't run (simpler assertion).
-        // The actual "user says no" test requires UI mocking which is complex.
-        opts.yes = true; // Let's test the successful force-removal path instead
-
-        run(&git, &config, &ui, &opts)?;
-
-        // With yes=true and dirty, it WILL be removed
-        assert!(
-            !wt_path.exists(),
-            "dirty worktree should be removed when opted-in"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_run_modified_file_in_merged_worktree() -> Result<()> {
+    fn run_modified_file_in_merged_worktree() -> Result<()> {
         // Test that a merged branch's worktree with a modified (not untracked)
         // file is detected as dirty and force-removed with opts.yes
         let (dir, _git) = crate::test_helpers::init_repo()?;
@@ -1961,41 +1817,41 @@ mod tests {
 
         // Create and commit a tracked file
         std::fs::write(path.join("tracked.txt"), "v1")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "initial commit"])
             .current_dir(path)
             .output()?;
 
         // Create and merge a feature branch
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/modified"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("tracked.txt"), "v2")?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["commit", "-m", "feature change"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/modified"])
             .current_dir(path)
             .output()?;
 
         // Create a worktree for the merged branch
         let wt_path = path.join("wt-modified");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -2029,17 +1885,10 @@ mod tests {
     }
 
     /// Helper: stage and commit `path`'s tracked files with the given message.
-    fn commit_all(path: &std::path::Path, msg: &str) {
-        StdCommand::new("git")
-            .args(["add", "-A"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["commit", "-m", msg])
-            .current_dir(path)
-            .output()
-            .unwrap();
+    fn commit_all(path: &Path, msg: &str) -> Result<()> {
+        crate::test_helpers::git_in(path, &["add", "-A"])?;
+        crate::test_helpers::git_in(path, &["commit", "-m", msg])?;
+        Ok(())
     }
 
     /// Create a squash-merged feature branch + worktree. Returns the
@@ -2048,40 +1897,29 @@ mod tests {
     /// (raw reachability) reports the branch as unmerged, while
     /// `find_merged_local` still detects it via diff/patch-id.
     fn make_squash_merged_with_worktree(
-        path: &std::path::Path,
+        path: &Path,
         branch: &str,
         wt_dirname: &str,
-    ) -> std::path::PathBuf {
-        StdCommand::new("git")
-            .args(["checkout", "-b", branch])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        std::fs::write(path.join(format!("{wt_dirname}.txt")), "feature work").unwrap();
-        commit_all(path, &format!("{branch}: feature work"));
-        StdCommand::new("git")
-            .args(["checkout", "main"])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        StdCommand::new("git")
-            .args(["merge", "--squash", branch])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        commit_all(path, &format!("squash {branch}"));
+    ) -> Result<PathBuf> {
+        use crate::test_helpers::git_in;
+
+        git_in(path, &["checkout", "-b", branch])?;
+        std::fs::write(path.join(format!("{wt_dirname}.txt")), "feature work")?;
+        commit_all(path, &format!("{branch}: feature work"))?;
+        git_in(path, &["checkout", "main"])?;
+        git_in(path, &["merge", "--squash", branch])?;
+        commit_all(path, &format!("squash {branch}"))?;
 
         let wt_path = path.join(wt_dirname);
-        StdCommand::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), branch])
-            .current_dir(path)
-            .output()
-            .unwrap();
-        wt_path
+        git_in(
+            path,
+            &["worktree", "add", wt_path.to_str().unwrap(), branch],
+        )?;
+        Ok(wt_path)
     }
 
     #[test]
-    fn test_run_auto_force_squash_merged_worktree_no_prompt() -> Result<()> {
+    fn run_auto_force_squash_merged_worktree_no_prompt() -> Result<()> {
         // A squash-merged branch is detected as merged by find_merged_local
         // but reported as having unmerged commits by branch_has_unmerged_commits.
         // With use_worktrunk=true and a clean worktree, the cleaner should
@@ -2092,9 +1930,9 @@ mod tests {
 
         // Seed an initial commit on main so squash-merge has a parent.
         std::fs::write(path.join("seed.txt"), "seed")?;
-        commit_all(path, "seed");
+        commit_all(path, "seed")?;
 
-        let wt_path = make_squash_merged_with_worktree(path, "feature/squashed", "wt-squashed");
+        let wt_path = make_squash_merged_with_worktree(path, "feature/squashed", "wt-squashed")?;
 
         let git = Git::with_workdir(false, path);
         let config = default_config();
@@ -2117,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dirty_and_unmerged_goes_to_prompt_not_auto_force() -> Result<()> {
+    fn run_dirty_and_unmerged_goes_to_prompt_not_auto_force() -> Result<()> {
         // When a worktree is BOTH dirty and unmerged (squash-merged), the
         // dirty path wins: the entry must reach the second prompt rather
         // than being auto force-deleted. With opts.yes=true the prompt is
@@ -2126,10 +1964,10 @@ mod tests {
         let path = dir.path();
 
         std::fs::write(path.join("seed.txt"), "seed")?;
-        commit_all(path, "seed");
+        commit_all(path, "seed")?;
 
         let wt_path =
-            make_squash_merged_with_worktree(path, "feature/dirty-squashed", "wt-dirty-squashed");
+            make_squash_merged_with_worktree(path, "feature/dirty-squashed", "wt-dirty-squashed")?;
         // Make it dirty (untracked file).
         std::fs::write(wt_path.join("untracked.log"), "noise")?;
 
@@ -2159,7 +1997,7 @@ mod tests {
     // platform-independent.
     #[cfg(unix)]
     #[test]
-    fn test_run_worktrunk_deletes_branch_wt_leaves_behind() -> Result<()> {
+    fn run_worktrunk_deletes_branch_wt_leaves_behind() -> Result<()> {
         // Regression test: when worktrunk removes a worktree but leaves the
         // branch behind (because `wt`'s merge check is narrower than
         // git-sync's), git-sync must delete the surviving branch itself.
@@ -2178,37 +2016,37 @@ mod tests {
         let path = dir.path();
 
         std::fs::write(path.join("seed.txt"), "seed")?;
-        commit_all(path, "seed");
+        commit_all(path, "seed")?;
 
         // Second protected target the feature will be merged into.
-        StdCommand::new("git")
+        Command::new("git")
             .args(["branch", "develop"])
             .current_dir(path)
             .output()?;
 
         // Feature branch with one commit, merged into develop (not main).
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/wt-leftover"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("work.txt"), "work")?;
-        commit_all(path, "feature work");
-        StdCommand::new("git")
+        commit_all(path, "feature work")?;
+        Command::new("git")
             .args(["checkout", "develop"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/wt-leftover"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
 
         // Worktree for the merged feature branch.
         let wt_path = path.join("wt-leftover");
-        StdCommand::new("git")
+        Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -2253,7 +2091,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_run_dry_run_with_worktrunk_touches_nothing() -> Result<()> {
+    fn run_dry_run_with_worktrunk_touches_nothing() -> Result<()> {
         // Regression test: under worktrunk, branches recorded as
         // `wt_handled_branches` used to bypass the dry-run guard entirely and
         // were really passed to `git worktree prune` + `git branch -D`.
@@ -2266,23 +2104,23 @@ mod tests {
         let (dir, _git) = crate::test_helpers::init_repo()?;
         let path = dir.path();
 
-        StdCommand::new("git")
+        Command::new("git")
             .args(["checkout", "-b", "feature/dry"])
             .current_dir(path)
             .output()?;
         std::fs::write(path.join("dry.txt"), "dry")?;
-        commit_all(path, "feature dry");
-        StdCommand::new("git")
+        commit_all(path, "feature dry")?;
+        Command::new("git")
             .args(["checkout", "main"])
             .current_dir(path)
             .output()?;
-        StdCommand::new("git")
+        Command::new("git")
             .args(["merge", "feature/dry"])
             .current_dir(path)
             .output()?;
 
         let wt_path = path.join("wt-dry");
-        StdCommand::new("git")
+        Command::new("git")
             .args(["worktree", "add", wt_path.to_str().unwrap(), "feature/dry"])
             .current_dir(path)
             .output()?;
