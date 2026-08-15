@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::branches::{
-    Filter, find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
+    Effort, Filter, find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
 };
 use crate::config::Config;
 use crate::git::{Git, Worktree};
@@ -50,6 +50,8 @@ pub struct CleanerOptions {
     pub no_worktrees: bool,
     pub delete_gone: bool,
     pub use_worktrunk: bool,
+    /// How thorough merge detection should be.
+    pub effort: Effort,
 }
 
 /// Run the full clean-up workflow.
@@ -182,7 +184,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
     if !opts.remote_only {
         let merged = ui.spinner("Scanning local branches…", || {
-            find_merged_local(git, &filter)
+            find_merged_local(git, &filter, opts.effort)
         })?;
         // Surfaced after the spinner: printing inside it would corrupt the
         // spinner's own line.
@@ -799,6 +801,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         }
     }
 
@@ -813,6 +816,7 @@ mod tests {
             no_worktrees: false,
             delete_gone: false,
             use_worktrunk: false,
+            effort: Effort::Standard,
         }
     }
 
@@ -884,6 +888,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: Some(vec!["broken".to_string()]),
             worktrunk: None,
+            effort: None,
         };
         let ui = Ui::new();
         let opts = CleanerOptions {
@@ -896,6 +901,7 @@ mod tests {
             no_worktrees: true,
             delete_gone: false,
             use_worktrunk: false,
+            effort: Effort::Standard,
         };
 
         // The fetch will fail but the cleaner should not bail out.
@@ -1058,6 +1064,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: Some(vec!["origin".to_string(), "upstream".to_string()]),
             worktrunk: None,
+            effort: None,
         };
         let remotes = effective_remotes(&git, &config_with)?;
         assert_eq!(remotes, vec!["origin", "upstream"]);
@@ -1067,6 +1074,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         let remotes = effective_remotes(&git, &config_without)?;
         assert!(remotes.is_empty());
@@ -2062,6 +2070,7 @@ mod tests {
             ignore: Vec::new(),
             remotes: None,
             worktrunk: None,
+            effort: None,
         };
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();

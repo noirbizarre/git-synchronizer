@@ -179,6 +179,14 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
                             None => "(auto-detect)",
                         },
                     );
+
+                    ui.field(
+                        "effort",
+                        &match cfg.effort {
+                            Some(effort) => effort.to_string(),
+                            None => format!("(default: {})", branches::Effort::default()),
+                        },
+                    );
                 }
                 None => {
                     ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
@@ -297,6 +305,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
     let cfg = config::load_or_setup(git, ui)?;
 
     let use_worktrunk = resolve_worktrunk(git, ui, cli, &cfg)?;
+    let effort = resolve_effort(cli, &cfg)?;
 
     let opts = cleaner::CleanerOptions {
         yes: cli.yes,
@@ -308,9 +317,21 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         no_worktrees: cli.no_worktrees,
         delete_gone: cli.delete_gone,
         use_worktrunk,
+        effort,
     };
 
     cleaner::run(git, &cfg, ui, &opts)
+}
+
+/// Resolve how thorough merge detection should be.
+///
+/// Priority: CLI flag > config setting > [`Effort::default`].
+fn resolve_effort(cli: &Cli, cfg: &config::Config) -> Result<branches::Effort> {
+    if let Some(level) = cli.effort {
+        // clap already restricted the range; this only maps it to the enum.
+        return branches::Effort::try_from(level);
+    }
+    Ok(cfg.effort.unwrap_or_default())
 }
 
 /// Resolve whether to use worktrunk for worktree removal.
@@ -370,6 +391,35 @@ mod tests {
             stderr: stderr.into(),
             kind,
         })
+    }
+
+    #[test]
+    fn resolve_effort_prefers_cli_then_config_then_default() -> Result<()> {
+        let cfg_default = config::Config::default();
+        let cfg_thorough = config::Config {
+            effort: Some(branches::Effort::Thorough),
+            ..config::Config::default()
+        };
+
+        let cli_unset = Cli::parse_from(["git-sync"]);
+        let cli_quick = Cli::parse_from(["git-sync", "--effort", "1"]);
+
+        // Nothing set anywhere: the built-in default.
+        assert_eq!(
+            resolve_effort(&cli_unset, &cfg_default)?,
+            branches::Effort::Standard
+        );
+        // Config only.
+        assert_eq!(
+            resolve_effort(&cli_unset, &cfg_thorough)?,
+            branches::Effort::Thorough
+        );
+        // CLI wins over config.
+        assert_eq!(
+            resolve_effort(&cli_quick, &cfg_thorough)?,
+            branches::Effort::Quick
+        );
+        Ok(())
     }
 
     #[test]

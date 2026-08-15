@@ -840,6 +840,62 @@ fn no_pull_flag_accepted() {
 }
 
 #[test]
+fn effort_flag_accepted() {
+    let dir = init_repo();
+    configure(&dir);
+
+    for level in ["1", "2", "3"] {
+        Command::cargo_bin("git-sync")
+            .unwrap()
+            .args(["-y", "--no-fetch", "--local-only", "--effort", level])
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn effort_flag_rejects_out_of_range_levels() {
+    let dir = init_repo();
+    configure(&dir);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--effort", "4"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("4"));
+}
+
+#[test]
+fn config_set_effort_roundtrips() {
+    let dir = init_repo();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "set", "effort", "3"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let output = StdCommand::new("git")
+        .args(["config", "--get", "sync.effort"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "3");
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("3 (thorough)"));
+}
+
+#[test]
 fn pull_updates_current_branch() {
     let (dir, work_path, bare_path) = init_repo_with_remote();
 

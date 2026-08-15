@@ -35,6 +35,7 @@ configured remotes. It also handles orphaned worktree cleanup.
 - Per-branch protection via git config (`branch.<name>.sync-protected`)
 - Ignore branch patterns entirely (`sync.ignore`) -- never fetched, never analysed
 - Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, empty three-dot diff, patch-ID matching, simulated merge, squash-merge detection, and deleted-upstream detection)
+- Tunable detection thoroughness with `--effort <1-3>` (speed vs accuracy)
 - Automatic fast-forward of target branches before detection (with `--no-pull` to skip)
 - Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
 - Interactive setup wizard on first run
@@ -92,6 +93,10 @@ git sync --no-worktrees
 # With -y, also delete branches whose upstream branch was deleted
 git sync -y --delete-gone
 
+# Trade speed for accuracy in merge detection (1 = fastest, 3 = most thorough, default 2)
+git sync --effort 1
+git sync --effort 3
+
 # Use worktrunk for worktree removal (triggers pre/post-remove hooks)
 git sync --worktrunk
 
@@ -146,6 +151,7 @@ to the repository-local `.git/config`:
     ignore = wip/*
     remote = origin
     worktrunk = true
+    effort = 3
 ```
 
 | Key | Type | Description |
@@ -154,6 +160,7 @@ to the repository-local `.git/config`:
 | `ignore` | multi-value | Glob patterns for branches git-sync ignores entirely |
 | `remote` | multi-value | Remotes to delete branches from (omit for all remotes) |
 | `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects (see below) |
+| `effort` | `1`-`3` | How thorough merge detection should be. Defaults to `2`; `--effort` overrides it |
 
 When `worktrunk` is unset, git-sync enables it only if the repository has a
 `[worktrunk]` config section **and** `wt` is on `$PATH`; it then asks once per
@@ -237,9 +244,17 @@ CLI flags:
 3. **Delete merged local branches & clean worktrees** -- identifies branches
    merged into any protected branch (both glob-pattern and per-branch
    protected) using several complementary strategies, applied from cheapest to
-   most expensive and stopping as soon as one matches:
+   most expensive and stopping as soon as one matches. How many of them run is
+   controlled by `--effort` (or `sync.effort`), each level including the
+   previous ones:
+
+   **Effort 1 (fastest)**
+
    - *Standard detection*: `git branch --merged <target>` catches fast-forward
      and regular merges.
+
+   **Effort 2 (default)**
+
    - *Rebase-aware detection*: `git cherry <target> <branch>` catches
      rebased branches by checking whether every commit has already been
      applied upstream.
@@ -249,6 +264,9 @@ CLI flags:
      branches whose own commits net out to no content change relative to their
      fork point (a commit and its revert, a pure history rewrite, a branch
      created but never meaningfully advanced).
+
+   **Effort 3 (most thorough, noticeably slower)**
+
    - *Patch-ID matching*: compares `git patch-id --stable` fingerprints of the
      branch's commits against those recently applied on the target, catching
      branches re-applied under different SHAs (rebase + reword, partial
@@ -260,6 +278,9 @@ CLI flags:
    - *Squash-merge detection*: compares the patch-ID of the branch's combined
      diff against the target's recent commits, catching multi-commit branches
      collapsed into a single squash commit.
+
+   Deleted-upstream detection (below) is independent of the effort level and
+   always runs.
 
    Per-branch protected branches also serve as merge targets, so branches
    merged into them are detected as candidates too.
@@ -344,13 +365,13 @@ flowchart TD
 
     LocalCheck{--remote-only?}
     LocalCheck -- No --> FindLocal[Find merged local branches\n+ orphan worktrees]
-    FindLocal --> Merged[Standard detection\ngit branch --merged]
-    FindLocal --> Cherry[Rebase-aware detection\ngit cherry]
-    FindLocal --> TreeSHA[Tree SHA comparison]
-    FindLocal --> EmptyDiff[Empty-diff detection\ngit diff --quiet]
-    FindLocal --> PatchID[Patch-ID matching\ngit patch-id]
-    FindLocal --> SimMerge[Simulated merge\ngit merge-tree --write-tree]
-    FindLocal --> Squash[Squash-merge detection\ncombined patch-id]
+    FindLocal --> Merged["Standard detection\ngit branch --merged\n(effort 1+)"]
+    FindLocal --> Cherry["Rebase-aware detection\ngit cherry\n(effort 2+)"]
+    FindLocal --> TreeSHA["Tree SHA comparison\n(effort 2+)"]
+    FindLocal --> EmptyDiff["Empty-diff detection\ngit diff --quiet\n(effort 2+)"]
+    FindLocal --> PatchID["Patch-ID matching\ngit patch-id\n(effort 3)"]
+    FindLocal --> SimMerge["Simulated merge\ngit merge-tree --write-tree\n(effort 3)"]
+    FindLocal --> Squash["Squash-merge detection\ncombined patch-id\n(effort 3)"]
     FindLocal --> GoneUpstream[Deleted-upstream detection\nrequires a fetch]
     FindLocal --> Orphans[Find orphan worktrees]
     Merged --> SelectLocal[Unified multiselect:\nbranches + worktrees]
