@@ -187,8 +187,9 @@ setup wizard runs automatically:
 The cleanup runs in four sequential phases, each of which can be skipped via
 CLI flags:
 
-1. **Fetch & prune remotes** -- runs `git remote update --prune` to fetch all
-   remotes and prune deleted remote-tracking branches. Skipped with `--no-fetch`.
+1. **Fetch & prune remotes** -- runs `git fetch --prune <remote>` for each
+   configured remote (every remote when `sync.remote` is unset), pruning
+   deleted remote-tracking branches. Skipped with `--no-fetch`.
 
 2. **Pull / fast-forward target branches** -- fast-forwards each protected
    branch to its remote-tracking upstream so that merge detection operates on
