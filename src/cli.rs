@@ -21,6 +21,15 @@ pub struct Cli {
     #[arg(short = 'y', long)]
     pub yes: bool,
 
+    /// Force-remove worktrees with uncommitted changes or unmerged commits
+    ///
+    /// Without this flag the forced-removal prompt defaults to nothing
+    /// selected, and with --yes (or --json) problematic worktrees are skipped
+    /// entirely. Interactively, --force pre-selects them; you can still
+    /// uncheck any entry.
+    #[arg(short = 'f', long)]
+    pub force: bool,
+
     /// Show what would be done without actually doing it
     #[arg(short = 'n', long)]
     pub dry_run: bool,
@@ -213,6 +222,7 @@ mod tests {
     fn cli_default_flags() {
         let cli = Cli::parse_from(["git-sync"]);
         assert!(!cli.yes);
+        assert!(!cli.force);
         assert!(!cli.dry_run);
         assert!(!cli.verbose);
         assert!(!cli.no_fetch);
@@ -235,6 +245,9 @@ mod tests {
         assert!(cli.json);
         assert!(!cli.yes);
         assert!(cli.effective_yes());
+        // --json implies --yes, but never --force: forced removal of dirty
+        // worktrees stays an explicit opt-in.
+        assert!(!cli.force);
     }
 
     #[test]
@@ -246,13 +259,30 @@ mod tests {
 
     #[test]
     fn cli_flag_parsing() {
-        let cli = Cli::parse_from(["git-sync", "-y", "-n", "-v", "--no-fetch", "--local-only"]);
+        let cli = Cli::parse_from([
+            "git-sync",
+            "-y",
+            "-f",
+            "-n",
+            "-v",
+            "--no-fetch",
+            "--local-only",
+        ]);
         assert!(cli.yes);
+        assert!(cli.force);
         assert!(cli.dry_run);
         assert!(cli.verbose);
         assert!(cli.no_fetch);
         assert!(cli.local_only);
         assert!(!cli.remote_only);
+    }
+
+    #[test]
+    fn cli_force_flag() {
+        assert!(Cli::parse_from(["git-sync", "--force"]).force);
+        assert!(Cli::parse_from(["git-sync", "-f"]).force);
+        // --force does not auto-confirm the main selection prompt.
+        assert!(!Cli::parse_from(["git-sync", "--force"]).effective_yes());
     }
 
     #[test]
