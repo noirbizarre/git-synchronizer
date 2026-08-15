@@ -109,7 +109,7 @@ fn is_multi_valued(key: &str) -> bool {
 fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::List => {
-            match config::Config::load(git)? {
+            match config::Config::try_load(git)? {
                 Some(cfg) => {
                     ui.heading("Current configuration [sync]:");
                     ui.blank();

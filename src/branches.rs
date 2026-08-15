@@ -20,6 +20,7 @@ fn build_matcher(patterns: &[String]) -> Result<GlobSet> {
 /// Two independent mechanisms feed each category: global glob patterns from the
 /// `[sync]` config section, and per-branch git config flags
 /// (`branch.<name>.sync-protected` / `branch.<name>.sync-ignored`).
+#[derive(Debug)]
 pub struct Filter {
     protected: GlobSet,
     protected_branches: HashSet<String>,

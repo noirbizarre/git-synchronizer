@@ -2,6 +2,7 @@ use console::{Style, Term};
 use demand::{Confirm, DemandOption, Input, MultiSelect, Spinner, SpinnerStyle};
 
 /// Terminal handle and style presets for consistent output.
+#[derive(Debug)]
 pub struct Ui {
     term: Term,
     heading_style: Style,

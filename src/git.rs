@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -189,6 +189,15 @@ fn is_unset_key(err: &anyhow::Error) -> bool {
         .is_some_and(|gerr| gerr.exit_code == Some(1))
 }
 
+/// Render a path as a git command-line argument.
+///
+/// git arguments must be UTF-8; a path that is not is a hard error rather than
+/// something to silently mangle with `to_string_lossy`.
+fn path_arg(path: &Path) -> Result<&str> {
+    path.to_str()
+        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
 /// Check if the worktrunk CLI (`wt`) is available on `$PATH`.
 pub fn worktrunk_available() -> bool {
     Command::new("wt")
@@ -202,9 +211,10 @@ pub fn worktrunk_available() -> bool {
 }
 
 /// A thin wrapper around git CLI invocations.
+#[derive(Debug, Clone)]
 pub struct Git {
     verbose: bool,
-    workdir: Option<std::path::PathBuf>,
+    workdir: Option<PathBuf>,
 }
 
 impl Git {
@@ -765,7 +775,8 @@ impl Git {
     }
 
     /// Remove a worktree by path.
-    pub fn worktree_remove(&self, path: &str, force: bool) -> Result<()> {
+    pub fn worktree_remove(&self, path: &Path, force: bool) -> Result<()> {
+        let path = path_arg(path)?;
         if force {
             self.run(&["worktree", "remove", "--force", path])?;
         } else {
@@ -1032,8 +1043,7 @@ fn refspec_safe(pattern: &str) -> bool {
 /// A worktree entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
-    pub path: String,
-    pub head: Option<String>,
+    pub path: PathBuf,
     pub branch: Option<String>,
     pub is_bare: bool,
     pub is_locked: bool,
@@ -1092,17 +1102,12 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
                 worktrees.push(wt);
             }
             current = Some(Worktree {
-                path: path.to_string(),
-                head: None,
+                path: PathBuf::from(path),
                 branch: None,
                 is_bare: false,
                 is_locked: false,
                 lock_reason: None,
             });
-        } else if let Some(head) = line.strip_prefix("HEAD ") {
-            if let Some(ref mut wt) = current {
-                wt.head = Some(head.to_string());
-            }
         } else if let Some(branch) = line.strip_prefix("branch ") {
             if let Some(ref mut wt) = current {
                 // Strip refs/heads/ prefix
@@ -1422,16 +1427,19 @@ bare
         let worktrees = parse_worktree_list(output);
         assert_eq!(worktrees.len(), 3);
 
-        assert_eq!(worktrees[0].path, "/home/user/project");
+        assert_eq!(worktrees[0].path, PathBuf::from("/home/user/project"));
         assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
         assert!(!worktrees[0].is_bare);
         assert!(!worktrees[0].is_locked);
 
-        assert_eq!(worktrees[1].path, "/home/user/project-feature");
+        assert_eq!(
+            worktrees[1].path,
+            PathBuf::from("/home/user/project-feature")
+        );
         assert_eq!(worktrees[1].branch.as_deref(), Some("feature/foo"));
         assert!(!worktrees[1].is_locked);
 
-        assert_eq!(worktrees[2].path, "/home/user/project-bare");
+        assert_eq!(worktrees[2].path, PathBuf::from("/home/user/project-bare"));
         assert!(worktrees[2].is_bare);
         assert!(!worktrees[2].is_locked);
     }

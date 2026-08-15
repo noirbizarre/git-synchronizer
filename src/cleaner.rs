@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -12,13 +12,14 @@ use crate::ui::Ui;
 use crate::worktrees::find_orphan_worktrees;
 
 /// Return a display-friendly path with `$HOME` replaced by `~`.
-fn tilde_path(abs: &str) -> String {
+fn tilde_path(abs: &Path) -> String {
+    let abs = abs.to_string_lossy();
     if let Ok(home) = std::env::var("HOME")
         && let Some(rest) = abs.strip_prefix(&home)
     {
         return format!("~{rest}");
     }
-    abs.to_string()
+    abs.into_owned()
 }
 
 /// Join fragments as `a`, `a and b`, or `a, b and c`.
@@ -106,7 +107,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             let worktrees = git.worktree_list()?;
 
             // Map branch name → worktree path for branches checked out somewhere.
-            let wt_map: HashMap<String, String> = worktrees
+            let wt_map: HashMap<String, PathBuf> = worktrees
                 .iter()
                 .filter(|wt| !wt.is_bare)
                 .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), wt.path.clone())))
@@ -144,7 +145,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             git.pull_ff_only()
                         } else if let Some(wt_path) = wt_map.get(branch) {
                             // Checked out in another worktree
-                            git.pull_ff_only_in(Path::new(wt_path))
+                            git.pull_ff_only_in(wt_path)
                         } else {
                             // Not checked out anywhere — fast-forward via fetch
                             git.fetch_update_branch(remote, upstream_branch, branch)
@@ -281,7 +282,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
             // Orphan worktrees.
             for wt in &orphan_unlocked {
-                values.push(format!("orphan-wt:{}", wt.path));
+                values.push(format!("orphan-wt:{}", wt.path.display()));
                 labels.push(tilde_path(&wt.path));
                 hints.push(format!(
                     "orphan worktree, branch: {}",
@@ -375,7 +376,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 if wt.is_locked {
                     continue;
                 }
-                let dirty = match git.worktree_dirty(Path::new(&wt.path)) {
+                let dirty = match git.worktree_dirty(&wt.path) {
                     Ok(v) => v,
                     Err(e) => {
                         ui.warning(&format!(
@@ -505,7 +506,10 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         let (force, force_delete) =
                             force_map.get(branch).copied().unwrap_or((false, false));
                         if opts.dry_run {
-                            ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                            ui.muted(&format!(
+                                "  (dry-run) Would remove worktree '{}'.",
+                                wt.path.display()
+                            ));
                             if opts.use_worktrunk {
                                 wt_handled_branches.insert(branch.clone());
                             }
@@ -543,12 +547,15 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
                 // 2. Remove selected orphan worktrees.
                 for wt in &orphan_unlocked {
-                    let key = format!("orphan-wt:{}", wt.path);
+                    let key = format!("orphan-wt:{}", wt.path.display());
                     if !selected.contains(&key) {
                         continue;
                     }
                     if opts.dry_run {
-                        ui.muted(&format!("  (dry-run) Would remove worktree '{}'.", wt.path));
+                        ui.muted(&format!(
+                            "  (dry-run) Would remove worktree '{}'.",
+                            wt.path.display()
+                        ));
                     } else {
                         let result = ui.spinner(
                             &format!("Removing worktree {}…", tilde_path(&wt.path)),
@@ -730,13 +737,13 @@ fn format_locked_skip_message(wt: &Worktree) -> String {
         Some(reason) => {
             format!(
                 "  Skipping locked worktree '{}' (branch: {branch_label}): {reason}",
-                wt.path
+                wt.path.display()
             )
         }
         None => {
             format!(
                 "  Skipping locked worktree '{}' (branch: {branch_label}).",
-                wt.path
+                wt.path.display()
             )
         }
     }
@@ -762,7 +769,8 @@ fn remove_worktree(
     if use_worktrunk {
         // `wt remove` takes a branch or a path in the same slot; fall back to
         // the path for detached-HEAD worktrees and orphans.
-        let target = wt.branch.as_deref().unwrap_or(&wt.path);
+        let path = wt.path.to_string_lossy();
+        let target = wt.branch.as_deref().unwrap_or(&path);
         git.worktrunk_remove(target, force, force_delete)
     } else {
         git.worktree_remove(&wt.path, force)
@@ -1149,8 +1157,7 @@ mod tests {
     #[test]
     fn format_locked_skip_message_no_reason() {
         let wt = Worktree {
-            path: "/tmp/wt".to_string(),
-            head: None,
+            path: PathBuf::from("/tmp/wt"),
             branch: Some("feature/x".to_string()),
             is_bare: false,
             is_locked: true,
@@ -1165,8 +1172,7 @@ mod tests {
     #[test]
     fn format_locked_skip_message_with_reason() {
         let wt = Worktree {
-            path: "/tmp/wt".to_string(),
-            head: None,
+            path: PathBuf::from("/tmp/wt"),
             branch: Some("feature/x".to_string()),
             is_bare: false,
             is_locked: true,
@@ -1350,7 +1356,7 @@ mod tests {
     fn tilde_path_replaces_home() {
         let home = std::env::var("HOME").expect("HOME must be set for this test");
         assert_eq!(
-            tilde_path(&format!("{home}/projects/repo")),
+            tilde_path(&PathBuf::from(format!("{home}/projects/repo"))),
             "~/projects/repo"
         );
     }
@@ -1358,7 +1364,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn tilde_path_preserves_non_home_path() {
-        assert_eq!(tilde_path("/tmp/some/path"), "/tmp/some/path");
+        assert_eq!(tilde_path(Path::new("/tmp/some/path")), "/tmp/some/path");
     }
 
     #[test]
@@ -1366,7 +1372,7 @@ mod tests {
     fn tilde_path_exact_home() {
         let home = std::env::var("HOME").expect("HOME must be set for this test");
         // Exact HOME path (no trailing slash) should become just "~"
-        assert_eq!(tilde_path(&home), "~");
+        assert_eq!(tilde_path(Path::new(&home)), "~");
     }
 
     #[test]

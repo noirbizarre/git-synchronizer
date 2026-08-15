@@ -32,6 +32,13 @@ pub struct Config {
     pub worktrunk: Option<bool>,
 }
 
+/// A conventional starting point, **not** the value git-sync falls back to at
+/// runtime.
+///
+/// Production never reaches this: [`Config::try_load`] either returns the
+/// stored configuration or `None`, and `None` runs the setup wizard, whose own
+/// fallback is `main` alone. The extra `master` here exists so tests and
+/// external callers get a sensible two-branch default.
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -46,8 +53,10 @@ impl Default for Config {
 impl Config {
     /// Load configuration from the `[sync]` git config section.
     ///
-    /// Returns `None` if the section doesn't exist (first-run scenario).
-    pub fn load(git: &Git) -> Result<Option<Self>> {
+    /// Returns `Ok(None)` if the section doesn't exist (first-run scenario),
+    /// which is why this is `try_load` rather than `load`: absence is an
+    /// expected outcome, distinct from a failure to read the config.
+    pub fn try_load(git: &Git) -> Result<Option<Self>> {
         if !git.config_section_exists(SECTION)? {
             return Ok(None);
         }
@@ -222,7 +231,7 @@ impl Config {
 
 /// Load config, running the interactive setup if needed.
 pub fn load_or_setup(git: &Git, ui: &Ui) -> Result<Config> {
-    match Config::load(git)? {
+    match Config::try_load(git)? {
         Some(config) => Ok(config),
         None => Config::interactive_setup(git, ui),
     }
@@ -235,7 +244,7 @@ mod tests {
     #[test]
     fn config_load_returns_none_when_not_configured() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
-        let config = Config::load(&git)?;
+        let config = Config::try_load(&git)?;
         assert!(config.is_none());
         Ok(())
     }
@@ -252,7 +261,7 @@ mod tests {
         };
         config.save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert_eq!(loaded.protected, config.protected);
         assert_eq!(loaded.remotes, config.remotes);
         assert_eq!(loaded.worktrunk, config.worktrunk);
@@ -271,7 +280,7 @@ mod tests {
         };
         config.save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert!(loaded.remotes.is_none());
         Ok(())
     }
@@ -313,7 +322,7 @@ mod tests {
         };
         config.save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert_eq!(loaded.ignore, config.ignore);
         Ok(())
     }
@@ -330,7 +339,7 @@ mod tests {
         }
         .save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert!(loaded.ignore.is_empty());
         Ok(())
     }
@@ -355,7 +364,7 @@ mod tests {
         }
         .save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert!(loaded.ignore.is_empty());
         Ok(())
     }
@@ -380,7 +389,7 @@ mod tests {
         };
         config2.save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert_eq!(loaded.protected, vec!["develop", "release/*"]);
         assert_eq!(loaded.remotes, Some(vec!["upstream".to_string()]));
         assert_eq!(loaded.worktrunk, Some(false));
@@ -400,7 +409,7 @@ mod tests {
         };
         config.save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert_eq!(loaded.worktrunk, Some(true));
 
         // Overwrite with worktrunk disabled
@@ -412,7 +421,7 @@ mod tests {
         };
         config2.save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert_eq!(loaded.worktrunk, Some(false));
 
         // Overwrite with worktrunk unset
@@ -424,7 +433,7 @@ mod tests {
         };
         config3.save(&git)?;
 
-        let loaded = Config::load(&git)?.expect("config should exist");
+        let loaded = Config::try_load(&git)?.expect("config should exist");
         assert!(loaded.worktrunk.is_none());
         Ok(())
     }
