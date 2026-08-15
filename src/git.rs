@@ -218,15 +218,14 @@ impl Git {
         run_cmd("wt", args, self.verbose, self.workdir.as_deref())
     }
 
-    /// Run a git command and return whether it exited successfully.
+    /// Spawn a git command to completion and return its raw [`Output`].
     ///
-    /// Unlike [`run`], this method does **not** bail on a non-zero exit code.
-    /// Exit code 0 returns `Ok(true)`, exit code 1 returns `Ok(false)`.
-    /// Any other exit code (e.g. 128 for bad refs) is treated as a real error.
-    ///
-    /// This is useful for commands like `git diff --quiet` that encode their
-    /// result in the exit status rather than in stdout.
-    fn run_exit_code(&self, args: &[&str]) -> Result<bool> {
+    /// Owns the verbose echo and the working-directory wiring so that every
+    /// git invocation in this module behaves identically. Callers that need
+    /// the trimmed stdout and a bail-on-failure contract should use
+    /// [`Self::run`]; this is for the handful of commands that encode their
+    /// result in the exit status.
+    fn spawn(&self, args: &[&str]) -> Result<std::process::Output> {
         if self.verbose {
             eprintln!("  $ git {}", args.join(" "));
         }
@@ -237,9 +236,110 @@ impl Git {
             cmd.current_dir(dir);
         }
 
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to execute: git {}", args.join(" ")))?;
+        cmd.output()
+            .with_context(|| format!("failed to execute: git {}", args.join(" ")))
+    }
+
+    /// Pipe the stdout of one git command into the stdin of another and
+    /// return the second command's trimmed stdout.
+    ///
+    /// Both commands inherit the verbose echo and working directory from
+    /// `self`. A failure of either side is reported as a [`GitCommandError`].
+    fn run_piped(&self, first: &[&str], second: &[&str]) -> Result<String> {
+        if self.verbose {
+            eprintln!("  $ git {} | git {}", first.join(" "), second.join(" "));
+        }
+
+        let mut first_cmd = Command::new("git");
+        first_cmd.args(first);
+        if let Some(dir) = &self.workdir {
+            first_cmd.current_dir(dir);
+        }
+        first_cmd.stdout(std::process::Stdio::piped());
+        first_cmd.stderr(std::process::Stdio::piped());
+
+        let mut first_child = first_cmd
+            .spawn()
+            .with_context(|| format!("failed to execute: git {}", first.join(" ")))?;
+
+        let first_stdout = first_child
+            .stdout
+            .take()
+            .with_context(|| format!("failed to capture stdout of: git {}", first.join(" ")))?;
+
+        let mut second_cmd = Command::new("git");
+        second_cmd.args(second);
+        if let Some(dir) = &self.workdir {
+            second_cmd.current_dir(dir);
+        }
+        second_cmd.stdin(first_stdout);
+        second_cmd.stdout(std::process::Stdio::piped());
+        second_cmd.stderr(std::process::Stdio::piped());
+
+        let second_output = second_cmd
+            .spawn()
+            .with_context(|| format!("failed to execute: git {}", second.join(" ")))?
+            .wait_with_output()
+            .with_context(|| format!("failed to wait for: git {}", second.join(" ")))?;
+
+        let first_status = first_child
+            .wait()
+            .with_context(|| format!("failed to wait for: git {}", first.join(" ")))?;
+
+        if !first_status.success() {
+            anyhow::bail!(
+                "git {} failed (exit status: {})",
+                first.join(" "),
+                first_status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            );
+        }
+        if !second_output.status.success() {
+            return Err(anyhow::Error::new(command_error(
+                "git",
+                second,
+                &second_output,
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&second_output.stdout)
+            .trim_end()
+            .to_string())
+    }
+
+    /// Resolve the merge-base of two refs.
+    ///
+    /// Returns `Ok(None)` when the refs have no common ancestor (unrelated
+    /// histories, which `git merge-base` signals with exit code 1). Any other
+    /// failure — a bad ref, a missing git binary — is propagated so it is not
+    /// silently mistaken for "not merged".
+    fn merge_base(&self, target: &str, branch: &str) -> Result<Option<String>> {
+        let args = ["merge-base", target, branch];
+        let output = self.spawn(&args)?;
+
+        match output.status.code() {
+            Some(0) => {
+                let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok((!merge_base.is_empty()).then_some(merge_base))
+            }
+            // Exit 1: no merge base found (unrelated histories).
+            Some(1) => Ok(None),
+            _ => Err(anyhow::Error::new(command_error("git", &args, &output))),
+        }
+    }
+
+    /// Run a git command and return whether it exited successfully.
+    ///
+    /// Unlike [`run`], this method does **not** bail on a non-zero exit code.
+    /// Exit code 0 returns `Ok(true)`, exit code 1 returns `Ok(false)`.
+    /// Any other exit code (e.g. 128 for bad refs) is treated as a real error.
+    ///
+    /// This is useful for commands like `git diff --quiet` that encode their
+    /// result in the exit status rather than in stdout.
+    fn run_exit_code(&self, args: &[&str]) -> Result<bool> {
+        let output = self.spawn(args)?;
 
         match output.status.code() {
             Some(0) => Ok(true),
@@ -256,15 +356,7 @@ impl Git {
     /// This intentionally swallows stderr so callers can show a friendly
     /// error message instead of raw git output.
     pub fn is_inside_work_tree(&self) -> Result<bool> {
-        let mut cmd = Command::new("git");
-        cmd.args(["rev-parse", "--is-inside-work-tree"]);
-        if let Some(dir) = &self.workdir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd
-            .output()
-            .context("failed to execute: git rev-parse --is-inside-work-tree")?;
+        let output = self.spawn(&["rev-parse", "--is-inside-work-tree"])?;
 
         Ok(output.status.success())
     }
@@ -467,62 +559,11 @@ impl Git {
     /// and returns the first column (the patch-id) of each output line.
     /// Merge commits are filtered out — they have no meaningful patch-id.
     fn patch_ids_for_range(&self, range: &str) -> Result<Vec<String>> {
-        if self.verbose {
-            eprintln!("  $ git log -p --no-merges {range} | git patch-id --stable");
-        }
+        let stdout = self.run_piped(
+            &["log", "-p", "--no-merges", range],
+            &["patch-id", "--stable"],
+        )?;
 
-        let mut log_cmd = Command::new("git");
-        log_cmd.args(["log", "-p", "--no-merges", range]);
-        if let Some(dir) = &self.workdir {
-            log_cmd.current_dir(dir);
-        }
-        log_cmd.stdout(std::process::Stdio::piped());
-        log_cmd.stderr(std::process::Stdio::piped());
-
-        let mut log_child = log_cmd
-            .spawn()
-            .with_context(|| format!("failed to execute: git log {range}"))?;
-
-        let log_stdout = log_child
-            .stdout
-            .take()
-            .context("failed to capture git log stdout")?;
-
-        let mut pid_cmd = Command::new("git");
-        pid_cmd.args(["patch-id", "--stable"]);
-        if let Some(dir) = &self.workdir {
-            pid_cmd.current_dir(dir);
-        }
-        pid_cmd.stdin(log_stdout);
-        pid_cmd.stdout(std::process::Stdio::piped());
-        pid_cmd.stderr(std::process::Stdio::piped());
-
-        let pid_output = pid_cmd
-            .spawn()
-            .with_context(|| "failed to execute: git patch-id --stable".to_string())?
-            .wait_with_output()
-            .with_context(|| "failed to wait for git patch-id".to_string())?;
-
-        let log_status = log_child
-            .wait()
-            .with_context(|| format!("failed to wait for git log {range}"))?;
-
-        if !log_status.success() {
-            // Capturing stderr after wait is tricky; surface a generic error.
-            anyhow::bail!(
-                "git log {range} failed (exit status: {})",
-                log_status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".into())
-            );
-        }
-        if !pid_output.status.success() {
-            let args = ["patch-id", "--stable"];
-            return Err(anyhow::Error::new(command_error("git", &args, &pid_output)));
-        }
-
-        let stdout = String::from_utf8_lossy(&pid_output.stdout);
         let ids: Vec<String> = stdout
             .lines()
             .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
@@ -556,23 +597,10 @@ impl Git {
         }
 
         // Resolve merge-base; if unrelated histories, bail out as "no match".
-        let mut mb_cmd = Command::new("git");
-        mb_cmd.args(["merge-base", target, branch]);
-        if let Some(dir) = &self.workdir {
-            mb_cmd.current_dir(dir);
-        }
-        let mb_output = mb_cmd
-            .output()
-            .with_context(|| format!("failed to execute: git merge-base {target} {branch}"))?;
-        if !mb_output.status.success() {
-            return Ok(false);
-        }
-        let merge_base = String::from_utf8_lossy(&mb_output.stdout)
-            .trim()
-            .to_string();
-        if merge_base.is_empty() {
-            return Ok(false);
-        }
+        let merge_base = match self.merge_base(target, branch)? {
+            Some(mb) => mb,
+            None => return Ok(false),
+        };
 
         let target_range = format!("{merge_base}..{target}");
         let target_ids: std::collections::HashSet<String> = self
@@ -604,19 +632,7 @@ impl Git {
     /// `git >= 2.38` for the `--write-tree` option.
     pub fn merge_adds_nothing(&self, target: &str, branch: &str) -> Result<bool> {
         let args = ["merge-tree", "--write-tree", target, branch];
-        if self.verbose {
-            eprintln!("  $ git {}", args.join(" "));
-        }
-
-        let mut cmd = Command::new("git");
-        cmd.args(args);
-        if let Some(dir) = &self.workdir {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("failed to execute: git {}", args.join(" ")))?;
+        let output = self.spawn(&args)?;
 
         match output.status.code() {
             Some(0) => {
@@ -643,61 +659,8 @@ impl Git {
     /// Returns `Ok(None)` when the diff is empty (branch is identical to
     /// `base`).
     fn squash_patch_id(&self, base: &str, branch: &str) -> Result<Option<String>> {
-        if self.verbose {
-            eprintln!("  $ git diff {base} {branch} | git patch-id --stable");
-        }
+        let stdout = self.run_piped(&["diff", base, branch], &["patch-id", "--stable"])?;
 
-        let mut diff_cmd = Command::new("git");
-        diff_cmd.args(["diff", base, branch]);
-        if let Some(dir) = &self.workdir {
-            diff_cmd.current_dir(dir);
-        }
-        diff_cmd.stdout(std::process::Stdio::piped());
-        diff_cmd.stderr(std::process::Stdio::piped());
-
-        let mut diff_child = diff_cmd
-            .spawn()
-            .with_context(|| format!("failed to execute: git diff {base} {branch}"))?;
-
-        let diff_stdout = diff_child
-            .stdout
-            .take()
-            .context("failed to capture git diff stdout")?;
-
-        let mut pid_cmd = Command::new("git");
-        pid_cmd.args(["patch-id", "--stable"]);
-        if let Some(dir) = &self.workdir {
-            pid_cmd.current_dir(dir);
-        }
-        pid_cmd.stdin(diff_stdout);
-        pid_cmd.stdout(std::process::Stdio::piped());
-        pid_cmd.stderr(std::process::Stdio::piped());
-
-        let pid_output = pid_cmd
-            .spawn()
-            .with_context(|| "failed to execute: git patch-id --stable".to_string())?
-            .wait_with_output()
-            .with_context(|| "failed to wait for git patch-id".to_string())?;
-
-        let diff_status = diff_child
-            .wait()
-            .with_context(|| format!("failed to wait for git diff {base} {branch}"))?;
-
-        if !diff_status.success() {
-            anyhow::bail!(
-                "git diff {base} {branch} failed (exit status: {})",
-                diff_status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".into())
-            );
-        }
-        if !pid_output.status.success() {
-            let args = ["patch-id", "--stable"];
-            return Err(anyhow::Error::new(command_error("git", &args, &pid_output)));
-        }
-
-        let stdout = String::from_utf8_lossy(&pid_output.stdout);
         let id = stdout
             .lines()
             .next()
@@ -719,23 +682,10 @@ impl Git {
     /// (unrelated histories).
     pub fn squash_patch_id_match(&self, target: &str, branch: &str) -> Result<bool> {
         // Resolve merge-base; unrelated histories ⇒ no match.
-        let mut mb_cmd = Command::new("git");
-        mb_cmd.args(["merge-base", target, branch]);
-        if let Some(dir) = &self.workdir {
-            mb_cmd.current_dir(dir);
-        }
-        let mb_output = mb_cmd
-            .output()
-            .with_context(|| format!("failed to execute: git merge-base {target} {branch}"))?;
-        if !mb_output.status.success() {
-            return Ok(false);
-        }
-        let merge_base = String::from_utf8_lossy(&mb_output.stdout)
-            .trim()
-            .to_string();
-        if merge_base.is_empty() {
-            return Ok(false);
-        }
+        let merge_base = match self.merge_base(target, branch)? {
+            Some(mb) => mb,
+            None => return Ok(false),
+        };
 
         // Combined patch-id of the whole branch as a single squashed diff.
         let branch_pid = match self.squash_patch_id(&merge_base, branch)? {
@@ -1156,6 +1106,62 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_inside_work_tree_distinguishes_repos_from_plain_directories() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
+        assert!(git.is_inside_work_tree()?, "a git repo is a work tree");
+
+        let plain = tempfile::tempdir()?;
+        let outside = Git::with_workdir(false, plain.path());
+        assert!(
+            !outside.is_inside_work_tree()?,
+            "a plain directory is not a work tree"
+        );
+
+        drop(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_base_returns_none_for_unrelated_histories() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo()?;
+        let path = dir.path();
+
+        // An orphan branch shares no history with the initial commit.
+        Command::new("git")
+            .args(["checkout", "--orphan", "unrelated"])
+            .current_dir(path)
+            .output()?;
+        std::fs::write(path.join("other.txt"), "other")?;
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .output()?;
+        Command::new("git")
+            .args(["commit", "-m", "unrelated root"])
+            .current_dir(path)
+            .output()?;
+
+        assert!(
+            git.merge_base("main", "unrelated")?.is_none(),
+            "unrelated histories have no merge base"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merge_base_propagates_a_bad_ref_instead_of_reporting_no_match() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        // A non-existent ref makes git exit 128, which must not be conflated
+        // with the exit-1 "no merge base" signal.
+        assert!(
+            git.merge_base("main", "does-not-exist").is_err(),
+            "a bad ref must surface as an error"
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_classify_network_signatures() {
