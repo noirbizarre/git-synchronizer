@@ -819,6 +819,11 @@ impl Git {
 
     /// Remove a worktree via the worktrunk CLI, triggering pre/post-remove hooks.
     ///
+    /// `target` is either a branch name or a worktree path — `wt remove`
+    /// accepts both in the same positional slot, so path-based removal (for
+    /// detached-HEAD worktrees and orphans, where no branch name is
+    /// available) needs no separate entry point.
+    ///
     /// Uses `--foreground` to wait for hooks to complete and `--yes` to skip
     /// wt's approval prompts (git-sync already confirmed with the user).
     /// `wt` deletes the associated branch itself; git-sync skips its own
@@ -828,30 +833,8 @@ impl Git {
     /// untracked/uncommitted changes. When `force_delete` is true, passes
     /// `--force-delete` so branch deletion succeeds even when the branch has
     /// commits not merged into a target.
-    pub fn worktrunk_remove(&self, branch: &str, force: bool, force_delete: bool) -> Result<()> {
-        let mut args: Vec<&str> = vec!["remove", branch, "--foreground", "--yes"];
-        if force {
-            args.push("--force");
-        }
-        if force_delete {
-            args.push("--force-delete");
-        }
-        self.run_wt(&args)?;
-        Ok(())
-    }
-
-    /// Remove a worktree via the worktrunk CLI using its path.
-    ///
-    /// Used for detached HEAD worktrees or orphans where the branch name
-    /// is not available. Falls back to path-based removal. See
-    /// [`worktrunk_remove`](Self::worktrunk_remove) for flag semantics.
-    pub fn worktrunk_remove_by_path(
-        &self,
-        path: &str,
-        force: bool,
-        force_delete: bool,
-    ) -> Result<()> {
-        let mut args: Vec<&str> = vec!["remove", path, "--foreground", "--yes"];
+    pub fn worktrunk_remove(&self, target: &str, force: bool, force_delete: bool) -> Result<()> {
+        let mut args: Vec<&str> = vec!["remove", target, "--foreground", "--yes"];
         if force {
             args.push("--force");
         }

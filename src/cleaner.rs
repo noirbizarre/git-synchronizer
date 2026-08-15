@@ -784,10 +784,10 @@ fn remove_worktree(
     force_delete: bool,
 ) -> Result<()> {
     if use_worktrunk {
-        match &wt.branch {
-            Some(branch) => git.worktrunk_remove(branch, force, force_delete),
-            None => git.worktrunk_remove_by_path(&wt.path, force, force_delete),
-        }
+        // `wt remove` takes a branch or a path in the same slot; fall back to
+        // the path for detached-HEAD worktrees and orphans.
+        let target = wt.branch.as_deref().unwrap_or(&wt.path);
+        git.worktrunk_remove(target, force, force_delete)
     } else {
         git.worktree_remove(&wt.path, force)
     }
