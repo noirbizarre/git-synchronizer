@@ -1803,10 +1803,12 @@ fn json_reports_a_young_worktree_as_too_young() {
     );
 
     assert_eq!(doc["min_age"], "1h");
+    // Matched on the branch, not the path: macOS resolves the temp dir through
+    // /private, so git reports a different string than the fixture holds.
     let worktrees = doc["local"]["worktrees"].as_array().unwrap();
     let entry = worktrees
         .iter()
-        .find(|w| w["path"] == wt_path.to_string_lossy().as_ref())
+        .find(|w| w["branch"] == "feature/young")
         .expect("the young worktree should be reported");
     assert_eq!(entry["status"], "too_young");
     assert_eq!(entry["kind"], "branch");

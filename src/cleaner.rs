@@ -1588,14 +1588,18 @@ mod tests {
         };
         let report = run(&git, &default_config(), &Ui::new(), &opts)?;
 
+        // Matched on the branch, not the path: macOS resolves the temp dir
+        // through /private, so git reports a different string than the fixture
+        // holds.
         let entry = report
             .local
             .worktrees
             .iter()
-            .find(|w| w.path == path_string(&wt_path))
+            .find(|w| w.branch.as_deref() == Some("feature/merged"))
             .expect("the young worktree should be reported");
         assert_eq!(entry.status, ItemStatus::TooYoung);
         assert_eq!(entry.kind, WorktreeKind::Branch);
+        assert!(wt_path.exists());
         assert_eq!(report.min_age, "1h".parse()?);
         assert_eq!(report.summary.worktrees_removed, 0);
         Ok(())
@@ -1624,7 +1628,7 @@ mod tests {
             .local
             .worktrees
             .iter()
-            .find(|w| w.path == path_string(&wt_path))
+            .find(|w| w.branch.as_deref() == Some("feature/merged"))
             .expect("the young orphan should be reported");
         assert_eq!(entry.status, ItemStatus::TooYoung);
         assert_eq!(entry.kind, WorktreeKind::Orphan);
