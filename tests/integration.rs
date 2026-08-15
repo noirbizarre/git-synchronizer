@@ -1542,10 +1542,14 @@ fn config_list_renders_empty_sections_as_none() {
 
 /// Run the binary and parse its stdout as the single JSON document it must be.
 fn json_output(dir: &TempDir, args: &[&str]) -> serde_json::Value {
+    json_output_at(dir.path(), args)
+}
+
+fn json_output_at(path: &std::path::Path, args: &[&str]) -> serde_json::Value {
     let output = Command::cargo_bin("git-sync")
         .unwrap()
         .args(args)
-        .current_dir(dir.path())
+        .current_dir(path)
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -1555,6 +1559,75 @@ fn json_output(dir: &TempDir, args: &[&str]) -> serde_json::Value {
         "piped output must be a single compact JSON line, got: {stdout}"
     );
     serde_json::from_str(&stdout).expect("stdout must be valid JSON")
+}
+
+/// Remote detection runs the same strategies as local detection (#28): a
+/// squash-merged remote branch is reported at the default effort, but not at
+/// `--effort 1`.
+#[test]
+fn json_reports_squash_merged_remote_branches() {
+    let (_dir, work, _bare) = init_repo_with_remote();
+
+    StdCommand::new("git")
+        .args(["checkout", "-b", "feature/squashed", "main"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    std::fs::write(work.join("squashed.txt"), "squashed").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "squashed feature"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push", "-u", "origin", "feature/squashed"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["merge", "--squash", "feature/squashed"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "squash merge"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+
+    let doc = json_output_at(&work, &["--json", "--dry-run", "--no-fetch"]);
+    assert_eq!(doc["remotes"][0]["remote"], "origin");
+    let merged = doc["remotes"][0]["merged"].as_array().unwrap();
+    assert!(
+        merged.iter().any(|b| b == "feature/squashed"),
+        "default effort should report the squash-merged remote branch, got {merged:?}"
+    );
+
+    let quick = json_output_at(
+        &work,
+        &["--json", "--dry-run", "--no-fetch", "--effort", "1"],
+    );
+    let quick_merged = quick["remotes"][0]["merged"].as_array().unwrap();
+    assert!(
+        !quick_merged.iter().any(|b| b == "feature/squashed"),
+        "quick effort keeps remote detection on ancestor merges, got {quick_merged:?}"
+    );
 }
 
 #[test]

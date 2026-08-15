@@ -286,7 +286,7 @@ CLI flags:
    protected) using several complementary strategies, applied from cheapest to
    most expensive and stopping as soon as one matches. How many of them run is
    controlled by `--effort` (or `sync.effort`), each level including the
-   previous ones:
+   previous ones. The same levels drive remote-branch detection in step 4:
 
    **Effort 1 (fastest)**
 
@@ -368,16 +368,17 @@ CLI flags:
    `--no-worktrees`.
 
 4. **Delete merged remote branches** -- for each configured remote, identifies
-   merged remote-tracking branches with `git branch -r --merged <target>`. The
-   user selects which to delete, and they are removed with
-   `git push --delete --force-with-lease` for safety.
+   merged remote-tracking branches. The user selects which to delete, and they
+   are removed with `git push --delete --force-with-lease` for safety.
 
-   Note that remote detection currently uses **only** this standard ancestor
-   check: the cherry, tree, patch-ID and simulated-merge strategies listed in
-   step 3 are applied to local branches only. Remote branches that were
-   squash- or rebase-merged are therefore not reported yet -- see
-   [issue #28](https://github.com/noirbizarre/git-synchronizer/issues/28).
-   Their local counterparts are still detected normally.
+   Remote detection runs the **same strategies at the same effort levels** as
+   step 3, so squash- and rebase-merged remote branches are reported too. The
+   one deliberate difference: the content-based strategies compare against the
+   **remote-tracking** counterparts of the protected branches (`origin/main`),
+   not their local ones. A branch merged into a local `main` you have not
+   pushed yet is still live on the remote and is not offered for deletion
+   there. Which branches are protected or ignored is still read from your local
+   configuration.
    Skipped with `--local-only`.
 
 ```mermaid
@@ -433,7 +434,7 @@ flowchart TD
     LocalCheck -- Yes --> RemoteCheck
 
     RemoteCheck{--local-only?}
-    RemoteCheck -- No --> FindRemote[For each remote:\nfind merged remote branches]
+    RemoteCheck -- No --> FindRemote["For each remote:\nfind merged remote branches\n(same strategies, vs remote/target)"]
     FindRemote --> SelectRemote[User selects branches]
     SelectRemote --> DeleteRemote[Delete remote branches\ngit push --delete --force-with-lease]
     DeleteRemote --> Done
