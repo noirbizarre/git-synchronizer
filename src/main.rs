@@ -182,13 +182,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         }
 
         ConfigAction::RemoveProtected { pattern } => {
-            let key = format!("{}.protected", config::SECTION);
-            let mut protected = git.config_get_all(&key)?;
-            protected.retain(|p| p != &pattern);
-            git.config_unset_all(&key)?;
-            for p in &protected {
-                git.config_add(&key, p)?;
-            }
+            git.config_remove_value(&format!("{}.protected", config::SECTION), &pattern)?;
             ui.success(&format!(
                 "Removed protected pattern: {}",
                 console::style(pattern).cyan()
@@ -206,13 +200,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         }
 
         ConfigAction::RemoveIgnore { pattern } => {
-            let key = format!("{}.ignore", config::SECTION);
-            let mut ignore = git.config_get_all(&key)?;
-            ignore.retain(|p| p != &pattern);
-            git.config_unset_all(&key)?;
-            for p in &ignore {
-                git.config_add(&key, p)?;
-            }
+            git.config_remove_value(&format!("{}.ignore", config::SECTION), &pattern)?;
             ui.success(&format!(
                 "Removed ignore pattern: {}",
                 console::style(pattern).cyan()
@@ -227,13 +215,7 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
         }
 
         ConfigAction::RemoveRemote { name } => {
-            let key = format!("{}.remote", config::SECTION);
-            let mut remotes = git.config_get_all(&key)?;
-            remotes.retain(|r| r != &name);
-            git.config_unset_all(&key)?;
-            for r in &remotes {
-                git.config_add(&key, r)?;
-            }
+            git.config_remove_value(&format!("{}.remote", config::SECTION), &name)?;
             ui.success(&format!("Removed remote: {}", console::style(&name).cyan()));
             Ok(())
         }

@@ -897,6 +897,28 @@ impl Git {
         Ok(())
     }
 
+    /// Remove a single value from a multi-valued config key, preserving the
+    /// order of the values that remain.
+    ///
+    /// `git config --unset` takes a value regex rather than a literal, so
+    /// removing one entry safely means rewriting the whole key: read the
+    /// values, drop the matching ones, clear the key and re-add the rest in
+    /// their original order. Removing a value that is not present is a no-op.
+    pub fn config_remove_value(&self, key: &str, value: &str) -> Result<()> {
+        let mut values = self.config_get_all(key)?;
+        let before = values.len();
+        values.retain(|v| v != value);
+        if values.len() == before {
+            return Ok(());
+        }
+
+        self.config_unset_all(key)?;
+        for remaining in &values {
+            self.config_add(key, remaining)?;
+        }
+        Ok(())
+    }
+
     /// Check whether a config section exists.
     pub fn config_section_exists(&self, section: &str) -> Result<bool> {
         match self.run(&["config", "--get-regexp", &format!("^{section}\\.")]) {
@@ -1098,6 +1120,37 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_remove_value_preserves_the_order_of_the_survivors() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+        let key = "sync.protected";
+
+        for value in ["main", "develop", "release", "staging"] {
+            git.config_add(key, value)?;
+        }
+
+        git.config_remove_value(key, "release")?;
+
+        assert_eq!(
+            git.config_get_all(key)?,
+            vec!["main", "develop", "staging"],
+            "the remaining values keep their original order"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_remove_value_is_a_noop_for_an_absent_value() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+        let key = "sync.protected";
+
+        git.config_add(key, "main")?;
+        git.config_remove_value(key, "never-added")?;
+
+        assert_eq!(git.config_get_all(key)?, vec!["main"]);
+        Ok(())
+    }
 
     #[test]
     fn is_inside_work_tree_distinguishes_repos_from_plain_directories() -> Result<()> {
