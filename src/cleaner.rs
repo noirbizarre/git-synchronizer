@@ -2571,6 +2571,46 @@ mod tests {
         Ok(())
     }
 
+    /// A strategy that cannot answer for a remote branch is reported as a
+    /// warning instead of aborting the run.
+    #[test]
+    fn run_reports_remote_merge_detection_warnings() -> Result<()> {
+        let (_dir, work_path, _bare_path) = crate::test_helpers::init_repo_with_local_remote()?;
+        push_merged_branch(&work_path, "feature/remote-done")?;
+
+        // A remote-tracking ref pointing at an object that does not exist:
+        // every strategy probing it fails.
+        let broken = work_path.join(".git/refs/remotes/origin/dangling");
+        std::fs::create_dir_all(broken.parent().expect("a ref always has a parent"))?;
+        std::fs::write(broken, "0000000000000000000000000000000000000001\n")?;
+
+        let git = Git::with_workdir(false, &work_path);
+        let mut opts = opts_yes_skip_network();
+        opts.remote_only = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert_eq!(
+            report.status,
+            crate::report::Status::Success,
+            "the run must not abort"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Merge detection partially failed")),
+            "the failure should surface as a warning, got {:?}",
+            report.warnings
+        );
+        assert_eq!(
+            report.remotes[0].merged,
+            vec!["feature/remote-done".to_string()],
+            "the other branches are still detected"
+        );
+        Ok(())
+    }
+
     #[test]
     fn run_reports_a_failed_remote_branch_deletion() -> Result<()> {
         let (_dir, work_path, _bare_path) = crate::test_helpers::init_repo_with_local_remote()?;

@@ -232,9 +232,13 @@ fn run_strategies(
         Effort::Thorough => STRATEGIES.len(),
     };
 
-    let mut failed_strategies: HashSet<String> = HashSet::new();
-
     for strategy in &STRATEGIES[..enabled] {
+        // A strategy that cannot answer usually cannot answer for any branch:
+        // `merge_adds_nothing` needs git >= 2.38, and a broken ref breaks every
+        // probe against it. Report the first failure only, so an unsupported
+        // strategy produces one warning instead of one per branch.
+        let mut reported = false;
+
         for (name, reference) in pool {
             if seen.contains(name) {
                 continue;
@@ -244,12 +248,10 @@ fn run_strategies(
                     Ok(merged) => merged,
                     Err(e) => {
                         // Keep probing the remaining strategies and branches,
-                        // but remember why this one could not answer. Dedupe
-                        // by message so one unsupported strategy does not
-                        // produce a warning per branch.
-                        let msg = format!("Merge detection partially failed: {e}");
-                        if failed_strategies.insert(msg.clone()) {
-                            warnings.push(msg);
+                        // but remember why this one could not answer.
+                        if !reported {
+                            reported = true;
+                            warnings.push(format!("Merge detection partially failed: {e}"));
                         }
                         false
                     }
@@ -1180,13 +1182,8 @@ mod tests {
             "local detection should catch the squash-merged branch"
         );
 
-        let remote = find_merged_remote(
-            &git,
-            &filter_for(&git, &config)?,
-            "origin",
-            Effort::Standard,
-        )?
-        .candidates;
+        let filter = filter_for(&git, &config)?;
+        let remote = find_merged_remote(&git, &filter, "origin", Effort::Standard)?.candidates;
         assert!(
             remote.contains(&"feature/merged".to_string()),
             "remote detection should catch the classically merged branch, got {remote:?}"
@@ -1258,13 +1255,8 @@ mod tests {
             "local detection compares against local main, got {local:?}"
         );
 
-        let remote = find_merged_remote(
-            &git,
-            &filter_for(&git, &config)?,
-            "origin",
-            Effort::Thorough,
-        )?
-        .candidates;
+        let filter = filter_for(&git, &config)?;
+        let remote = find_merged_remote(&git, &filter, "origin", Effort::Thorough)?.candidates;
         assert!(
             !remote.contains(&"feature/unpushed-merge".to_string()),
             "remote detection must compare against origin/main, got {remote:?}"
@@ -1288,16 +1280,132 @@ mod tests {
             effort: None,
         };
 
-        let remote = find_merged_remote(
-            &git,
-            &filter_for(&git, &config)?,
-            "origin",
-            Effort::Thorough,
-        )?
-        .candidates;
+        let filter = filter_for(&git, &config)?;
+        let remote = find_merged_remote(&git, &filter, "origin", Effort::Thorough)?.candidates;
         assert!(
             remote.is_empty(),
             "protected and ignored remote branches are never candidates, got {remote:?}"
+        );
+
+        drop(seed);
+        Ok(())
+    }
+
+    /// A protected branch that was never pushed has no remote counterpart to
+    /// compare against, so the content-based passes are skipped entirely
+    /// rather than falling back to the local ref.
+    #[test]
+    fn find_merged_remote_without_a_remote_target_skips_content_detection() -> Result<()> {
+        let (_dir, seed, work) = init_repo_with_remote_merges()?;
+        use crate::test_helpers::git_in;
+
+        // A protected branch that only exists locally.
+        git_in(&work, &["branch", "release/1.0", "main"])?;
+
+        let git = Git::with_workdir(false, &work);
+        let config = Config {
+            protected: vec!["release/1.0".to_string()],
+            ignore: Vec::new(),
+            remotes: None,
+            worktrunk: None,
+            effort: None,
+        };
+
+        let filter = filter_for(&git, &config)?;
+        let remote = find_merged_remote(&git, &filter, "origin", Effort::Thorough)?;
+        assert!(
+            !remote.candidates.contains(&"feature/squashed".to_string()),
+            "without origin/release/1.0 there is nothing to compare against, got {:?}",
+            remote.candidates
+        );
+        assert!(remote.warnings.is_empty());
+
+        drop(seed);
+        Ok(())
+    }
+
+    /// Point a ref at an object that does not exist, so that every strategy
+    /// resolving it fails. Used to exercise the partial-failure path.
+    fn write_dangling_ref(repo: &std::path::Path, reference: &str) -> Result<()> {
+        let path = repo.join(".git").join(reference);
+        std::fs::create_dir_all(path.parent().expect("a ref always has a parent"))?;
+        std::fs::write(path, "0000000000000000000000000000000000000001\n")?;
+        Ok(())
+    }
+
+    /// A strategy that cannot answer must not abort the scan: the other
+    /// branches are still reported and the failure surfaces as a single
+    /// warning, however many branches triggered it.
+    #[test]
+    fn find_merged_local_reports_strategy_failures_as_warnings() -> Result<()> {
+        let (dir, git) = crate::test_helpers::init_repo_with_branches()?;
+        write_dangling_ref(dir.path(), "refs/heads/dangling/one")?;
+        write_dangling_ref(dir.path(), "refs/heads/dangling/two")?;
+
+        let config = protected_main();
+        let merged = find_merged_local(&git, &filter_for(&git, &config)?, Effort::Standard)?;
+
+        assert!(
+            merged.candidates.contains(&"feature/done".to_string()),
+            "a broken ref must not hide the other merged branches, got {:?}",
+            merged.candidates
+        );
+        assert_eq!(
+            merged.warnings.len(),
+            3,
+            "one warning per failing strategy, not per branch, got {:?}",
+            merged.warnings
+        );
+        assert!(
+            merged
+                .warnings
+                .iter()
+                .all(|w| w.starts_with("Merge detection partially failed:")),
+            "got {:?}",
+            merged.warnings
+        );
+        assert!(
+            !merged.warnings.iter().any(|w| w.contains("dangling/two")),
+            "the second broken branch must not warn again, got {:?}",
+            merged.warnings
+        );
+        Ok(())
+    }
+
+    /// The same partial-failure handling applies to remote branches.
+    #[test]
+    fn find_merged_remote_reports_strategy_failures_as_warnings() -> Result<()> {
+        let (_dir, seed, work) = init_repo_with_remote_merges()?;
+        write_dangling_ref(&work, "refs/remotes/origin/dangling")?;
+
+        let git = Git::with_workdir(false, &work);
+        let config = protected_main();
+        let filter = filter_for(&git, &config)?;
+        let remote = find_merged_remote(&git, &filter, "origin", Effort::Standard)?;
+
+        assert!(
+            remote.candidates.contains(&"feature/squashed".to_string()),
+            "a broken ref must not hide the other merged branches, got {:?}",
+            remote.candidates
+        );
+        assert!(
+            !remote.candidates.contains(&"dangling".to_string()),
+            "a branch no strategy could answer for is not a candidate, got {:?}",
+            remote.candidates
+        );
+        assert_eq!(
+            remote.warnings.len(),
+            3,
+            "one warning per failing strategy, got {:?}",
+            remote.warnings
+        );
+        assert!(
+            remote
+                .warnings
+                .iter()
+                .all(|w| w.starts_with("Merge detection partially failed:")),
+            "got {:?}",
+            remote.warnings
         );
 
         drop(seed);
@@ -1437,22 +1545,12 @@ mod tests {
 
         let git = Git::with_workdir(false, &work);
 
-        let visible = find_merged_remote(
-            &git,
-            &filter_for(&git, &config_with_ignore(&[]))?,
-            "origin",
-            Effort::Standard,
-        )?
-        .candidates;
+        let filter = filter_for(&git, &config_with_ignore(&[]))?;
+        let visible = find_merged_remote(&git, &filter, "origin", Effort::Standard)?.candidates;
         assert!(visible.contains(&"wip/spike".to_string()));
 
-        let hidden = find_merged_remote(
-            &git,
-            &filter_for(&git, &config_with_ignore(&["wip/*"]))?,
-            "origin",
-            Effort::Standard,
-        )?
-        .candidates;
+        let filter = filter_for(&git, &config_with_ignore(&["wip/*"]))?;
+        let hidden = find_merged_remote(&git, &filter, "origin", Effort::Standard)?.candidates;
         assert!(
             !hidden.contains(&"wip/spike".to_string()),
             "ignored remote branch should be invisible, got {hidden:?}"
