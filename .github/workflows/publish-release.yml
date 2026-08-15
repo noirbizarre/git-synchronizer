@@ -166,8 +166,11 @@ jobs:
             --prefix="git-synchronizer-${version}/" \
             -o "dist/git-synchronizer-${version}.tar.gz" "$TAG"
           # Cargo.lock is tracked, so the archive supports `cargo build --locked`.
-          tar -tzf "dist/git-synchronizer-${version}.tar.gz" \
-            | grep -qx "git-synchronizer-${version}/Cargo.lock"
+          # The listing goes through a file rather than a pipe into `grep -q`:
+          # grep exits on the first match, tar takes SIGPIPE, and `pipefail`
+          # turns that into a failure of the very check that just passed.
+          tar -tzf "dist/git-synchronizer-${version}.tar.gz" > "$RUNNER_TEMP/files"
+          grep -qx "git-synchronizer-${version}/Cargo.lock" "$RUNNER_TEMP/files"
           cd dist
           sha256sum "git-synchronizer-${version}.tar.gz" \
             > "git-synchronizer-${version}.tar.gz.sha256"
