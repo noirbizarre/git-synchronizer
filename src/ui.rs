@@ -65,6 +65,49 @@ impl Ui {
             .write_line(&format!("{} {text}", console::style("✘").red()));
     }
 
+    /// Render a failed git operation with a friendly classification.
+    ///
+    /// Emits a single coloured line whose prefix is chosen from the
+    /// [`GitErrorKind`] of the underlying [`GitCommandError`], so a network or
+    /// auth failure reads as such instead of a bare "Failed to ...". Returns
+    /// the detected kind so callers can decide whether to surface a follow-up
+    /// warning (e.g. "detection may be stale").
+    ///
+    /// `action` is an infinitive phrase ("fetch from", "delete", "remove") and
+    /// `target` the thing acted upon.
+    pub fn report_failure(
+        &self,
+        action: &str,
+        target: &str,
+        err: &anyhow::Error,
+    ) -> crate::git::GitErrorKind {
+        use crate::git::{GitCommandError, GitErrorKind};
+
+        let styled = console::style(target).red();
+        if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
+            let cause = gerr.short_cause();
+            match gerr.kind {
+                GitErrorKind::Network => {
+                    self.error(&format!(
+                        "Network error: cannot {action} '{styled}' ({cause})."
+                    ));
+                }
+                GitErrorKind::Auth => {
+                    self.error(&format!(
+                        "Authentication failed while trying to {action} '{styled}': {cause}"
+                    ));
+                }
+                GitErrorKind::Other => {
+                    self.error(&format!("Failed to {action} '{styled}': {cause}"));
+                }
+            }
+            gerr.kind
+        } else {
+            self.error(&format!("Failed to {action} '{styled}': {err}"));
+            GitErrorKind::Other
+        }
+    }
+
     /// Print muted/dim text.
     pub fn muted(&self, text: &str) {
         let _ = self
@@ -178,6 +221,60 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::{GitCommandError, GitErrorKind};
+
+    fn git_err(kind: GitErrorKind, stderr: &str) -> anyhow::Error {
+        anyhow::Error::new(GitCommandError {
+            program: "git".into(),
+            args: vec!["fetch".into(), "--prune".into(), "origin".into()],
+            exit_code: Some(1),
+            stderr: stderr.into(),
+            kind,
+        })
+    }
+
+    #[test]
+    fn report_failure_classifies_network() {
+        let ui = Ui::new();
+        let err = git_err(
+            GitErrorKind::Network,
+            "ssh: connect to host github.com port 22: No route to host",
+        );
+        assert_eq!(
+            ui.report_failure("fetch from", "origin", &err),
+            GitErrorKind::Network
+        );
+    }
+
+    #[test]
+    fn report_failure_classifies_auth() {
+        let ui = Ui::new();
+        let err = git_err(GitErrorKind::Auth, "Permission denied (publickey).");
+        assert_eq!(
+            ui.report_failure("fetch from", "origin", &err),
+            GitErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn report_failure_classifies_other() {
+        let ui = Ui::new();
+        let err = git_err(GitErrorKind::Other, "fatal: refusing to fetch");
+        assert_eq!(
+            ui.report_failure("fetch from", "origin", &err),
+            GitErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn report_failure_handles_non_git_error() {
+        let ui = Ui::new();
+        let err = anyhow::anyhow!("something went wrong");
+        assert_eq!(
+            ui.report_failure("pull", "feature", &err),
+            GitErrorKind::Other
+        );
+    }
 
     #[test]
     fn test_ui_default() {

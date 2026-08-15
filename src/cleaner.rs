@@ -7,7 +7,7 @@ use crate::branches::{
     Filter, find_gone_local, find_merged_local, find_merged_remote, resolve_merge_targets,
 };
 use crate::config::Config;
-use crate::git::{Git, GitCommandError, GitErrorKind, Worktree};
+use crate::git::{Git, Worktree};
 use crate::ui::Ui;
 use crate::worktrees::find_orphan_worktrees;
 
@@ -27,46 +27,6 @@ fn join_with_and(parts: &[String]) -> String {
         [] => String::new(),
         [only] => only.clone(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
-}
-
-/// Render a per-remote operation failure with a friendly classification.
-///
-/// Emits a single coloured line via `ui.error` plus a dimmed short cause when
-/// available. When the underlying failure is a [`GitCommandError`], its
-/// [`GitErrorKind`] selects the message prefix (network / auth / generic).
-/// Returns the detected kind so callers can decide whether to surface a
-/// follow-up warning (e.g. "detection may be stale").
-fn report_remote_failure(ui: &Ui, action: &str, target: &str, err: &anyhow::Error) -> GitErrorKind {
-    if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
-        let cause = gerr.short_cause();
-        match gerr.kind {
-            GitErrorKind::Network => {
-                ui.error(&format!(
-                    "Network error: cannot {action} '{}' ({cause}).",
-                    console::style(target).red()
-                ));
-            }
-            GitErrorKind::Auth => {
-                ui.error(&format!(
-                    "Authentication failed while trying to {action} '{}': {cause}",
-                    console::style(target).red()
-                ));
-            }
-            GitErrorKind::Other => {
-                ui.error(&format!(
-                    "Failed to {action} '{}': {cause}",
-                    console::style(target).red()
-                ));
-            }
-        }
-        gerr.kind
-    } else {
-        ui.error(&format!(
-            "Failed to {action} '{}': {err}",
-            console::style(target).red()
-        ));
-        GitErrorKind::Other
     }
 }
 
@@ -118,7 +78,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             ui.success(&format!("{} updated.", console::style(remote).cyan()));
                         }
                         Err(e) => {
-                            report_remote_failure(ui, "fetch from", remote, &e);
+                            ui.report_failure("fetch from", remote, &e);
                             failed.push(remote.clone());
                         }
                     }
@@ -196,7 +156,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             ui.success(&format!("{} updated.", console::style(&branch).cyan()))
                         }
                         Err(e) => {
-                            report_remote_failure(ui, "pull", branch, &e);
+                            ui.report_failure("pull", branch, &e);
                         }
                     }
                 }
@@ -549,10 +509,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                     ));
                                 }
                                 Err(e) => {
-                                    ui.error(&format!(
-                                        "Failed to remove '{}': {e}",
-                                        console::style(tilde_path(&wt.path)).red()
-                                    ));
+                                    ui.report_failure("remove", &tilde_path(&wt.path), &e);
                                 }
                             }
                         }
@@ -581,10 +538,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                 ));
                             }
                             Err(e) => {
-                                ui.error(&format!(
-                                    "Failed to remove '{}': {e}",
-                                    console::style(tilde_path(&wt.path)).red()
-                                ));
+                                ui.report_failure("remove", &tilde_path(&wt.path), &e);
                             }
                         }
                     }
@@ -638,25 +592,22 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             let _ = git.worktree_prune();
                             match git.branch_delete(branch) {
                                 Ok(()) => total_deleted += 1,
-                                Err(e) => ui.error(&format!(
-                                    "Failed to delete '{}': {e}",
-                                    console::style(&branch).red()
-                                )),
+                                Err(e) => {
+                                    ui.report_failure("delete", branch, &e);
+                                }
                             }
                         }
-                        Err(e) => ui.error(&format!(
-                            "Could not verify whether '{}' still exists: {e}",
-                            console::style(&branch).red()
-                        )),
+                        Err(e) => {
+                            ui.report_failure("verify the existence of", branch, &e);
+                        }
                     }
                     continue;
                 }
                 match git.branch_delete(branch) {
                     Ok(()) => total_deleted += 1,
-                    Err(e) => ui.error(&format!(
-                        "Failed to delete '{}': {e}",
-                        console::style(&branch).red()
-                    )),
+                    Err(e) => {
+                        ui.report_failure("delete", branch, &e);
+                    }
                 }
             }
             if !opts.dry_run && total_deleted > 0 {
@@ -711,7 +662,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     match result {
                         Ok(()) => remote_deleted += 1,
                         Err(e) => {
-                            report_remote_failure(ui, "delete", &format!("{remote}/{branch}"), &e);
+                            ui.report_failure("delete", &format!("{remote}/{branch}"), &e);
                         }
                     }
                 }
@@ -797,59 +748,6 @@ fn remove_worktree(
 mod tests {
     use super::*;
     use std::process::Command as StdCommand;
-
-    fn git_err(kind: GitErrorKind, stderr: &str) -> anyhow::Error {
-        anyhow::Error::new(GitCommandError {
-            program: "git".into(),
-            args: vec!["fetch".into(), "--prune".into(), "origin".into()],
-            exit_code: Some(1),
-            stderr: stderr.into(),
-            kind,
-        })
-    }
-
-    #[test]
-    fn report_remote_failure_classifies_network() {
-        let ui = Ui::new();
-        let err = git_err(
-            GitErrorKind::Network,
-            "ssh: connect to host github.com port 22: No route to host",
-        );
-        assert_eq!(
-            report_remote_failure(&ui, "fetch from", "origin", &err),
-            GitErrorKind::Network
-        );
-    }
-
-    #[test]
-    fn report_remote_failure_classifies_auth() {
-        let ui = Ui::new();
-        let err = git_err(GitErrorKind::Auth, "Permission denied (publickey).");
-        assert_eq!(
-            report_remote_failure(&ui, "fetch from", "origin", &err),
-            GitErrorKind::Auth
-        );
-    }
-
-    #[test]
-    fn report_remote_failure_classifies_other() {
-        let ui = Ui::new();
-        let err = git_err(GitErrorKind::Other, "fatal: refusing to fetch");
-        assert_eq!(
-            report_remote_failure(&ui, "fetch from", "origin", &err),
-            GitErrorKind::Other
-        );
-    }
-
-    #[test]
-    fn report_remote_failure_handles_non_git_error() {
-        let ui = Ui::new();
-        let err = anyhow::anyhow!("something went wrong");
-        assert_eq!(
-            report_remote_failure(&ui, "pull", "feature", &err),
-            GitErrorKind::Other
-        );
-    }
 
     /// Whether the real `wt` binary is available.
     ///

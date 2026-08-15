@@ -69,17 +69,17 @@ fn is_cancelled(err: &anyhow::Error) -> bool {
 ///
 /// When the root cause is a [`GitCommandError`] classified as a network or
 /// auth failure, the headline gets a matching prefix so users can tell at a
-/// glance "this is my network, not a bug".
+/// glance "this is my network, not a bug". The classification itself lives in
+/// [`ui::Ui::report_failure`] so every failure path agrees on it.
 fn report_error(ui: &ui::Ui, err: &anyhow::Error) {
-    let headline = if let Some(gerr) = err.downcast_ref::<GitCommandError>() {
-        let cause = gerr.short_cause();
-        match gerr.kind {
-            GitErrorKind::Network => format!("Network error: {cause}"),
-            GitErrorKind::Auth => format!("Authentication error: {cause}"),
-            GitErrorKind::Other => format!("{err}"),
+    let headline = match err.downcast_ref::<GitCommandError>().map(|gerr| gerr.kind) {
+        Some(GitErrorKind::Network) => {
+            format!("Network error: {}", short_cause(err))
         }
-    } else {
-        format!("{err}")
+        Some(GitErrorKind::Auth) => {
+            format!("Authentication error: {}", short_cause(err))
+        }
+        _ => format!("{err}"),
     };
 
     ui.error(&headline);
@@ -89,6 +89,13 @@ fn report_error(ui: &ui::Ui, err: &anyhow::Error) {
     for cause in err.chain().skip(1) {
         ui.muted(&format!("  caused by: {cause}"));
     }
+}
+
+/// Short, single-line cause of a git failure, when the error is one.
+fn short_cause(err: &anyhow::Error) -> String {
+    err.downcast_ref::<GitCommandError>()
+        .map(|gerr| gerr.short_cause().to_string())
+        .unwrap_or_else(|| err.to_string())
 }
 
 fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> Result<()> {
