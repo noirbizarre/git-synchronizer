@@ -16,6 +16,7 @@ mod cleaner;
 mod cli;
 mod config;
 mod git;
+mod report;
 #[cfg(test)]
 mod test_helpers;
 mod ui;
@@ -28,41 +29,79 @@ use clap::Parser;
 
 use cli::{Cli, Command, ConfigAction};
 use git::{GitCommandError, GitErrorKind};
+use report::Report;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let git = git::Git::new(cli.verbose);
-    let ui = ui::Ui::new();
+    // In JSON mode the document on stdout is the only output.
+    let ui = if cli.json {
+        ui::Ui::quiet()
+    } else {
+        ui::Ui::new()
+    };
 
     match git.is_inside_work_tree() {
         Ok(true) => {}
         Ok(false) => {
-            ui.error("Not a git repository (or any of the parent directories).");
+            let err = anyhow::anyhow!("Not a git repository (or any of the parent directories).");
+            if cli.json {
+                emit_fatal_json(&err);
+            } else {
+                ui.error(&err.to_string());
+            }
             return ExitCode::FAILURE;
         }
         Err(err) => {
-            report_error(&ui, &err);
+            fail(&ui, cli.json, &err);
             return ExitCode::FAILURE;
         }
     }
 
+    let json = cli.json;
     let result = match cli.command {
-        Some(Command::Config { action }) => handle_config_command(&git, &ui, action),
+        Some(Command::Config { action }) => handle_config_command(&git, &ui, json, action),
         None => handle_clean(&git, &ui, &cli),
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) if is_cancelled(&err) => {
-            ui.muted("Cancelled.");
+            report_cancelled(&ui, json);
             ExitCode::FAILURE
         }
         Err(err) => {
-            report_error(&ui, &err);
+            fail(&ui, json, &err);
             ExitCode::FAILURE
         }
     }
+}
+
+/// Render a user-cancelled run, as text or as a JSON document.
+fn report_cancelled(ui: &ui::Ui, json: bool) {
+    if json {
+        emit_fatal_json(&anyhow::anyhow!("Cancelled."));
+    } else {
+        ui.muted("Cancelled.");
+    }
+}
+
+/// Render a fatal error, as text or as a JSON document.
+fn fail(ui: &ui::Ui, json: bool, err: &anyhow::Error) {
+    if json {
+        emit_fatal_json(err);
+    } else {
+        report_error(ui, err);
+    }
+}
+
+/// Print an error-status JSON document on stdout.
+///
+/// Printing the document is itself best-effort: a broken pipe here must not
+/// mask the error we are already reporting through the exit code.
+fn emit_fatal_json(err: &anyhow::Error) {
+    let _ = report::print_json(&Report::fatal("run", "repository", err));
 }
 
 /// Whether an error chain represents a user-cancelled prompt (Esc / Ctrl-C).
@@ -119,9 +158,17 @@ fn is_multi_valued(key: &str) -> bool {
     matches!(key, "protected" | "ignore" | "remote")
 }
 
-fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> Result<()> {
+fn handle_config_command(
+    git: &git::Git,
+    ui: &ui::Ui,
+    json: bool,
+    action: ConfigAction,
+) -> Result<()> {
     match action {
         ConfigAction::List => {
+            if json {
+                return list_config_json(git);
+            }
             match config::Config::try_load(git)? {
                 Some(cfg) => {
                     ui.heading("Current configuration [sync]:");
@@ -301,14 +348,47 @@ fn handle_config_command(git: &git::Git, ui: &ui::Ui, action: ConfigAction) -> R
     }
 }
 
+/// `config list --json`: the same data as the text listing, structured.
+///
+/// Unlike the text output, an unconfigured repository is not an error: the
+/// document simply reports `configured: false` with empty values.
+fn list_config_json(git: &git::Git) -> Result<()> {
+    let cfg = config::Config::try_load(git)?;
+    let report = report::ConfigReport {
+        configured: cfg.is_some(),
+        protected: cfg
+            .as_ref()
+            .map(|c| c.protected.clone())
+            .unwrap_or_default(),
+        ignore: cfg.as_ref().map(|c| c.ignore.clone()).unwrap_or_default(),
+        remotes: cfg.as_ref().and_then(|c| c.remotes.clone()),
+        branch_protected: git.branch_protected_list()?,
+        branch_ignored: git.branch_ignored_list()?,
+        effort: cfg.as_ref().and_then(|c| c.effort),
+        worktrunk: cfg.as_ref().and_then(|c| c.worktrunk),
+    };
+    report::print_json(&report)
+}
+
 fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
-    let cfg = config::load_or_setup(git, ui)?;
+    // The setup wizard needs a human; in JSON mode, ask for one explicitly
+    // rather than inventing a configuration.
+    let cfg = if cli.json {
+        config::Config::try_load(git)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "git-sync is not configured in this repository. \
+                 Run `git sync` once interactively to complete the setup wizard."
+            )
+        })?
+    } else {
+        config::load_or_setup(git, ui)?
+    };
 
     let use_worktrunk = resolve_worktrunk(git, ui, cli, &cfg)?;
     let effort = resolve_effort(cli, &cfg)?;
 
     let opts = cleaner::CleanerOptions {
-        yes: cli.yes,
+        yes: cli.effective_yes(),
         dry_run: cli.dry_run,
         no_fetch: cli.no_fetch,
         no_pull: cli.no_pull,
@@ -320,7 +400,13 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         effort,
     };
 
-    cleaner::run(git, &cfg, ui, &opts)
+    let report = cleaner::run(git, &cfg, ui, &opts)?;
+
+    if cli.json {
+        report::print_json(&report)?;
+    }
+
+    Ok(())
 }
 
 /// Resolve how thorough merge detection should be.
@@ -366,7 +452,7 @@ fn resolve_worktrunk(git: &git::Git, ui: &ui::Ui, cli: &Cli, cfg: &config::Confi
 
     // 3. Auto-detect: check if worktrunk config section exists in git config
     if git.worktrunk_config_exists()? && git::worktrunk_available() {
-        if cli.yes {
+        if cli.effective_yes() {
             return Ok(true);
         }
         return ui.confirm(
@@ -484,5 +570,66 @@ mod tests {
             GitErrorKind::Other,
             "fatal: bad refspec"
         )));
+    }
+
+    #[test]
+    fn fail_renders_text_or_json_without_panicking() {
+        let ui = ui::Ui::new();
+        let err = git_err(GitErrorKind::Auth, "fatal: Authentication failed");
+        // Text mode: goes through report_error on stderr.
+        fail(&ui, false, &err);
+        // JSON mode: an error document on stdout.
+        fail(&ui::Ui::quiet(), true, &err);
+    }
+
+    #[test]
+    fn report_cancelled_renders_text_or_json_without_panicking() {
+        report_cancelled(&ui::Ui::new(), false);
+        report_cancelled(&ui::Ui::quiet(), true);
+    }
+
+    #[test]
+    fn list_config_json_reports_an_unconfigured_repository() -> Result<()> {
+        let (_dir, git) = test_helpers::init_repo()?;
+        list_config_json(&git)
+    }
+
+    #[test]
+    fn list_config_json_reports_a_configured_repository() -> Result<()> {
+        let (_dir, git) = test_helpers::init_repo()?;
+        config::Config {
+            protected: vec!["main".to_string()],
+            effort: Some(branches::Effort::Quick),
+            ..config::Config::default()
+        }
+        .save(&git)?;
+        list_config_json(&git)
+    }
+
+    #[test]
+    fn handle_clean_refuses_to_run_json_without_a_configuration() -> Result<()> {
+        let (_dir, git) = test_helpers::init_repo()?;
+        let cli = Cli::parse_from(["git-sync", "--json", "--no-fetch"]);
+
+        let err = handle_clean(&git, &ui::Ui::quiet(), &cli)
+            .expect_err("an unconfigured repository must not start the wizard");
+        assert!(
+            err.to_string().contains("not configured"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn handle_clean_prints_a_json_document() -> Result<()> {
+        let (_dir, git) = test_helpers::init_repo_with_branches()?;
+        config::Config {
+            protected: vec!["main".to_string()],
+            ..config::Config::default()
+        }
+        .save(&git)?;
+        let cli = Cli::parse_from(["git-sync", "--json", "--no-fetch", "--no-pull", "--dry-run"]);
+
+        handle_clean(&git, &ui::Ui::quiet(), &cli)
     }
 }

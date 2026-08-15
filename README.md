@@ -39,6 +39,7 @@ configured remotes. It also handles orphaned worktree cleanup.
 - Automatic fast-forward of target branches before detection (with `--no-pull` to skip)
 - Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
 - Interactive setup wizard on first run
+- JSON output (`--json`) for scripting and integration
 - Configuration stored in git config (`[sync]` section)
 - Safety-first: `--force-with-lease` for remote deletions
 
@@ -102,7 +103,46 @@ git sync --worktrunk
 
 # Disable worktrunk even if configured or detected
 git sync --no-worktrunk
+
+# Machine-readable output (implies --yes)
+git sync --json
 ```
+
+### JSON output
+
+`--json` prints a single JSON document describing everything that was detected
+and done. Human-readable logs are suppressed; stdout carries the document alone,
+so it is safe to pipe. The document is pretty-printed on a terminal and compact
+when piped or redirected.
+
+```sh
+git sync --json | jq '.summary'
+git sync --json --dry-run | jq '.local.branches[] | select(.reason == "gone")'
+git sync config list --json | jq '.protected'
+```
+
+Because prompts would hang a non-interactive caller, `--json` implies `--yes`:
+deleted-upstream branches stay opt-in behind `--delete-gone`, and a repository
+that has never been configured is an error rather than a setup wizard (run
+`git sync` once interactively first).
+
+| Field | Description |
+| --- | --- |
+| `version` | Schema version, currently `1` |
+| `status` | `success` or `error` |
+| `dry_run` | Whether `--dry-run` was in effect |
+| `effort` | The effective merge-detection level (`1`-`3`) |
+| `fetch` | Phase 1: per-remote fetch/prune outcome |
+| `pull` | Phase 2: per-branch fast-forward outcome |
+| `local` | Phase 3: `merged`/`gone` candidates, plus per-branch and per-worktree outcomes |
+| `remotes` | Phase 4: merged branches and deletion outcome per remote |
+| `warnings` | Non-fatal messages surfaced during the run |
+| `errors` | Failed operations, each with `action`, `target`, `kind` (`network`, `auth`, `other`) and `message` |
+| `summary` | `local_branches_deleted`, `remote_branches_deleted`, `worktrees_removed`, `errors` |
+
+Item statuses are `updated`, `deleted`, `removed`, `skipped`, `locked`,
+`failed` or `dry_run`. A fatal error still yields a document (with
+`status: "error"`) and a non-zero exit code.
 
 ### Configuration management
 

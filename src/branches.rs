@@ -153,6 +153,13 @@ impl fmt::Display for Effort {
     }
 }
 
+/// Serialized as its numeric level, matching `--effort` and `sync.effort`.
+impl serde::Serialize for Effort {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(self.as_u8())
+    }
+}
+
 /// Outcome of a merged-branch scan.
 ///
 /// Merge detection deliberately survives the failure of an individual
