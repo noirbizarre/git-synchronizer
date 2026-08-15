@@ -1,0 +1,182 @@
+name: 📦 AUR
+
+# Publishes the three AUR packages once a release is public. It runs on
+# `release: published` rather than from 📦 Publish Release, because gh-ship only
+# undrafts the release after that workflow succeeds — waiting means the URLs
+# baked into the PKGBUILDs already resolve when the packages land.
+#
+# The pkgbases must exist before this can push: the AUR creates a repository on
+# its first push, so `git-synchronizer`, `git-synchronizer-bin` and
+# `git-synchronizer-git` are bootstrapped manually once. See packaging/README.md.
+run-name: 📦 AUR ${{ inputs.tag || github.event.release.tag_name }}
+
+on:
+  release:
+    types: [published]
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to publish to the AUR
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  aur:
+    name: 📦 ${{ matrix.pkg }}
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+
+    # A dedicated environment: `AUR_SSH_PRIVATE_KEY` is scoped to it rather than
+    # sitting next to the GitHub App credentials in `release`, and each package
+    # push is registered as its own deployment.
+    environment:
+      name: aur
+      url: https://aur.archlinux.org/packages/${{ matrix.pkg }}
+
+    strategy:
+      # One broken package should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        pkg: [git-synchronizer-bin, git-synchronizer, git-synchronizer-git]
+
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --needed --noconfirm git openssh github-cli rust
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # makepkg refuses to run as root, and the container has no other user.
+      - name: Create the build user
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          # `actions/checkout` leaves the tree owned by root.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Render the PKGBUILD
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PKG: ${{ matrix.pkg }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          cp "packaging/aur/$PKG/PKGBUILD" build/PKGBUILD
+
+          # git-synchronizer-git has no version or checksum to pin: makepkg
+          # derives both.
+          if [ "$PKG" = "git-synchronizer-git" ]; then
+            exit 0
+          fi
+
+          # The tag carries a `v` prefix, `pkgver` does not.
+          version="${TAG#v}"
+          sed -i "s/@VERSION@/${version}/" build/PKGBUILD
+
+          # Checksums are computed from the published assets themselves rather
+          # than from the `.sha256` files shipped next to them, so a mismatch
+          # between the two cannot slip into the AUR.
+          download() {
+            # stdout is the checksum and nothing else: this runs in a `$(...)`.
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$1" --dir build >&2
+            sha256sum "build/$1" | cut -d' ' -f1
+            rm -f "build/$1"
+          }
+
+          case "$PKG" in
+            git-synchronizer)
+              sha256=$(download "git-synchronizer-${version}.tar.gz")
+              sed -i "s/@SHA256@/${sha256}/" build/PKGBUILD
+              ;;
+            git-synchronizer-bin)
+              # Both architectures, even though this runner only builds one:
+              # .SRCINFO must carry a checksum for every declared `arch`.
+              x86_64=$(download "git-sync-x86_64-unknown-linux-gnu.tar.gz")
+              aarch64=$(download "git-sync-aarch64-unknown-linux-gnu.tar.gz")
+              sed -i -e "s/@SHA256_X86_64@/${x86_64}/" \
+                     -e "s/@SHA256_AARCH64@/${aarch64}/" build/PKGBUILD
+              ;;
+          esac
+
+      # Proves the PKGBUILD actually builds before it reaches users. Skipped for
+      # git-synchronizer-git, whose source is the branch tip rather than the
+      # release.
+      #
+      # `--nocheck` because check() re-runs, in release mode, the very suite
+      # ♻️ CI already ran on this commit. The PKGBUILD keeps its check(), so
+      # users and packagers still run it.
+      - name: Build the package
+        if: matrix.pkg != 'git-synchronizer-git'
+        working-directory: build
+        run: |
+          set -euo pipefail
+          chown -R builder .
+          sudo -u builder makepkg --syncdeps --noconfirm --clean --nocheck
+
+      # `makepkg --printsrcinfo` does NOT run pkgver(): it only reads the
+      # PKGBUILD. For a VCS package that means .SRCINFO would carry the
+      # placeholder `pkgver=0.0.0.r0.g0000000`, which the AUR would show as a
+      # downgrade from whatever is already published. `--nobuild` fetches the
+      # source and runs pkgver(), rewriting the PKGBUILD with the real version.
+      - name: Resolve the VCS version
+        if: matrix.pkg == 'git-synchronizer-git'
+        working-directory: build
+        run: |
+          set -euo pipefail
+          chown -R builder .
+          sudo -u builder makepkg --nobuild --nodeps --noconfirm
+
+      - name: Generate .SRCINFO
+        working-directory: build
+        run: |
+          set -euo pipefail
+          chown -R builder .
+          # The redirect must happen as `builder` too, otherwise root owns the
+          # generated file (shellcheck SC2024).
+          sudo -u builder bash -c 'makepkg --printsrcinfo > .SRCINFO'
+
+      - name: Push to the AUR
+        env:
+          PKG: ${{ matrix.pkg }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          # Absolute paths on purpose. The container sets HOME=/github/home, but
+          # OpenSSH expands `~` from the passwd database (/root for this step),
+          # not from $HOME — so anything written to `~/.ssh` here is invisible to
+          # ssh, which fails with "Host key verification failed".
+          ssh_dir="$(mktemp -d)"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          chmod 600 "$ssh_dir/key"
+          ssh-keyscan -H aur.archlinux.org > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
+
+          git clone "ssh://aur@aur.archlinux.org/${PKG}.git" aur
+          cp build/PKGBUILD build/.SRCINFO aur/
+
+          cd aur
+          git config user.name 'git-synchronizer release bot'
+          git config user.email 'noirbizarre@gmail.com'
+
+          git add PKGBUILD .SRCINFO
+
+          # Compare the index, not the worktree: `git diff` alone ignores
+          # untracked files, so a re-run on an unchanged package would be
+          # indistinguishable from a pkgbase whose files are not tracked yet.
+          if git diff --cached --quiet; then
+            echo "::notice::${PKG} is already up to date on the AUR"
+            exit 0
+          fi
+
+          git commit -m "Update to ${TAG}"
+          git push origin master
