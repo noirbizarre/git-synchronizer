@@ -18,7 +18,7 @@ workflows:
 pull_request:
   title: "Release {{ version }}"
   header: |
-    This PR prepares the next release of git-synchronizer.
+    This PR prepares the next release of git-wipe.
 
     The version bump and changelog were produced by the `prepare-release`
     workflow. Review the changelog, then merge — 🚢 Ship takes it from there.

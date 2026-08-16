@@ -1,15 +1,15 @@
-//! Build script generating the `git-sync` man pages and shell completions.
+//! Build script generating the `git-wipe` man pages and shell completions.
 //!
 //! Both are derived from the very same clap definition as the binary, so they
 //! can never drift from `--help`.
 //!
 //! `git <subcommand> --help` is rewritten by git into `git help <subcommand>`,
-//! which runs `man git-sync`. Without an installed man page that command fails
-//! with "No manual entry for git-sync", hence the pages generated here.
+//! which runs `man git-wipe`. Without an installed man page that command fails
+//! with "No manual entry for git-wipe", hence the pages generated here.
 //!
 //! Artifacts land in `$OUT_DIR`:
 //!
-//! - `man/git-sync.1` and one page per subcommand
+//! - `man/git-wipe.1` and one page per subcommand
 //! - `completions/` for bash, zsh, fish, elvish and PowerShell
 //!
 //! Use `mise run man` to collect them into `dist/`.
@@ -51,7 +51,7 @@ fn main() -> io::Result<()> {
         Shell::Elvish,
         Shell::PowerShell,
     ] {
-        clap_complete::generate_to(shell, &mut cmd, "git-sync", &completions_dir)?;
+        clap_complete::generate_to(shell, &mut cmd, "git-wipe", &completions_dir)?;
     }
 
     Ok(())

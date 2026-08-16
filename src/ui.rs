@@ -214,7 +214,7 @@ impl Ui {
     ///
     /// Tables go to **stdout**, unlike every other output method: a listing is
     /// the answer the user asked for, not a log about producing it, and
-    /// `git sync status | grep` must work. Nothing else writes to stdout in
+    /// `git wipe status | grep` must work. Nothing else writes to stdout in
     /// text mode, so the stream stays a clean, greppable table; `--json` mutes
     /// this along with everything else and prints its document instead.
     pub fn table_row(&self, line: &str) {

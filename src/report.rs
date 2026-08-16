@@ -280,10 +280,10 @@ impl Report {
     }
 }
 
-/// Serializable view of `git sync config list`.
+/// Serializable view of `git wipe config list`.
 #[derive(Debug, Serialize)]
 pub struct ConfigReport {
-    /// Whether a `[sync]` section exists in git config.
+    /// Whether a `[wipe]` section exists in git config.
     pub configured: bool,
     pub protected: Vec<String>,
     pub ignore: Vec<String>,
@@ -309,7 +309,7 @@ pub fn path_string(path: &Path) -> String {
 /// What a [`StatusEntry`] describes.
 ///
 /// Distinct from [`WorktreeKind`], which has no case for a branch that is not
-/// checked out anywhere — a row `git sync status` must be able to report.
+/// checked out anywhere — a row `git wipe status` must be able to report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusKind {
@@ -324,7 +324,7 @@ pub enum StatusKind {
 /// A single observation about a [`StatusEntry`]. Several may apply at once.
 ///
 /// Deliberately not [`ItemStatus`]: those variants are *outcomes*
-/// (`deleted`, `removed`, `dry_run`), and `git sync status` never acts.
+/// (`deleted`, `removed`, `dry_run`), and `git wipe status` never acts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusFlag {
@@ -367,7 +367,7 @@ pub struct StatusEntry {
     pub protected: bool,
 }
 
-/// Serializable view of `git sync status`.
+/// Serializable view of `git wipe status`.
 ///
 /// A read-only document: it carries no action or outcome field, because
 /// `status` neither fetches nor mutates. `version` is [`Report::VERSION`] —

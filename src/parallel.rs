@@ -2,7 +2,7 @@
 //!
 //! Analysis spends nearly all its time waiting on `git` subprocesses that are
 //! independent of one another, so overlapping them is close to free. What is
-//! *not* negotiable is determinism: `git sync` must produce byte-identical
+//! *not* negotiable is determinism: `git wipe` must produce byte-identical
 //! output whatever the job count.
 //!
 //! Determinism is guaranteed by construction rather than by discipline: workers

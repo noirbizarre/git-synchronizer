@@ -7,10 +7,10 @@ resolve.
 
 | Path | Channel | Workflow |
 | --- | --- | --- |
-| `aur/git-synchronizer/` | AUR, built from the release source tarball | `.github/workflows/aur.yml` |
-| `aur/git-synchronizer-bin/` | AUR, prebuilt binary (x86_64, aarch64) | `.github/workflows/aur.yml` |
-| `aur/git-synchronizer-git/` | AUR, tracks `main` | `.github/workflows/aur.yml` |
-| `homebrew/git-sync.rb` | `noirbizarre/homebrew-tap` | `.github/workflows/homebrew.yml` |
+| `aur/git-wipe/` | AUR, built from the release source tarball | `.github/workflows/aur.yml` |
+| `aur/git-wipe-bin/` | AUR, prebuilt binary (x86_64, aarch64) | `.github/workflows/aur.yml` |
+| `aur/git-wipe-git/` | AUR, tracks `main` | `.github/workflows/aur.yml` |
+| `homebrew/git-wipe.rb` | `noirbizarre/homebrew-tap` | `.github/workflows/homebrew.yml` |
 
 ## The placeholder contract
 
@@ -20,15 +20,15 @@ The templates are not valid as they stand: the workflows substitute
 | Placeholder | Filled from |
 | --- | --- |
 | `@VERSION@` | the tag with its `v` stripped |
-| `@SHA256@` | `git-synchronizer-<version>.tar.gz` |
-| `@SHA256_X86_64@`, `@SHA256_AARCH64@` | `git-sync-<arch>-unknown-linux-gnu.tar.gz` |
-| `@SHA256_DARWIN_*@`, `@SHA256_LINUX_*@` | `git-sync-<target>.tar.gz` (macOS, Linux musl) |
+| `@SHA256@` | `git-wipe-<version>.tar.gz` |
+| `@SHA256_X86_64@`, `@SHA256_AARCH64@` | `git-wipe-<arch>-unknown-linux-gnu.tar.gz` |
+| `@SHA256_DARWIN_*@`, `@SHA256_LINUX_*@` | `git-wipe-<target>.tar.gz` (macOS, Linux musl) |
 
 Checksums are always computed from the downloaded asset itself, never read from
 the `.sha256` files published beside it: a mismatch between the two must not be
 able to reach users.
 
-`git-synchronizer-git` carries no placeholder — `makepkg` derives its `pkgver`
+`git-wipe-git` carries no placeholder — `makepkg` derives its `pkgver`
 from the checkout, and its source is a git URL, so there is nothing to pin.
 
 Nothing else in these templates may hardcode a version: adding an asset means
@@ -40,12 +40,12 @@ adding both a placeholder and the substitution that fills it, and
 The templates address assets by name, so `publish-release.yml` and these files
 change together:
 
-- `git-sync-<target>.tar.gz` comes from `taiki-e/upload-rust-binary-action`
+- `git-wipe-<target>.tar.gz` comes from `taiki-e/upload-rust-binary-action`
   (`archive: $bin-$target` by default) and carries **no leading directory** —
-  `git-sync`, `man/`, `completions/`, `LICENSE` and `README.md` sit at its root.
-  `git-synchronizer-bin` and the formula both rely on that layout.
-- `git-synchronizer-<version>.tar.gz` is produced by the `source` job, with a
-  `git-synchronizer-<version>/` prefix so a PKGBUILD can `cd "$pkgname-$pkgver"`.
+  `git-wipe`, `man/`, `completions/`, `LICENSE` and `README.md` sit at its root.
+  `git-wipe-bin` and the formula both rely on that layout.
+- `git-wipe-<version>.tar.gz` is produced by the `source` job, with a
+  `git-wipe-<version>/` prefix so a PKGBUILD can `cd "$pkgname-$pkgver"`.
 
 ## One-off setup
 
@@ -70,7 +70,7 @@ minutes after an import: `aur.archlinux.org/packages/<name>` is authoritative,
 ### Homebrew
 
 Create the public repository `noirbizarre/homebrew-tap` (the `homebrew-`
-prefix is what makes `brew install noirbizarre/tap/git-sync` work). An empty
+prefix is what makes `brew install noirbizarre/tap/git-wipe` work). An empty
 repository is enough; the workflow creates `Formula/` on the first push.
 
 Then create a `homebrew` environment holding `TAP_TOKEN`, a fine-grained token
@@ -79,7 +79,7 @@ with `contents: write` on that repository and nothing else.
 ### Homebrew
 
 Create the public repository `noirbizarre/homebrew-tap` (the `homebrew-`
-prefix is what makes `brew install noirbizarre/tap/git-sync` work). An empty
+prefix is what makes `brew install noirbizarre/tap/git-wipe` work). An empty
 repository is enough; the workflow creates `Formula/` on the first push.
 
 Then create a `homebrew` environment holding `TAP_TOKEN`, a fine-grained token
@@ -102,7 +102,7 @@ fails the workflow rather than reaching users. To check one locally, substitute
 the placeholders against an already published release and run:
 
 ```sh
-cd packaging/aur/git-synchronizer-bin
+cd packaging/aur/git-wipe-bin
 makepkg -si --noconfirm
 namcap PKGBUILD ./*.pkg.tar.zst
 ```
@@ -110,7 +110,7 @@ namcap PKGBUILD ./*.pkg.tar.zst
 For the formula, render it and hand it to brew directly:
 
 ```sh
-brew install --formula ./packaging/homebrew/git-sync.rb
-brew test git-sync
-brew audit --strict --online git-sync
+brew install --formula ./packaging/homebrew/git-wipe.rb
+brew test git-wipe
+brew audit --strict --online git-wipe
 ```

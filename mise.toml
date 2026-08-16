@@ -89,7 +89,7 @@ tools = { jq = "latest" }
 run = """
 set -euo pipefail
 out=$(cargo build --message-format=json 2>/dev/null \
-  | jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("git-synchronizer")) | .out_dir' \
+  | jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("git-wipe")) | .out_dir' \
   | tail -n 1)
 test -n "$out" || { echo "could not locate OUT_DIR" >&2; exit 1; }
 rm -rf dist/man dist/completions
@@ -102,8 +102,8 @@ echo "dist/man ($(ls dist/man | wc -l) pages), dist/completions ($(ls dist/compl
 [tasks.setup]
 description = "Install locally"
 # `cargo install` only installs the binary. The man pages matter beyond
-# convenience: `git sync --help` is rewritten by git into `git help sync`, which
-# runs `man git-sync` and fails outright when no page is installed.
+# convenience: `git wipe --help` is rewritten by git into `git help wipe`, which
+# runs `man git-wipe` and fails outright when no page is installed.
 depends = ["man"]
 run = """
 set -euo pipefail
@@ -116,15 +116,48 @@ echo "man pages -> $man_dir"
 
 comp_dir="${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions"
 mkdir -p "$comp_dir"
-cp dist/completions/_git-sync "$comp_dir/"
+cp dist/completions/_git-wipe "$comp_dir/"
 echo "zsh completions -> $comp_dir (ensure it is on \\$fpath)"
 """
 
 # --- Artwork ----------------------------------------------------------------
 #
-# Not part of `default` or `check`: it rewrites a committed binary, so a routine
-# run would dirty the working tree every time. Run it when the artwork changes,
-# i.e. after editing logo.svg, since the social preview embeds the logo.
+# Not part of `default` or `check`: they rewrite committed files, so a routine
+# run would dirty the working tree every time. Run them when the artwork
+# changes, in order: `logo` re-flattens the wordmark, then `social` re-renders
+# the preview that embeds it.
+
+[tasks.logo]
+description = "Flatten the wordmark source into docs/images/logo.svg"
+# logo.svg is committed as paths only, never as live <text>: it is served to
+# every README reader from raw.githubusercontent.com, and a <text> wordmark
+# would be re-set in whatever font the reader happens to have. usvg converts
+# text to paths by default, which is exactly the flattening step, so the
+# editable source stays logo.src.svg and the outlined result is generated.
+#
+# Requires Fira Sans on the machine running it — a missing font silently
+# substitutes another, so check the diff before committing.
+#
+# Declared on the task rather than in `[tools]` for the same reason as resvg
+# below: `mise install` in CI would otherwise build it from source.
+tools = { "cargo:usvg" = "latest" }
+run = """
+set -euo pipefail
+usvg docs/images/logo.src.svg docs/images/logo.svg
+grep -q '<text' docs/images/logo.svg && { echo "logo.svg still carries live text" >&2; exit 1; }
+
+# usvg resolves the viewBox into a transform and emits width/height only. That
+# renders fine on its own but does not scale: social-preview.svg embeds the logo
+# through <image width height>, which needs an intrinsic aspect ratio to fit
+# into. Putting the viewBox back is what keeps the embedded mark from being
+# drawn at 1:1 and clipped.
+read -r w h < <(sed -n 's/.*width="\\([0-9.]*\\)" height="\\([0-9.]*\\)".*/\\1 \\2/p' docs/images/logo.svg | head -n 1)
+test -n "$w" && test -n "$h"
+sed -i "0,/<svg /s|<svg |<svg viewBox=\\"0 0 $w $h\\" |" docs/images/logo.svg
+grep -q 'viewBox=' docs/images/logo.svg
+
+echo "docs/images/logo.svg — ${w}x${h}; re-run 'mise run social' to refresh the preview"
+"""
 
 [tasks.social]
 description = "Render the GitHub social preview image"

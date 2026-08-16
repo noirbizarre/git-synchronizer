@@ -279,7 +279,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-synchronizer"
+name = "git-wipe"
 version = "0.3.0"
 dependencies = [
  "anyhow",

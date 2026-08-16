@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="130.697 41.364 998.656 287.179" width="999" height="287">
+  <!-- Wordmark source. `mise run logo` flattens this into docs/images/logo.svg
+       with usvg, which converts <text> into <path>: the committed logo is
+       therefore font-independent, and this is the file you edit when the name
+       changes.
+
+       The mark is carried over verbatim from the pre-rename logo — it spells
+       nothing, so it survived the rename untouched. Only the lettering was
+       re-set. "git" is orange and the remainder black, the same colour split
+       the original wordmark used.
+
+       Two numbers are tuned rather than obvious:
+       - font-size 173 puts Fira Sans Bold's x-height at 94.8, the x-height of
+         the original lettering, so the wordmark sits beside the mark at the
+         weight it always did.
+       - letter-spacing 5 matches the original's looser tracking; without it
+         the mark reads noticeably tighter than it used to.
+
+       usvg preserves the viewBox rather than fitting it, so the viewBox above
+       is maintained by hand: it is the flattened geometry's bounding box grown
+       by 10.636 on every side, the padding the original logo used. After
+       changing the text, re-measure the flattened output and update it, or the
+       mark will sit off-centre in social-preview.svg. -->
+  <g id="mark">
+    <path fill="#fc3c10" d="m 173.97541,96.825 c -0.64,-0.65 -0.532,-0.573 -1.14,-1.086 -0.186,-0.158 -0.377,-0.309 -0.565,-0.465 -4.483,-3.735 -12.485,-2.175 -18.057,-3.828 -4.76,-1.412 -8.018,-5.207 -10.339,-9.426 -2.573,-4.679 -3.314,-10.176 -1.66,-15.292 1.76,-5.447 5.889,-9.764 10.977,-12.273 5.078,-2.505 11.226,-3.169 16.609,-1.268 23.866,8.425 6.63,27.899 10.95,36.864 4.93,6.151 17.303,23.811 25.143,22.859 11.58,-3.392 22.341,2.011 25.731,13.777 1.6,5.446 0.849,11.313 -2.071,16.18 -3.921,6.641 -12.098,5.119 -9.961,12.266 2.468,5.088 5.031,11.361 10.783,12.651 10.631,2.385 41.906,15.938 26.754,30.411 -6.605,1.229 -9.146,-9.957 -12.14,-14.894 -12.978,-4.823 -25.061,-6.817 -33.326,-18.74 -2.129,-3.43 -3.652,-8.476 -5.011,-12.399 -12.245,-3.809 -21.633,-23.513 -10.856,-30.684 -0.251,-6.741 -16.327,-19.658 -21.821,-24.653 z"/>
+    <path fill="#0b0c0b" d="m 362.10541,52 c 6.268,0.269 11.547,1.973 16.048,6.545 3.64,3.669 5.649,8.649 5.573,13.817 -0.154,17.248 -14.745,20.744 -28.731,20.206 -7.5,8.756 -16.785,17.46 -24.817,26.727 8.509,14.041 5.761,25.946 -10.092,32.224 -5.511,15.22 -10.917,22.146 -26.639,27.312 -8.323,2.736 -17.314,7.188 -17.351,16.77 -0.005,1.22 -0.429,1.829 -1.291,2.723 l -3.345,-0.119 c -2.991,-0.645 -3.575,-0.649 -6.182,-2.133 -8.428,-14.417 25.429,-27.692 34.81,-31.344 5.053,-1.967 5.859,-5.413 7.647,-10.325 1.091,-5.085 -8.587,-6.983 -10.889,-11.691 -9.536,-19.505 5.775,-34.454 27.221,-28.591 8.438,-9.123 16.141,-17.464 25.145,-26.064 -9.4,-16.634 -6.805,-30.795 12.893,-36.057 z"/>
+    <path fill="#0b0c0b" d="m 259.63141,247.675 c 2.6,0.231 3.026,0.337 5.454,1.297 3.673,4.905 2.023,20.865 1.939,27.925 0.645,0.28 1.282,0.57 1.909,0.89 6.775,3.35 10.988,6.27 13.392,13.93 1.544,4.91 1.064,10.23 -1.333,14.78 -3.62,6.8 -9.156,9.37 -16.123,11.41 -24.969,-1.76 -31.261,-28.08 -6.593,-40.92 -0.102,-5.54 -1.181,-25.29 1.355,-29.312 z"/>
+    <path fill="#0b0c0b" d="m 242.01741,216.784 c 0.6,-0.949 1.21,-1.891 1.831,-2.826 5.307,-7.974 8.272,-9.766 17.447,-11.58 l 3.365,0.432 c 26.088,3.313 27.27,33.333 -0.152,41.014 l -3.759,-0.935 c -13.393,-2.178 -21.393,-12.62 -18.732,-26.105 z"/>
+    <path fill="#fc3c10" d="m 242.01741,216.784 c 0.6,-0.949 1.21,-1.891 1.831,-2.826 5.307,-7.974 8.272,-9.766 17.447,-11.58 0.061,6.408 0.692,34.817 -0.547,39.623 l 0.001,0.888 c -13.393,-2.178 -21.393,-12.62 -18.732,-26.105 z"/>
+    <path fill="#fef6ef" d="m 261.29541,202.378 3.365,0.432 -0.152,41.014 -3.759,-0.935 -0.001,-0.888 c 1.239,-4.806 0.608,-33.215 0.547,-39.623 z"/>
+  </g>
+  <text id="wordmark" x="438.6" y="242.8"
+        font-family="Fira Sans" font-weight="bold" font-size="173"
+        letter-spacing="5" fill="#0b0c0b"><tspan fill="#fc3c10">git</tspan>-wipe</text>
+</svg>

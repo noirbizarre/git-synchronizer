@@ -40,7 +40,7 @@ jobs:
       # One broken package should not hide the state of the other two.
       fail-fast: false
       matrix:
-        pkg: [git-synchronizer-bin, git-synchronizer, git-synchronizer-git]
+        pkg: [git-wipe-bin, git-wipe, git-wipe-git]
 
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name }}
@@ -71,9 +71,9 @@ jobs:
           mkdir -p build
           cp "packaging/aur/$PKG/PKGBUILD" build/PKGBUILD
 
-          # git-synchronizer-git has no version or checksum to pin: makepkg
+          # git-wipe-git has no version or checksum to pin: makepkg
           # derives both.
-          if [ "$PKG" = "git-synchronizer-git" ]; then
+          if [ "$PKG" = "git-wipe-git" ]; then
             exit 0
           fi
 
@@ -92,29 +92,29 @@ jobs:
           }
 
           case "$PKG" in
-            git-synchronizer)
-              sha256=$(download "git-synchronizer-${version}.tar.gz")
+            git-wipe)
+              sha256=$(download "git-wipe-${version}.tar.gz")
               sed -i "s/@SHA256@/${sha256}/" build/PKGBUILD
               ;;
-            git-synchronizer-bin)
+            git-wipe-bin)
               # Both architectures, even though this runner only builds one:
               # .SRCINFO must carry a checksum for every declared `arch`.
-              x86_64=$(download "git-sync-x86_64-unknown-linux-gnu.tar.gz")
-              aarch64=$(download "git-sync-aarch64-unknown-linux-gnu.tar.gz")
+              x86_64=$(download "git-wipe-x86_64-unknown-linux-gnu.tar.gz")
+              aarch64=$(download "git-wipe-aarch64-unknown-linux-gnu.tar.gz")
               sed -i -e "s/@SHA256_X86_64@/${x86_64}/" \
                      -e "s/@SHA256_AARCH64@/${aarch64}/" build/PKGBUILD
               ;;
           esac
 
       # Proves the PKGBUILD actually builds before it reaches users. Skipped for
-      # git-synchronizer-git, whose source is the branch tip rather than the
+      # git-wipe-git, whose source is the branch tip rather than the
       # release.
       #
       # `--nocheck` because check() re-runs, in release mode, the very suite
       # ♻️ CI already ran on this commit. The PKGBUILD keeps its check(), so
       # users and packagers still run it.
       - name: Build the package
-        if: matrix.pkg != 'git-synchronizer-git'
+        if: matrix.pkg != 'git-wipe-git'
         working-directory: build
         run: |
           set -euo pipefail
@@ -127,7 +127,7 @@ jobs:
       # downgrade from whatever is already published. `--nobuild` fetches the
       # source and runs pkgver(), rewriting the PKGBUILD with the real version.
       - name: Resolve the VCS version
-        if: matrix.pkg == 'git-synchronizer-git'
+        if: matrix.pkg == 'git-wipe-git'
         working-directory: build
         run: |
           set -euo pipefail
@@ -164,7 +164,7 @@ jobs:
           cp build/PKGBUILD build/.SRCINFO aur/
 
           cd aur
-          git config user.name 'git-synchronizer release bot'
+          git config user.name 'git-wipe release bot'
           git config user.email 'noirbizarre@gmail.com'
 
           git add PKGBUILD .SRCINFO

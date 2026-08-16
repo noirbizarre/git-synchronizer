@@ -44,12 +44,12 @@ pub fn init_repo() -> TempDir {
     dir
 }
 
-/// Seed the `[sync]` config section so the clean workflow
+/// Seed the `[wipe]` config section so the clean workflow
 /// doesn't trigger the interactive setup wizard.
 pub fn configure(dir: &TempDir) {
     let p = dir.path();
     StdCommand::new("git")
-        .args(["config", "--add", "sync.protected", "main"])
+        .args(["config", "--add", "wipe.protected", "main"])
         .current_dir(p)
         .output()
         .unwrap();
