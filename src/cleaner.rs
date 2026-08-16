@@ -16,6 +16,7 @@ use crate::branches::{
 use crate::config::Config;
 use crate::duration::MinAge;
 use crate::git::{Git, Worktree};
+use crate::parallel;
 use crate::report::{
     BranchReason, ItemStatus, LocalBranch, PulledBranch, RemoteBranch, RemoteFetch, RemoteReport,
     Report, WorktreeEntry, WorktreeKind, path_string,
@@ -73,6 +74,12 @@ pub struct CleanerOptions {
     pub effort: Effort,
     /// Minimum age a worktree must have before it may be removed.
     pub min_age: MinAge,
+    /// How many read-only git probes may run at once during analysis.
+    ///
+    /// Purely a wall-clock knob: 0 and 1 both mean "stay on this thread", and
+    /// every value produces the same output. Mutating commands — fetch, pull,
+    /// deletion, worktree removal — are never affected.
+    pub jobs: usize,
 }
 
 /// Run the full clean-up workflow.
@@ -80,7 +87,7 @@ pub struct CleanerOptions {
 /// Returns a structured [`Report`] of everything that was detected and done;
 /// text mode discards it, `--json` serializes it to stdout.
 pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result<Report> {
-    let mut report = Report::new(opts.dry_run, opts.effort, opts.min_age);
+    let mut report = Report::new(opts.dry_run, opts.effort, opts.min_age, opts.jobs.max(1));
 
     // Read protection and ignore rules once; every detection pass shares them.
     let filter = Filter::load(git, config)?;
@@ -245,7 +252,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
     report.local.skipped = opts.remote_only;
     if !opts.remote_only {
         let merged = ui.spinner("Scanning local branches…", || {
-            find_merged_local(git, &filter, opts.effort)
+            find_merged_local(git, &filter, opts.effort, opts.jobs)
         })?;
         // Surfaced after the spinner: printing inside it would corrupt the
         // spinner's own line.
@@ -299,17 +306,24 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
         // Worktrees created too recently to touch. Resolved once, up front:
         // each lookup costs a `git rev-parse` and the answer is consulted at
-        // several points below.
+        // several points below. Those probes are read-only and independent, so
+        // they overlap; the result is a set, and so order-insensitive anyway.
         let young: HashSet<PathBuf> = if opts.no_worktrees || opts.min_age.is_zero() {
             HashSet::new()
         } else {
-            candidates
+            let to_age: Vec<&Worktree> = candidates
                 .iter()
                 .filter_map(|branch| wt_map.get(branch))
                 .chain(orphans.iter())
-                .filter(|wt| is_too_young(git, wt, opts.min_age))
-                .map(|wt| wt.path.clone())
-                .collect()
+                .collect();
+            parallel::map(&to_age, opts.jobs, |_, wt| {
+                is_too_young(git, wt, opts.min_age)
+            })
+            .into_iter()
+            .zip(&to_age)
+            .filter(|(too_young, _)| *too_young)
+            .map(|(_, wt)| wt.path.clone())
+            .collect()
         };
 
         let (orphan_guarded, orphan_actionable): (Vec<_>, Vec<_>) = orphans
@@ -487,25 +501,33 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // second prompt: the user already selected them and there is no
             // uncommitted work at risk.
             let mut auto_force: Vec<String> = Vec::new();
-            for branch in &candidates {
-                let key = format!("branch:{branch}");
-                if !selected.contains(&key) {
-                    continue;
-                }
-                let Some(wt) = wt_map.get(branch) else {
-                    continue;
-                };
-                if worktree_guard(wt, &young).is_some() {
-                    continue;
-                }
+
+            // Split in two: pick the worktrees worth inspecting (no git calls,
+            // so it stays here), then probe them concurrently.
+            let to_scan: Vec<(&String, &Worktree)> = candidates
+                .iter()
+                .filter(|branch| selected.contains(&format!("branch:{branch}")))
+                .filter_map(|branch| wt_map.get(branch).map(|wt| (branch, wt)))
+                .filter(|(_, wt)| worktree_guard(wt, &young).is_none())
+                .collect();
+
+            // Workers report, they never print: the messages are emitted below
+            // in candidate order, so `--jobs` cannot reshuffle the output.
+            struct Scan {
+                dirty: bool,
+                unmerged: bool,
+                warnings: Vec<String>,
+            }
+
+            let scans = parallel::map(&to_scan, opts.jobs, |_, (branch, wt)| {
+                let mut warnings = Vec::new();
                 let dirty = match git.worktree_dirty(&wt.path) {
                     Ok(v) => v,
                     Err(e) => {
-                        warn(
-                            ui,
-                            &mut report,
-                            &format!("Could not check status of '{}': {e}", tilde_path(&wt.path)),
-                        );
+                        warnings.push(format!(
+                            "Could not check status of '{}': {e}",
+                            tilde_path(&wt.path)
+                        ));
                         false
                     }
                 };
@@ -516,26 +538,33 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             // Assume unmerged: that only means the worktree is
                             // surfaced for explicit confirmation rather than
                             // silently force-removed.
-                            warn(
-                                ui,
-                                &mut report,
-                                &format!(
-                                    "Could not check whether '{branch}' has unmerged commits: {e}"
-                                ),
-                            );
+                            warnings.push(format!(
+                                "Could not check whether '{branch}' has unmerged commits: {e}"
+                            ));
                             true
                         }
                     }
                 } else {
                     false
                 };
-                if dirty {
+                Scan {
+                    dirty,
+                    unmerged,
+                    warnings,
+                }
+            });
+
+            for ((branch, _), scan) in to_scan.iter().zip(scans) {
+                for warning in &scan.warnings {
+                    warn(ui, &mut report, warning);
+                }
+                if scan.dirty {
                     // Real data-loss risk: always confirm.
-                    problematic.push((branch.clone(), dirty, unmerged));
-                } else if unmerged {
+                    problematic.push(((*branch).clone(), scan.dirty, scan.unmerged));
+                } else if scan.unmerged {
                     // Commits not reachable from target (squash / cherry-pick /
                     // deleted upstream). Auto force-delete; no prompt.
-                    auto_force.push(branch.clone());
+                    auto_force.push((*branch).clone());
                 }
             }
 
@@ -852,7 +881,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
 
         for remote in &remotes {
             let merged = ui.spinner(&format!("Scanning {remote}…"), || {
-                find_merged_remote(git, &filter, remote, opts.effort)
+                find_merged_remote(git, &filter, remote, opts.effort, opts.jobs)
             })?;
             // Surfaced after the spinner: printing inside it would corrupt the
             // spinner's own line.
@@ -1065,6 +1094,10 @@ fn remove_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cleaner tests run their inspection concurrently, so the suite exercises
+    /// the parallel paths rather than only the serial fallback.
+    const TEST_JOBS: usize = 2;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -1088,6 +1121,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         }
     }
 
@@ -1105,6 +1139,7 @@ mod tests {
             use_worktrunk: false,
             effort: Effort::Standard,
             min_age: MinAge::default(),
+            jobs: TEST_JOBS,
         }
     }
 
@@ -1178,6 +1213,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         let ui = Ui::new();
         let opts = CleanerOptions {
@@ -1193,6 +1229,7 @@ mod tests {
             use_worktrunk: false,
             effort: Effort::Standard,
             min_age: MinAge::default(),
+            jobs: TEST_JOBS,
         };
 
         // The fetch will fail but the cleaner should not bail out.
@@ -1357,6 +1394,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         let remotes = effective_remotes(&git, &config_with)?;
         assert_eq!(remotes, vec!["origin", "upstream"]);
@@ -1368,6 +1406,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         let remotes = effective_remotes(&git, &config_without)?;
         assert!(remotes.is_empty());
@@ -2607,6 +2646,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         let ui = Ui::new();
         let mut opts = opts_yes_skip_network();

@@ -24,6 +24,22 @@ fn parse_patterns(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse a `sync.jobs` value.
+///
+/// Zero is rejected rather than silently promoted to one: it is far more likely
+/// to be a mistake than a request, and `--jobs 0` is refused by clap for the
+/// same reason.
+fn parse_jobs(input: &str) -> Result<u32> {
+    let jobs: u32 = input
+        .trim()
+        .parse()
+        .with_context(|| format!("'{input}' is not a number"))?;
+    if jobs == 0 {
+        anyhow::bail!("must be at least 1");
+    }
+    Ok(jobs)
+}
+
 /// Stored configuration from the `[sync]` git config section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -44,6 +60,9 @@ pub struct Config {
     /// Minimum age a worktree must have before it may be removed.
     /// `None` means use [`MinAge::default`], i.e. no guard.
     pub min_age: Option<MinAge>,
+    /// How many read-only git probes may run at once during analysis.
+    /// `None` means use the CPU count.
+    pub jobs: Option<u32>,
 }
 
 /// A conventional starting point, **not** the value git-sync falls back to at
@@ -62,6 +81,7 @@ impl Default for Config {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         }
     }
 }
@@ -101,6 +121,12 @@ impl Config {
             .transpose()
             .with_context(|| format!("invalid {SECTION}.minage in git config"))?;
 
+        let jobs = git
+            .config_get(&format!("{SECTION}.jobs"))?
+            .map(|v| parse_jobs(&v))
+            .transpose()
+            .with_context(|| format!("invalid {SECTION}.jobs in git config"))?;
+
         Ok(Some(Self {
             protected,
             ignore,
@@ -108,6 +134,7 @@ impl Config {
             worktrunk,
             effort,
             min_age,
+            jobs,
         }))
     }
 
@@ -163,6 +190,16 @@ impl Config {
             }
             None => {
                 git.config_unset_all(&format!("{SECTION}.minage"))?;
+            }
+        }
+
+        // Analysis parallelism (optional)
+        match self.jobs {
+            Some(jobs) => {
+                git.config_set(&format!("{SECTION}.jobs"), &jobs.to_string())?;
+            }
+            None => {
+                git.config_unset_all(&format!("{SECTION}.jobs"))?;
             }
         }
 
@@ -274,6 +311,7 @@ impl Config {
             worktrunk,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config.save(git)?;
 
@@ -315,6 +353,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config.save(&git)?;
 
@@ -336,6 +375,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config.save(&git)?;
 
@@ -380,6 +420,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config.save(&git)?;
 
@@ -399,6 +440,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         }
         .save(&git)?;
 
@@ -418,6 +460,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         }
         .save(&git)?;
 
@@ -428,6 +471,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         }
         .save(&git)?;
 
@@ -447,6 +491,7 @@ mod tests {
             worktrunk: Some(true),
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config1.save(&git)?;
 
@@ -457,6 +502,7 @@ mod tests {
             worktrunk: Some(false),
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config2.save(&git)?;
 
@@ -511,6 +557,34 @@ mod tests {
     }
 
     #[test]
+    fn config_jobs_roundtrips_and_rejects_invalid_stored_values() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        let config = Config {
+            jobs: Some(4),
+            ..Config::default()
+        };
+        config.save(&git)?;
+        assert_eq!(Config::try_load(&git)?.expect("saved").jobs, Some(4));
+
+        // Unsetting removes the key rather than storing a sentinel.
+        Config::default().save(&git)?;
+        assert!(Config::try_load(&git)?.expect("saved").jobs.is_none());
+
+        // Zero is a mistake, not a request for "auto".
+        git.config_set(&format!("{SECTION}.jobs"), "0")?;
+        let err = Config::try_load(&git).expect_err("jobs = 0 must fail to load");
+        assert!(
+            format!("{err:#}").contains("sync.jobs"),
+            "error should name the offending key, got: {err:#}"
+        );
+
+        git.config_set(&format!("{SECTION}.jobs"), "lots")?;
+        assert!(Config::try_load(&git).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn config_worktrunk_roundtrip() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
@@ -522,6 +596,7 @@ mod tests {
             worktrunk: Some(true),
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config.save(&git)?;
 
@@ -536,6 +611,7 @@ mod tests {
             worktrunk: Some(false),
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config2.save(&git)?;
 
@@ -550,6 +626,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config3.save(&git)?;
 
@@ -569,6 +646,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         };
         config.save(&git)?;
 

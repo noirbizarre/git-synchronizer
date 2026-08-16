@@ -17,6 +17,7 @@ mod cli;
 mod config;
 mod duration;
 mod git;
+mod parallel;
 mod report;
 #[cfg(test)]
 mod test_helpers;
@@ -243,6 +244,14 @@ fn handle_config_command(
                             None => format!("(default: {})", duration::MinAge::default()),
                         },
                     );
+
+                    ui.field(
+                        "jobs",
+                        &match cfg.jobs {
+                            Some(jobs) => jobs.to_string(),
+                            None => "(default: CPU count)".to_string(),
+                        },
+                    );
                 }
                 None => {
                     ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
@@ -375,6 +384,7 @@ fn list_config_json(git: &git::Git) -> Result<()> {
         branch_ignored: git.branch_ignored_list()?,
         effort: cfg.as_ref().and_then(|c| c.effort),
         min_age: cfg.as_ref().and_then(|c| c.min_age),
+        jobs: cfg.as_ref().and_then(|c| c.jobs),
         worktrunk: cfg.as_ref().and_then(|c| c.worktrunk),
     };
     report::print_json(&report)
@@ -397,6 +407,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
     let use_worktrunk = resolve_worktrunk(git, ui, cli, &cfg)?;
     let effort = resolve_effort(cli, &cfg)?;
     let min_age = resolve_min_age(cli, &cfg);
+    let jobs = resolve_jobs(cli, &cfg);
 
     let opts = cleaner::CleanerOptions {
         yes: cli.effective_yes(),
@@ -411,6 +422,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         use_worktrunk,
         effort,
         min_age,
+        jobs,
     };
 
     let report = cleaner::run(git, &cfg, ui, &opts)?;
@@ -438,6 +450,23 @@ fn resolve_effort(cli: &Cli, cfg: &config::Config) -> Result<branches::Effort> {
 /// Priority: CLI flag > config setting > [`duration::MinAge::default`] (no guard).
 fn resolve_min_age(cli: &Cli, cfg: &config::Config) -> duration::MinAge {
     cli.min_age.or(cfg.min_age).unwrap_or_default()
+}
+
+/// Resolve how many read-only git probes analysis may run at once.
+///
+/// Priority: `--verbose` > CLI flag > config setting > the CPU count.
+///
+/// `--verbose` wins outright: it echoes every command as it is spawned, and
+/// concurrent workers would interleave those lines into an order that no longer
+/// reflects what happened. A debugging aid that lies is worse than a slow one.
+fn resolve_jobs(cli: &Cli, cfg: &config::Config) -> usize {
+    if cli.verbose {
+        return 1;
+    }
+    cli.jobs.or(cfg.jobs).map_or_else(
+        || std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+        |jobs| jobs as usize,
+    )
 }
 
 /// Resolve whether to use worktrunk for worktree removal.
@@ -545,6 +574,29 @@ mod tests {
             branches::Effort::Quick
         );
         Ok(())
+    }
+
+    #[test]
+    fn resolve_jobs_prefers_verbose_then_cli_then_config_then_cpu_count() {
+        let cfg_default = config::Config::default();
+        let cfg_four = config::Config {
+            jobs: Some(4),
+            ..config::Config::default()
+        };
+
+        let cli_unset = Cli::parse_from(["git-sync"]);
+        let cli_two = Cli::parse_from(["git-sync", "--jobs", "2"]);
+        let cli_verbose_two = Cli::parse_from(["git-sync", "--verbose", "-j", "2"]);
+
+        // Nothing set anywhere: as many workers as the machine has cores.
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(resolve_jobs(&cli_unset, &cfg_default), cpus);
+        // Config only.
+        assert_eq!(resolve_jobs(&cli_unset, &cfg_four), 4);
+        // CLI wins over config.
+        assert_eq!(resolve_jobs(&cli_two, &cfg_four), 2);
+        // Verbose wins over everything: an out-of-order trace is worthless.
+        assert_eq!(resolve_jobs(&cli_verbose_two, &cfg_four), 1);
     }
 
     #[test]

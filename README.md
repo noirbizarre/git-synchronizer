@@ -37,6 +37,7 @@ configured remotes. It also handles orphaned worktree cleanup.
 - Ignore branch patterns entirely (`sync.ignore`) -- never fetched, never analysed
 - Multiple merge detection strategies (fast merge, rebase-aware via `git cherry`, tree SHA comparison, empty three-dot diff, patch-ID matching, simulated merge, squash-merge detection, and deleted-upstream detection)
 - Tunable detection thoroughness with `--effort <1-3>` (speed vs accuracy)
+- Parallel analysis (`--jobs`, defaults to the CPU count) with byte-identical results at any job count
 - Automatic fast-forward of target branches before detection (with `--no-pull` to skip)
 - Optional [worktrunk](https://worktrunk.dev) integration for worktree removal (triggers pre/post-remove hooks)
 - Interactive setup wizard on first run
@@ -138,7 +139,8 @@ git sync --json
 ```
 
 The rest of the flags tune scope (`--local-only`, `--no-worktrees`, …), merge
-detection (`--effort`) and worktree safety (`--min-age`). Rather than repeat them
+detection (`--effort`, `--jobs`) and worktree safety (`--min-age`). Rather than
+repeat them
 here, where they would drift, the complete reference is generated from the same
 definition as the binary: run `git sync -h` for the summary, or `man git-sync`
 for the full manual — see
@@ -170,6 +172,7 @@ that has never been configured is an error rather than a setup wizard (run
 | `dry_run` | Whether `--dry-run` was in effect |
 | `effort` | The effective merge-detection level (`1`-`3`) |
 | `min_age` | The effective minimum worktree age, e.g. `"0s"` or `"2h"` |
+| `jobs` | The effective number of concurrent git probes used during analysis |
 | `fetch` | Phase 1: per-remote fetch/prune outcome |
 | `pull` | Phase 2: per-branch fast-forward outcome |
 | `local` | Phase 3: `merged`/`gone` candidates, plus per-branch and per-worktree outcomes |
@@ -225,6 +228,7 @@ to the repository-local `.git/config`:
     worktrunk = true
     effort = 3
     minage = 2h
+    jobs = 8
 ```
 
 | Key | Type | Description |
@@ -235,6 +239,7 @@ to the repository-local `.git/config`:
 | `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects (see below) |
 | `effort` | `1`-`3` | How thorough merge detection should be. Defaults to `2`; `--effort` overrides it |
 | `minage` | duration | Minimum age a worktree must have before it may be removed, e.g. `30s`, `2h`, `7d`. Defaults to `0s` (no guard); `--min-age` overrides it |
+| `jobs` | integer >= 1 | How many read-only git probes analysis may run at once. Defaults to the CPU count; `--jobs` overrides it, `--verbose` forces `1` |
 
 When `worktrunk` is unset, git-sync enables it only if the repository has a
 `[worktrunk]` config section **and** `wt` is on `$PATH`; it then asks once per
@@ -355,6 +360,18 @@ CLI flags:
 
    Deleted-upstream detection (below) is independent of the effort level and
    always runs.
+
+   Every one of these probes is a separate `git` process, and they are
+   independent of one another, so git-sync runs up to `--jobs` of them at a
+   time (defaulting to the CPU count). This is a wall-clock optimisation only:
+   each detection pass collects its verdicts before acting on any of them, so
+   the candidate list, the warnings and their order are identical at any job
+   count. `--jobs 1` restores strictly serial execution, and `--verbose`
+   forces it so the echoed commands stay in the order they ran.
+
+   Only read-only inspection is parallelised. Fetching, pulling, deleting
+   branches and removing worktrees always run one at a time: concurrent
+   writers to the same repository corrupt its state.
 
    Per-branch protected branches also serve as merge targets, so branches
    merged into them are detected as candidates too.
