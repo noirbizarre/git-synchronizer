@@ -19,6 +19,7 @@ mod duration;
 mod git;
 mod parallel;
 mod report;
+mod status;
 #[cfg(test)]
 mod test_helpers;
 mod ui;
@@ -34,7 +35,14 @@ use git::{GitCommandError, GitErrorKind};
 use report::Report;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Before any `Style` or `Term` is built: `console` caches the colour
+    // decision per stream on first use, so a later call would be a no-op.
+    if cli.no_color {
+        console::set_colors_enabled(false);
+        console::set_colors_enabled_stderr(false);
+    }
 
     let git = git::Git::new(cli.verbose);
     // In JSON mode the document on stdout is the only output.
@@ -62,8 +70,11 @@ fn main() -> ExitCode {
     }
 
     let json = cli.json;
-    let result = match cli.command {
+    // Taken out rather than matched by value: the `status` arm needs both the
+    // subcommand payload and a borrow of `cli` for the global flags.
+    let result = match cli.command.take() {
         Some(Command::Config { action }) => handle_config_command(&git, &ui, json, action),
+        Some(Command::Status { merged }) => handle_status(&git, &ui, &cli, merged),
         None => handle_clean(&git, &ui, &cli),
     };
 
@@ -388,6 +399,37 @@ fn list_config_json(git: &git::Git) -> Result<()> {
         worktrunk: cfg.as_ref().and_then(|c| c.worktrunk),
     };
     report::print_json(&report)
+}
+
+/// `git sync status`: a read-only inventory, never a setup wizard.
+///
+/// Uses [`config::Config::try_load`] rather than [`config::load_or_setup`]: an
+/// unconfigured repository falls back to [`config::Config::default`] (`main`
+/// and `master` protected), so the command answers a question instead of
+/// asking one.
+fn handle_status(git: &git::Git, ui: &ui::Ui, cli: &Cli, merged_only: bool) -> Result<()> {
+    let cfg = config::Config::try_load(git)?.unwrap_or_default();
+    let filter = branches::Filter::load(git, &cfg)?;
+
+    let opts = status::StatusOptions {
+        effort: resolve_effort(cli, &cfg)?,
+        jobs: resolve_jobs(cli, &cfg),
+        // Deliberately not `resolve_min_age`: here it is a display filter, and
+        // a `sync.minage` configured as a removal safety net must not silently
+        // truncate the listing.
+        min_age: cli.min_age.unwrap_or_default(),
+        merged_only,
+    };
+
+    let scan = status::scan(git, &filter, ui, opts)?;
+    let total = scan.rows.len();
+    let rows = status::filter_rows(scan.rows, opts);
+
+    if cli.json {
+        return report::print_json(&status::to_report(&rows, scan.warnings));
+    }
+    status::render(ui, &rows, total > 0);
+    Ok(())
 }
 
 fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
@@ -722,5 +764,49 @@ mod tests {
         let cli = Cli::parse_from(["git-sync", "--json", "--no-fetch", "--no-pull", "--dry-run"]);
 
         handle_clean(&git, &ui::Ui::quiet(), &cli)
+    }
+
+    #[test]
+    fn handle_status_runs_in_an_unconfigured_repository() -> Result<()> {
+        // The regression test for the acceptance criterion: no configuration,
+        // and still no wizard. A prompt would fail on the quiet UI.
+        let (_dir, git) = test_helpers::init_repo_with_branches()?;
+        let cli = Cli::parse_from(["git-sync", "status"]);
+        handle_status(&git, &ui::Ui::quiet(), &cli, false)
+    }
+
+    #[test]
+    fn handle_status_prints_a_json_document() -> Result<()> {
+        let (_dir, git) = test_helpers::init_repo_with_branches()?;
+        let cli = Cli::parse_from(["git-sync", "status", "--json"]);
+        handle_status(&git, &ui::Ui::quiet(), &cli, false)
+    }
+
+    #[test]
+    fn handle_status_does_not_inherit_the_configured_min_age() -> Result<()> {
+        // `sync.minage` guards worktree removal; it must not silently truncate
+        // an inventory the user asked no filter for.
+        let (_dir, git) = test_helpers::init_repo_with_branches()?;
+        config::Config {
+            protected: vec!["main".to_string()],
+            min_age: Some("52w".parse().unwrap()),
+            ..config::Config::default()
+        }
+        .save(&git)?;
+
+        let cli = Cli::parse_from(["git-sync", "status", "--json"]);
+        let cfg = config::Config::try_load(&git)?.expect("just saved");
+        let filter = branches::Filter::load(&git, &cfg)?;
+        let opts = status::StatusOptions {
+            effort: resolve_effort(&cli, &cfg)?,
+            jobs: resolve_jobs(&cli, &cfg),
+            min_age: cli.min_age.unwrap_or_default(),
+            merged_only: false,
+        };
+        assert!(opts.min_age.is_zero(), "sync.minage must not leak in");
+
+        let scan = status::scan(&git, &filter, &ui::Ui::quiet(), opts)?;
+        assert!(!status::filter_rows(scan.rows, opts).is_empty());
+        Ok(())
     }
 }

@@ -29,6 +29,7 @@ configured remotes. It also handles orphaned worktree cleanup.
 ## Features
 
 - Delete local and remote branches that have been merged
+- Read-only inventory of branches and worktrees (`git sync status`) -- no fetch, no prompts, no changes
 - Worktree cleanup: unified prompt for branches with worktrees and orphaned worktrees
 - Respects locked worktrees: skips removal with an informational message
 - Min-age guard (`--min-age`): never removes a worktree created too recently
@@ -136,6 +137,9 @@ git sync -y --force
 
 # Machine-readable output (implies --yes)
 git sync --json
+
+# Look without touching: a read-only inventory (alias: git sync list)
+git sync status
 ```
 
 The rest of the flags tune scope (`--local-only`, `--no-worktrees`, …), merge
@@ -145,6 +149,73 @@ here, where they would drift, the complete reference is generated from the same
 definition as the binary: run `git sync -h` for the summary, or `man git-sync`
 for the full manual — see
 [Man pages and completions](#man-pages-and-completions) above.
+
+### Status
+
+`git sync status` (alias `git sync list`) answers "what is lying around in this
+repository?" without doing anything about it. It never fetches, never prompts
+and never modifies a thing, so it is safe to run from a shell prompt, a hook or
+a script — including in a repository git-sync has never been configured in,
+where it falls back to protecting `main` and `master` instead of starting the
+setup wizard.
+
+```console
+$ git sync status
+AGE  STATUS          BRANCH              PATH
+34w  merged,clean    blog-archive        ~/src/blog-archive
+30w  merged,dirty    submit-to-registry  ~/src/islamabad
+29w  orphan,clean    (detached)          ~/src/tree-sitter-x
+2h   unmerged      * migrate-vfs         ~/src/slicc
+3h   merged,gone     fix/typo            -
+```
+
+One line per worktree, plus one per local branch that has no worktree, sorted
+oldest first. The current branch is marked with `*`. A `-` in the `PATH` column
+means the branch is not checked out anywhere; `?` in `AGE` means the age could
+not be established.
+
+The listing goes to stdout so it can be piped and grepped; warnings and the
+detection spinner go to stderr.
+
+Statuses combine, and are rendered most-actionable first:
+
+| Status | Meaning |
+| --- | --- |
+| `orphan` | The worktree has no live branch: its branch ref is gone, or it is detached |
+| `locked` | The worktree is locked (`git worktree lock`) |
+| `merged` | Detected as merged into a protected branch, using the same strategies as a sync run |
+| `gone` | The configured upstream no longer exists |
+| `unmerged` | Holds commits absent from every merge target |
+| `dirty` | The working tree has uncommitted changes |
+| `clean` | The working tree has no uncommitted change |
+
+`merged` and `unmerged` are exclusive, as are `clean` and `dirty`. A branch
+without a worktree gets neither `clean` nor `dirty` — there is no working tree
+to inspect.
+
+Two filters narrow the listing:
+
+- `--merged` keeps only entries detected as merged.
+- `--min-age <DURATION>` keeps only entries at least that old. Note the
+  difference from a sync run, where `--min-age` is a *safety guard* on worktree
+  removal: here it is a *display filter*, and the configured `sync.minage` is
+  deliberately not inherited so a safety setting cannot silently truncate the
+  inventory. Entries whose age could not be established are always kept.
+
+Two caveats worth knowing:
+
+- Because `status` never fetches, `gone` reflects the remote-tracking refs as
+  they are on disk, and is only as fresh as your last `git fetch --prune`. A
+  warning says so whenever a `gone` entry is reported.
+- Merge detection is the slow part, and honours `--effort` and `--jobs` exactly
+  as a sync run does, so the two always agree on what "merged" means. Use
+  `--effort 1` for a fast, ancestor-only answer.
+
+Branches matched by `sync.ignore` are not listed: git-sync treats them as
+non-existent everywhere else.
+
+`--json` emits the same inventory as a document (see below), and `--no-color`
+disables ANSI styling in every command.
 
 ### JSON output
 
@@ -184,6 +255,34 @@ that has never been configured is an error rather than a setup wizard (run
 Item statuses are `updated`, `deleted`, `removed`, `skipped`, `locked`,
 `too_young`, `failed` or `dry_run`. A fatal error still yields a document (with
 `status: "error"`) and a non-zero exit code.
+
+`git sync status --json` shares the same versioned schema, but carries no
+action or outcome field — `status` never acts:
+
+```sh
+git sync status --json | jq '.entries[] | select(.status | index("merged"))'
+git sync status --json | jq -r '.entries[] | select(.age_seconds > 2592000) | .branch'
+```
+
+| Field | Description |
+| --- | --- |
+| `version` | Schema version, currently `1` |
+| `status` | `success` or `error` |
+| `entries` | The inventory, oldest first |
+| `warnings` | Non-fatal messages, e.g. stale deleted-upstream detection |
+| `errors` | Failed operations, same shape as above |
+
+Each entry has:
+
+| Field | Description |
+| --- | --- |
+| `kind` | `worktree`, `orphan` or `branch` (a branch with no worktree) |
+| `branch` | Branch name; absent for a detached-HEAD worktree |
+| `path` | Absolute worktree path; absent for a branch with no worktree |
+| `age_seconds` | Age in seconds, or `null` when it could not be established |
+| `status` | The statuses that apply, in the order the `STATUS` column renders them |
+| `current` | Whether it is checked out in the worktree the command ran from |
+| `protected` | Whether a protected pattern matches it |
 
 ### Configuration management
 
@@ -300,7 +399,6 @@ setup wizard runs automatically:
 
 The cleanup runs in four sequential phases, each of which can be skipped via
 CLI flags:
-
 1. **Fetch & prune remotes** -- runs `git fetch --prune <remote>` for each
    configured remote (every remote when `sync.remote` is unset), pruning
    deleted remote-tracking branches. Skipped with `--no-fetch`.
@@ -440,6 +538,9 @@ CLI flags:
    there. Which branches are protected or ignored is still read from your local
    configuration.
    Skipped with `--local-only`.
+
+`git sync status` reuses the phase-3 detection alone, and skips phases 1, 2 and
+4 entirely — that is what makes it read-only.
 
 ```mermaid
 flowchart TD

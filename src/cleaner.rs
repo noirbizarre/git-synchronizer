@@ -6,7 +6,7 @@
 //! [`crate::worktrees`].
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 
@@ -21,7 +21,7 @@ use crate::report::{
     BranchReason, ItemStatus, LocalBranch, PulledBranch, RemoteBranch, RemoteFetch, RemoteReport,
     Report, WorktreeEntry, WorktreeKind, path_string,
 };
-use crate::ui::Ui;
+use crate::ui::{Ui, tilde_path};
 use crate::worktrees::{find_orphan_worktrees, is_too_young};
 
 /// Report a failed operation to both the user and the JSON report.
@@ -34,17 +34,6 @@ fn fail(ui: &Ui, report: &mut Report, action: &str, target: &str, err: &anyhow::
 fn warn(ui: &Ui, report: &mut Report, message: &str) {
     ui.warning(message);
     report.push_warning(message);
-}
-
-/// Return a display-friendly path with `$HOME` replaced by `~`.
-fn tilde_path(abs: &Path) -> String {
-    let abs = abs.to_string_lossy();
-    if let Ok(home) = std::env::var("HOME")
-        && let Some(rest) = abs.strip_prefix(&home)
-    {
-        return format!("~{rest}");
-    }
-    abs.into_owned()
 }
 
 /// Join fragments as `a`, `a and b`, or `a, b and c`.
@@ -1094,6 +1083,7 @@ fn remove_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// Cleaner tests run their inspection concurrently, so the suite exercises
     /// the parallel paths rather than only the serial fallback.
@@ -1867,30 +1857,6 @@ mod tests {
             "locked orphan worktree should not be removed"
         );
         Ok(())
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn tilde_path_replaces_home() {
-        let home = std::env::var("HOME").expect("HOME must be set for this test");
-        assert_eq!(
-            tilde_path(&PathBuf::from(format!("{home}/projects/repo"))),
-            "~/projects/repo"
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn tilde_path_preserves_non_home_path() {
-        assert_eq!(tilde_path(Path::new("/tmp/some/path")), "/tmp/some/path");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn tilde_path_exact_home() {
-        let home = std::env::var("HOME").expect("HOME must be set for this test");
-        // Exact HOME path (no trailing slash) should become just "~"
-        assert_eq!(tilde_path(Path::new(&home)), "~");
     }
 
     #[test]

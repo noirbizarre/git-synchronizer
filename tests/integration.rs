@@ -2082,3 +2082,293 @@ fn config_list_json_reports_unconfigured_repository() {
     assert_eq!(doc["configured"], false);
     assert_eq!(doc["protected"].as_array().unwrap().len(), 0);
 }
+
+// ── Status subcommand ────────────────────────────────────────────────
+
+/// Run `git sync status` (or an alias) and return its stdout.
+fn status_stdout(path: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(args)
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "status must exit 0");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Snapshot of everything `status` promises not to touch.
+fn repo_state(path: &std::path::Path) -> (String, String, String) {
+    let read = |args: &[&str]| {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    (
+        read(&["branch", "--format=%(refname:short)"]),
+        read(&["worktree", "list", "--porcelain"]),
+        read(&["for-each-ref", "--format=%(refname) %(objectname)"]),
+    )
+}
+
+#[test]
+fn status_lists_branches_and_worktrees() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+    add_merged_worktree(&dir, "feature/wt", "wt");
+
+    let out = status_stdout(dir.path(), &["status", "--no-color"]);
+
+    assert!(
+        out.lines().next().unwrap().starts_with("AGE"),
+        "first line must be the header, got: {out}"
+    );
+    for expected in [
+        "STATUS",
+        "BRANCH",
+        "PATH",
+        "main",
+        "feature/done",
+        "feature/wip",
+        "feature/wt",
+    ] {
+        assert!(out.contains(expected), "{expected} missing from:\n{out}");
+    }
+}
+
+#[test]
+fn status_alias_list_behaves_identically() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    // Ages tick between the two runs, so compare everything but the AGE
+    // column — the point is that the alias resolves to the same command.
+    let without_age = |args: &[&str]| {
+        status_stdout(dir.path(), args)
+            .lines()
+            .map(|line| {
+                line.split_once("  ")
+                    .map_or(line, |(_, rest)| rest)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        without_age(&["status", "--no-color"]),
+        without_age(&["list", "--no-color"]),
+    );
+}
+
+#[test]
+fn status_works_without_configuration() {
+    // No `configure(&dir)`: the setup wizard must not fire, and the command
+    // must answer rather than ask. A prompt would block on a non-TTY stdin.
+    let dir = init_repo();
+    add_branches(&dir);
+
+    let assertion = Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["status", "--no-color"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let out = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
+    assert!(out.contains("feature/wip"), "got:\n{out}");
+    assert!(
+        !String::from_utf8_lossy(&assertion.get_output().stderr).contains("setup"),
+        "the setup wizard must not be mentioned"
+    );
+}
+
+#[test]
+fn status_changes_nothing() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+    add_merged_worktree(&dir, "feature/wt", "wt");
+
+    let before = repo_state(dir.path());
+    status_stdout(dir.path(), &["status"]);
+    status_stdout(dir.path(), &["status", "--merged"]);
+    assert_eq!(before, repo_state(dir.path()), "status must not mutate");
+}
+
+#[test]
+fn status_does_not_fetch() {
+    let (dir, work, bare) = init_repo_with_remote();
+    advance_remote_branch(&bare, dir.path());
+
+    let before = git_rev_parse(&work, "refs/remotes/origin/main");
+    status_stdout(&work, &["status"]);
+    assert_eq!(
+        before,
+        git_rev_parse(&work, "refs/remotes/origin/main"),
+        "status must never fetch"
+    );
+}
+
+#[test]
+fn status_json_emits_entries_and_no_action_fields() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    let doc = json_output(&dir, &["status", "--json"]);
+
+    assert_eq!(doc["version"], 1);
+    assert_eq!(doc["status"], "success");
+    let entries = doc["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries[0]["status"].is_array());
+    for absent in ["summary", "dry_run", "fetch", "pull", "local", "remotes"] {
+        assert!(
+            doc.get(absent).is_none(),
+            "{absent} is an action field and must be absent"
+        );
+    }
+
+    let merged: Vec<&str> = entries
+        .iter()
+        .filter(|e| {
+            e["status"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s == "merged")
+        })
+        .map(|e| e["branch"].as_str().unwrap())
+        .collect();
+    assert_eq!(merged, ["feature/done"]);
+}
+
+#[test]
+fn status_json_warns_about_stale_gone_detection() {
+    let (_dir, work) = init_repo_with_gone_upstream();
+    // `status` never fetches, so it reports what a *previous* prune left on
+    // disk — which is exactly the staleness the warning is about.
+    StdCommand::new("git")
+        .args(["fetch", "--prune"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+
+    let doc = json_output_at(&work, &["status", "--json"]);
+
+    let warnings = doc["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("not fetched")),
+        "expected a staleness warning, got {warnings:?}"
+    );
+    assert!(
+        doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["status"].as_array().unwrap().iter().any(|s| s == "gone")),
+        "the gone branch must be reported"
+    );
+}
+
+#[test]
+fn status_min_age_filters_entries() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    // Everything in the fixture was created seconds ago.
+    let doc = json_output(&dir, &["status", "--json", "--min-age", "1w"]);
+    assert_eq!(doc["entries"].as_array().unwrap().len(), 0);
+
+    let doc = json_output(&dir, &["status", "--json", "--min-age", "0"]);
+    assert!(!doc["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn status_merged_only_filters_entries() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    let out = status_stdout(dir.path(), &["status", "--merged", "--no-color"]);
+    assert!(out.contains("feature/done"), "got:\n{out}");
+    assert!(!out.contains("feature/wip"), "got:\n{out}");
+}
+
+#[test]
+fn status_no_color_strips_ansi() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    assert!(
+        !status_stdout(dir.path(), &["status", "--no-color"]).contains('\x1b'),
+        "--no-color must emit no ANSI escape"
+    );
+}
+
+#[test]
+fn status_orders_oldest_first() {
+    let dir = init_repo();
+    configure(&dir);
+    let p = dir.path();
+
+    // Two branches whose tips are years apart, so ordering is unambiguous.
+    for (branch, date) in [
+        ("old/one", "2001-01-01T00:00:00"),
+        ("new/one", "2020-01-01T00:00:00"),
+    ] {
+        StdCommand::new("git")
+            .args(["checkout", "-b", branch])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "--allow-empty", "-m", branch])
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_AUTHOR_DATE", date)
+            .current_dir(p)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+    }
+
+    let doc = json_output(&dir, &["status", "--json"]);
+    let order: Vec<&str> = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["branch"].as_str())
+        .collect();
+    let old = order.iter().position(|b| *b == "old/one").unwrap();
+    let new = order.iter().position(|b| *b == "new/one").unwrap();
+    assert!(old < new, "oldest first, got {order:?}");
+}
+
+#[test]
+fn status_help_documents_its_flags() {
+    let dir = init_repo();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["status", "--help"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--merged")
+                .and(predicate::str::contains("--min-age"))
+                .and(predicate::str::contains("--effort"))
+                .and(predicate::str::contains("--no-color")),
+        );
+}
