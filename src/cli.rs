@@ -6,16 +6,16 @@ use clap::{Parser, Subcommand};
 
 use crate::duration::MinAge;
 
-/// Easily synchronize your local branches and worktrees.
+/// Wipe out merged local branches and worktrees.
 ///
 /// Detects branches that have been merged into your main branch(es) and offers
 /// to delete them — both locally and on configured remotes. Also handles
 /// orphaned worktree cleanup.
 ///
 /// On first run, an interactive setup wizard stores preferences in the
-/// git config `[sync]` section.
+/// git config `[wipe]` section.
 #[derive(Parser, Debug)]
-#[command(name = "git-sync", version, about, long_about)]
+#[command(name = "git-wipe", version, about, long_about)]
 pub struct Cli {
     /// Skip all confirmation prompts (auto-confirm deletions)
     #[arg(short = 'y', long)]
@@ -78,7 +78,7 @@ pub struct Cli {
     /// 3: adds patch-id, simulated merge and squash patch-id detection,
     /// the most thorough but noticeably slower.
     ///
-    /// Global, so `status` classifies branches exactly like a sync run does.
+    /// Global, so `status` classifies branches exactly like a wipe run does.
     #[arg(long, value_name = "LEVEL", global = true, value_parser = clap::value_parser!(u8).range(1..=3))]
     pub effort: Option<u8>,
 
@@ -89,7 +89,7 @@ pub struct Cli {
     /// default branch from being removed along with its "merged" branch.
     ///
     /// On `status` this is a filter instead of a guard: only entries at least
-    /// this old are listed, and the configured `sync.minage` is not inherited.
+    /// this old are listed, and the configured `wipe.minage` is not inherited.
     #[arg(long, value_name = "DURATION", global = true)]
     pub min_age: Option<MinAge>,
 
@@ -120,7 +120,7 @@ pub struct Cli {
     /// on a terminal and compact when piped or redirected.
     ///
     /// Global so it can be given before or after a subcommand
-    /// (`git sync config list --json`).
+    /// (`git wipe config list --json`).
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -150,7 +150,7 @@ impl Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Manage git-sync configuration
+    /// Manage git-wipe configuration
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -161,13 +161,13 @@ pub enum Command {
     /// One line per worktree and per branch without a worktree, oldest first,
     /// with an age and a combined status. Nothing is fetched, nothing is
     /// prompted and nothing is modified, so it is safe to run at any time —
-    /// including in a repository git-sync has never been configured in.
+    /// including in a repository git-wipe has never been configured in.
     ///
     /// Merge detection honours --effort and --jobs; --effort 1 is the fast
     /// path. Because remotes are never fetched, `gone` reflects the
     /// remote-tracking refs as they are on disk and may be stale.
     ///
-    /// Ignored branches are not listed, since git-sync treats them as
+    /// Ignored branches are not listed, since git-wipe treats them as
     /// non-existent everywhere else.
     #[command(alias = "list")]
     Status {
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn cli_default_flags() {
-        let cli = Cli::parse_from(["git-sync"]);
+        let cli = Cli::parse_from(["git-wipe"]);
         assert!(!cli.yes);
         assert!(!cli.force);
         assert!(!cli.dry_run);
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn cli_json_flag_implies_yes() {
-        let cli = Cli::parse_from(["git-sync", "--json"]);
+        let cli = Cli::parse_from(["git-wipe", "--json"]);
         assert!(cli.json);
         assert!(!cli.yes);
         assert!(cli.effective_yes());
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn cli_effective_yes_follows_yes_flag() {
-        let cli = Cli::parse_from(["git-sync", "-y"]);
+        let cli = Cli::parse_from(["git-wipe", "-y"]);
         assert!(!cli.json);
         assert!(cli.effective_yes());
     }
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn cli_flag_parsing() {
         let cli = Cli::parse_from([
-            "git-sync",
+            "git-wipe",
             "-y",
             "-f",
             "-n",
@@ -327,15 +327,15 @@ mod tests {
 
     #[test]
     fn cli_force_flag() {
-        assert!(Cli::parse_from(["git-sync", "--force"]).force);
-        assert!(Cli::parse_from(["git-sync", "-f"]).force);
+        assert!(Cli::parse_from(["git-wipe", "--force"]).force);
+        assert!(Cli::parse_from(["git-wipe", "-f"]).force);
         // --force does not auto-confirm the main selection prompt.
-        assert!(!Cli::parse_from(["git-sync", "--force"]).effective_yes());
+        assert!(!Cli::parse_from(["git-wipe", "--force"]).effective_yes());
     }
 
     #[test]
     fn cli_no_pull_flag() {
-        let cli = Cli::parse_from(["git-sync", "--no-pull"]);
+        let cli = Cli::parse_from(["git-wipe", "--no-pull"]);
         assert!(cli.no_pull);
         assert!(!cli.no_fetch);
     }
@@ -343,45 +343,45 @@ mod tests {
     #[test]
     fn cli_effort_flag() {
         assert_eq!(
-            Cli::parse_from(["git-sync", "--effort", "1"]).effort,
+            Cli::parse_from(["git-wipe", "--effort", "1"]).effort,
             Some(1)
         );
         assert_eq!(
-            Cli::parse_from(["git-sync", "--effort", "3"]).effort,
+            Cli::parse_from(["git-wipe", "--effort", "3"]).effort,
             Some(3)
         );
     }
 
     #[test]
     fn cli_effort_rejects_out_of_range_levels() {
-        assert!(Cli::try_parse_from(["git-sync", "--effort", "0"]).is_err());
-        assert!(Cli::try_parse_from(["git-sync", "--effort", "4"]).is_err());
-        assert!(Cli::try_parse_from(["git-sync", "--effort", "max"]).is_err());
+        assert!(Cli::try_parse_from(["git-wipe", "--effort", "0"]).is_err());
+        assert!(Cli::try_parse_from(["git-wipe", "--effort", "4"]).is_err());
+        assert!(Cli::try_parse_from(["git-wipe", "--effort", "max"]).is_err());
     }
 
     #[test]
     fn cli_min_age_flag() {
-        let cli = Cli::parse_from(["git-sync", "--min-age", "2h"]);
+        let cli = Cli::parse_from(["git-wipe", "--min-age", "2h"]);
         assert_eq!(cli.min_age, Some("2h".parse().unwrap()));
-        assert_eq!(Cli::parse_from(["git-sync"]).min_age, None);
+        assert_eq!(Cli::parse_from(["git-wipe"]).min_age, None);
     }
 
     #[test]
     fn cli_min_age_rejects_garbage() {
-        assert!(Cli::try_parse_from(["git-sync", "--min-age", "soon"]).is_err());
-        assert!(Cli::try_parse_from(["git-sync", "--min-age", "5x"]).is_err());
+        assert!(Cli::try_parse_from(["git-wipe", "--min-age", "soon"]).is_err());
+        assert!(Cli::try_parse_from(["git-wipe", "--min-age", "5x"]).is_err());
     }
 
     #[test]
     fn cli_worktrunk_flag() {
-        let cli = Cli::parse_from(["git-sync", "--worktrunk"]);
+        let cli = Cli::parse_from(["git-wipe", "--worktrunk"]);
         assert!(cli.worktrunk);
         assert!(!cli.no_worktrunk);
     }
 
     #[test]
     fn cli_no_worktrunk_flag() {
-        let cli = Cli::parse_from(["git-sync", "--no-worktrunk"]);
+        let cli = Cli::parse_from(["git-wipe", "--no-worktrunk"]);
         assert!(!cli.worktrunk);
         assert!(cli.no_worktrunk);
     }
@@ -389,18 +389,18 @@ mod tests {
     #[test]
     fn cli_worktrunk_overrides() {
         // Last flag wins with overrides_with
-        let cli = Cli::parse_from(["git-sync", "--worktrunk", "--no-worktrunk"]);
+        let cli = Cli::parse_from(["git-wipe", "--worktrunk", "--no-worktrunk"]);
         assert!(!cli.worktrunk);
         assert!(cli.no_worktrunk);
 
-        let cli = Cli::parse_from(["git-sync", "--no-worktrunk", "--worktrunk"]);
+        let cli = Cli::parse_from(["git-wipe", "--no-worktrunk", "--worktrunk"]);
         assert!(cli.worktrunk);
         assert!(!cli.no_worktrunk);
     }
 
     #[test]
     fn cli_config_subcommand() {
-        let cli = Cli::parse_from(["git-sync", "config", "list"]);
+        let cli = Cli::parse_from(["git-wipe", "config", "list"]);
         assert!(cli.command.is_some());
         match cli.command.unwrap() {
             Command::Config { action } => match action {
@@ -410,7 +410,7 @@ mod tests {
             other => panic!("Expected Command::Config, got {other:?}"),
         }
 
-        let cli = Cli::parse_from(["git-sync", "config", "set", "remote", "origin"]);
+        let cli = Cli::parse_from(["git-wipe", "config", "set", "remote", "origin"]);
         match cli.command.unwrap() {
             Command::Config { action } => match action {
                 ConfigAction::Set { key, value } => {
@@ -422,7 +422,7 @@ mod tests {
             other => panic!("Expected Command::Config, got {other:?}"),
         }
 
-        let cli = Cli::parse_from(["git-sync", "config", "add-protected", "release/*"]);
+        let cli = Cli::parse_from(["git-wipe", "config", "add-protected", "release/*"]);
         match cli.command.unwrap() {
             Command::Config { action } => match action {
                 ConfigAction::AddProtected { pattern } => {
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn cli_status_subcommand() {
-        let cli = Cli::parse_from(["git-sync", "status"]);
+        let cli = Cli::parse_from(["git-wipe", "status"]);
         match cli.command.unwrap() {
             Command::Status { merged } => assert!(!merged),
             other => panic!("Expected Command::Status, got {other:?}"),
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn cli_status_list_alias() {
-        let cli = Cli::parse_from(["git-sync", "list"]);
+        let cli = Cli::parse_from(["git-wipe", "list"]);
         match cli.command.unwrap() {
             Command::Status { merged } => assert!(!merged),
             other => panic!("Expected Command::Status, got {other:?}"),
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn cli_status_merged_flag() {
-        let cli = Cli::parse_from(["git-sync", "status", "--merged"]);
+        let cli = Cli::parse_from(["git-wipe", "status", "--merged"]);
         match cli.command.unwrap() {
             Command::Status { merged } => assert!(merged),
             other => panic!("Expected Command::Status, got {other:?}"),
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn cli_global_flags_after_a_subcommand() {
         let cli = Cli::parse_from([
-            "git-sync",
+            "git-wipe",
             "status",
             "--effort",
             "3",
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn cli_global_flags_before_a_subcommand() {
         let cli = Cli::parse_from([
-            "git-sync",
+            "git-wipe",
             "--effort",
             "3",
             "--jobs",
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn cli_no_color_default_is_false() {
-        assert!(!Cli::parse_from(["git-sync"]).no_color);
-        assert!(Cli::parse_from(["git-sync", "--no-color"]).no_color);
+        assert!(!Cli::parse_from(["git-wipe"]).no_color);
+        assert!(Cli::parse_from(["git-wipe", "--no-color"]).no_color);
     }
 }

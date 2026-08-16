@@ -1,18 +1,18 @@
 [package]
-name = "git-synchronizer"
+name = "git-wipe"
 version = "0.3.0"
 edition = "2024"
 license = "MIT"
 authors = ["Axel H. <noirbizarre@gmail.com>"]
-description = "Easily synchronize your local branches and worktrees"
-repository = "https://github.com/noirbizarre/git-synchronizer"
+description = "Wipe out merged local branches and worktrees"
+repository = "https://github.com/noirbizarre/git-wipe"
 readme = "README.md"
-keywords = ["git", "branches", "sync", "worktree", "synchronize"]
+keywords = ["git", "branches", "worktree", "cleanup", "merged"]
 categories = ["command-line-utilities", "development-tools"]
 build = "build.rs"
 
 [[bin]]
-name = "git-sync"
+name = "git-wipe"
 path = "src/main.rs"
 
 [dependencies]

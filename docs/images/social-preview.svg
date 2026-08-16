@@ -6,14 +6,19 @@
        The background is opaque because transparency renders black on most
        social cards.
 
-       The <image> box keeps logo.svg's own 1719:287 ratio, so the mark is not
-       distorted. The tagline is a <text> element: this is rasterized on one
-       machine and uploaded by hand, so a missing font is visible to the person
-       running the task rather than silently shipped. The fallback chain ends in
-       a family every platform has. -->
+       The <image> box keeps logo.svg's own 999:287 ratio, so the mark is not
+       distorted. That ratio is a consequence of the wordmark: `git-wipe` is far
+       shorter than the name this project had before, so the box is squarer and
+       narrower than it used to be. Re-measure it whenever logo.src.svg changes.
+
+       The tagline is a <text> element: this is rasterized on one machine and
+       uploaded by hand, so a missing font is visible to the person running the
+       task rather than silently shipped. The fallback chain ends in a family
+       every platform has. It must stay in step with Cargo.toml's `description`.
+       -->
   <rect width="1280" height="640" fill="#FFFFFF"/>
-  <image href="logo.svg" x="140" y="185" width="1000" height="167"/>
-  <text x="640" y="445" text-anchor="middle"
+  <image href="logo.svg" x="250" y="150" width="780" height="224"/>
+  <text x="640" y="470" text-anchor="middle"
         font-family="Fira Sans, Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="40" fill="#fc3c10">Easily synchronize your local branches and worktrees</text>
+        font-size="40" fill="#fc3c10">Wipe out merged local branches and worktrees</text>
 </svg>

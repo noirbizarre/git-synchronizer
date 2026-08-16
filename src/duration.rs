@@ -1,6 +1,6 @@
-//! Duration values accepted by `--min-age` and `sync.minage`.
+//! Duration values accepted by `--min-age` and `wipe.minage`.
 //!
-//! Deliberately a hand-rolled parser rather than a dependency: git-sync needs
+//! Deliberately a hand-rolled parser rather than a dependency: git-wipe needs
 //! exactly one duration knob, with a small, predictable grammar and an error
 //! message that names the accepted units.
 
@@ -16,10 +16,10 @@ const HOUR: u64 = 60 * MINUTE;
 const DAY: u64 = 24 * HOUR;
 const WEEK: u64 = 7 * DAY;
 
-/// The minimum age a worktree must have before git-sync will remove it.
+/// The minimum age a worktree must have before git-wipe will remove it.
 ///
 /// The default is zero, which disables the guard entirely and preserves the
-/// behaviour git-sync had before the option existed.
+/// behaviour git-wipe had before the option existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct MinAge(Duration);
 
@@ -90,7 +90,7 @@ impl fmt::Display for MinAge {
 }
 
 /// Serialized as its canonical string form, matching `--min-age` and
-/// `sync.minage`.
+/// `wipe.minage`.
 impl serde::Serialize for MinAge {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())

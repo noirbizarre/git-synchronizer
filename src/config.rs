@@ -1,4 +1,4 @@
-//! The `[sync]` git config section, and the first-run setup wizard.
+//! The `[wipe]` git config section, and the first-run setup wizard.
 //!
 //! Configuration is read from any git config scope but always written to the
 //! repository-local `.git/config`. [`Config::try_load`] returns `None` when the
@@ -11,8 +11,8 @@ use crate::duration::MinAge;
 use crate::git::Git;
 use crate::ui::Ui;
 
-/// The git config section name used for all sync settings.
-pub const SECTION: &str = "sync";
+/// The git config section name used for all git-wipe settings.
+pub const SECTION: &str = "wipe";
 
 /// Split a comma-separated prompt answer into trimmed, non-empty patterns.
 fn parse_patterns(input: &str) -> Vec<String> {
@@ -24,7 +24,7 @@ fn parse_patterns(input: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse a `sync.jobs` value.
+/// Parse a `wipe.jobs` value.
 ///
 /// Zero is rejected rather than silently promoted to one: it is far more likely
 /// to be a mistake than a request, and `--jobs 0` is refused by clap for the
@@ -40,12 +40,12 @@ fn parse_jobs(input: &str) -> Result<u32> {
     Ok(jobs)
 }
 
-/// Stored configuration from the `[sync]` git config section.
+/// Stored configuration from the `[wipe]` git config section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Glob patterns for branches that should never be deleted.
     pub protected: Vec<String>,
-    /// Glob patterns for branches git-sync should ignore entirely: they are not
+    /// Glob patterns for branches git-wipe should ignore entirely: they are not
     /// fetched, never become merge targets, and never appear as candidates.
     pub ignore: Vec<String>,
     /// Remotes to consider for remote branch deletion.
@@ -65,7 +65,7 @@ pub struct Config {
     pub jobs: Option<u32>,
 }
 
-/// A conventional starting point, **not** the value git-sync falls back to at
+/// A conventional starting point, **not** the value git-wipe falls back to at
 /// runtime.
 ///
 /// Production never reaches this: [`Config::try_load`] either returns the
@@ -87,7 +87,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from the `[sync]` git config section.
+    /// Load configuration from the `[wipe]` git config section.
     ///
     /// Returns `Ok(None)` if the section doesn't exist (first-run scenario),
     /// which is why this is `try_load` rather than `load`: absence is an
@@ -138,7 +138,7 @@ impl Config {
         }))
     }
 
-    /// Persist configuration to the `[sync]` git config section.
+    /// Persist configuration to the `[wipe]` git config section.
     pub fn save(&self, git: &Git) -> Result<()> {
         // Protected branches (multi-value)
         git.config_unset_all(&format!("{SECTION}.protected"))?;
@@ -210,7 +210,7 @@ impl Config {
     ///
     /// Auto-detects branches and remotes, then asks the user to confirm/edit.
     pub fn interactive_setup(git: &Git, ui: &Ui) -> Result<Self> {
-        ui.heading("No configuration found. Let's set up git-sync.");
+        ui.heading("No configuration found. Let's set up git-wipe.");
         ui.blank();
 
         // ── Protected branches ───────────────────────────────────────
@@ -303,7 +303,7 @@ impl Config {
 
         // Effort and min age are deliberately not asked here: they are
         // power-user knobs with sensible defaults, set later with
-        // `git sync config set effort <n>` / `... set minage <duration>`.
+        // `git wipe config set effort <n>` / `... set minage <duration>`.
         let config = Self {
             protected,
             ignore,
@@ -315,7 +315,7 @@ impl Config {
         };
         config.save(git)?;
 
-        ui.success("Configuration saved to git config [sync] section.");
+        ui.success("Configuration saved to git config [wipe] section.");
         ui.blank();
 
         Ok(config)
@@ -550,7 +550,7 @@ mod tests {
 
         let err = Config::try_load(&git).expect_err("invalid effort must fail to load");
         assert!(
-            format!("{err:#}").contains("sync.effort"),
+            format!("{err:#}").contains("wipe.effort"),
             "error should name the offending key, got: {err:#}"
         );
         Ok(())
@@ -575,7 +575,7 @@ mod tests {
         git.config_set(&format!("{SECTION}.jobs"), "0")?;
         let err = Config::try_load(&git).expect_err("jobs = 0 must fail to load");
         assert!(
-            format!("{err:#}").contains("sync.jobs"),
+            format!("{err:#}").contains("wipe.jobs"),
             "error should name the offending key, got: {err:#}"
         );
 

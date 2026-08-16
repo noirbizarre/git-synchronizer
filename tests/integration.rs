@@ -18,24 +18,22 @@ use common::{
 
 #[test]
 fn help_flag_shows_usage() {
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Easily synchronize your local branches",
-        ));
+        .stdout(predicate::str::contains("Wipe out merged local branches"));
 }
 
 #[test]
 fn version_flag_shows_version() {
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("git-sync"));
+        .stdout(predicate::str::contains("git-wipe"));
 }
 
 // ── Config subcommands ───────────────────────────────────────────────
@@ -43,7 +41,7 @@ fn version_flag_shows_version() {
 #[test]
 fn config_list_no_config() {
     let dir = init_repo();
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -57,7 +55,7 @@ fn config_list_shows_values() {
     let dir = init_repo();
     configure(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -75,22 +73,22 @@ fn config_list_with_configured_remotes() {
 
     // Set up a config with specific remotes
     StdCommand::new("git")
-        .args(["config", "--add", "sync.protected", "main"])
+        .args(["config", "--add", "wipe.protected", "main"])
         .current_dir(p)
         .output()
         .unwrap();
     StdCommand::new("git")
-        .args(["config", "--add", "sync.remote", "origin"])
+        .args(["config", "--add", "wipe.remote", "origin"])
         .current_dir(p)
         .output()
         .unwrap();
     StdCommand::new("git")
-        .args(["config", "--add", "sync.remote", "upstream"])
+        .args(["config", "--add", "wipe.remote", "upstream"])
         .current_dir(p)
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(p)
@@ -103,7 +101,7 @@ fn config_list_with_configured_remotes() {
 fn config_set_value() {
     let dir = init_repo();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "set", "remote", "upstream"])
         .current_dir(dir.path())
@@ -113,7 +111,7 @@ fn config_set_value() {
 
     // Verify with git config
     let output = StdCommand::new("git")
-        .args(["config", "--get", "sync.remote"])
+        .args(["config", "--get", "wipe.remote"])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -124,16 +122,16 @@ fn config_set_value() {
 fn config_set_replaces_every_value_of_a_multi_valued_key() {
     let dir = init_repo();
 
-    // Two values: a plain `git config sync.protected <v>` would fail here.
+    // Two values: a plain `git config wipe.protected <v>` would fail here.
     for value in ["main", "develop"] {
         StdCommand::new("git")
-            .args(["config", "--add", "sync.protected", value])
+            .args(["config", "--add", "wipe.protected", value])
             .current_dir(dir.path())
             .output()
             .unwrap();
     }
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "set", "protected", "release"])
         .current_dir(dir.path())
@@ -142,7 +140,7 @@ fn config_set_replaces_every_value_of_a_multi_valued_key() {
         .stderr(predicate::str::contains("Set protected = release"));
 
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "sync.protected"])
+        .args(["config", "--get-all", "wipe.protected"])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -155,7 +153,7 @@ fn config_add_and_remove_protected() {
     let p = dir.path();
 
     // Add a protected pattern
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-protected", "release/*"])
         .current_dir(p)
@@ -166,7 +164,7 @@ fn config_add_and_remove_protected() {
         ));
 
     // Add another
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-protected", "main"])
         .current_dir(p)
@@ -175,7 +173,7 @@ fn config_add_and_remove_protected() {
 
     // Verify both exist
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "sync.protected"])
+        .args(["config", "--get-all", "wipe.protected"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -184,7 +182,7 @@ fn config_add_and_remove_protected() {
     assert!(values.contains("main"));
 
     // Remove one
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "remove-protected", "release/*"])
         .current_dir(p)
@@ -196,7 +194,7 @@ fn config_add_and_remove_protected() {
 
     // Verify only main remains
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "sync.protected"])
+        .args(["config", "--get-all", "wipe.protected"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -209,7 +207,7 @@ fn config_add_and_remove_remote() {
     let p = dir.path();
 
     // Add remotes
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-remote", "origin"])
         .current_dir(p)
@@ -217,7 +215,7 @@ fn config_add_and_remove_remote() {
         .success()
         .stderr(predicate::str::contains("Added remote: origin"));
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-remote", "upstream"])
         .current_dir(p)
@@ -225,7 +223,7 @@ fn config_add_and_remove_remote() {
         .success();
 
     // Remove one
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "remove-remote", "upstream"])
         .current_dir(p)
@@ -235,7 +233,7 @@ fn config_add_and_remove_remote() {
 
     // Verify only origin remains
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "sync.remote"])
+        .args(["config", "--get-all", "wipe.remote"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -250,7 +248,7 @@ fn clean_dry_run_preserves_branches() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "-n", "--no-fetch"])
         .current_dir(dir.path())
@@ -271,7 +269,7 @@ fn clean_deletes_merged_branch() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(dir.path())
@@ -290,7 +288,7 @@ fn clean_no_merged_branches() {
     configure(&dir);
     // No extra branches — nothing to delete
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(dir.path())
@@ -305,7 +303,7 @@ fn clean_remote_only_skips_local_deletion() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--remote-only"])
         .current_dir(dir.path())
@@ -323,7 +321,7 @@ fn clean_local_only_deletes_local() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--local-only"])
         .current_dir(dir.path())
@@ -342,7 +340,7 @@ fn config_protect_and_unprotect() {
     let p = dir.path();
 
     // Protect a branch
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "protect", "develop"])
         .current_dir(p)
@@ -354,14 +352,14 @@ fn config_protect_and_unprotect() {
 
     // Verify with git config
     let output = StdCommand::new("git")
-        .args(["config", "--get", "branch.develop.sync-protected"])
+        .args(["config", "--get", "branch.develop.wipe-protected"])
         .current_dir(p)
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
 
     // Unprotect
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "unprotect", "develop"])
         .current_dir(p)
@@ -373,7 +371,7 @@ fn config_protect_and_unprotect() {
 
     // Verify key is removed
     let output = StdCommand::new("git")
-        .args(["config", "--get", "branch.develop.sync-protected"])
+        .args(["config", "--get", "branch.develop.wipe-protected"])
         .current_dir(p)
         .output()
         .unwrap();
@@ -391,12 +389,12 @@ fn config_list_shows_branch_protected() {
 
     // Mark a branch as per-branch protected
     StdCommand::new("git")
-        .args(["config", "branch.staging.sync-protected", "true"])
+        .args(["config", "branch.staging.wipe-protected", "true"])
         .current_dir(p)
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(p)
@@ -415,12 +413,12 @@ fn clean_respects_branch_protected() {
     // Mark the merged branch as per-branch protected
     let p = dir.path();
     StdCommand::new("git")
-        .args(["config", "branch.feature/done.sync-protected", "true"])
+        .args(["config", "branch.feature/done.wipe-protected", "true"])
         .current_dir(p)
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(p)
@@ -444,14 +442,14 @@ fn config_set_from_linked_worktree_visible_in_main() {
     let (_dir, main_path, wt_path) = init_repo_with_worktree_config();
 
     // Run config commands from the linked worktree
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-protected", "main"])
         .current_dir(&wt_path)
         .assert()
         .success();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-protected", "release/*"])
         .current_dir(&wt_path)
@@ -459,7 +457,7 @@ fn config_set_from_linked_worktree_visible_in_main() {
         .success();
 
     // Config should be visible from the main worktree
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(&main_path)
@@ -475,13 +473,13 @@ fn config_protect_from_linked_worktree_visible_in_main() {
 
     // Seed minimal config so list doesn't show "no config"
     StdCommand::new("git")
-        .args(["config", "--local", "--add", "sync.protected", "main"])
+        .args(["config", "--local", "--add", "wipe.protected", "main"])
         .current_dir(&main_path)
         .output()
         .unwrap();
 
     // Protect a branch from the linked worktree
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "protect", "develop"])
         .current_dir(&wt_path)
@@ -489,7 +487,7 @@ fn config_protect_from_linked_worktree_visible_in_main() {
         .success();
 
     // Branch protection should be visible from the main worktree
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(&main_path)
@@ -504,7 +502,7 @@ fn clean_from_linked_worktree_with_worktree_config() {
 
     // Configure from main worktree
     StdCommand::new("git")
-        .args(["config", "--local", "--add", "sync.protected", "main"])
+        .args(["config", "--local", "--add", "wipe.protected", "main"])
         .current_dir(&main_path)
         .output()
         .unwrap();
@@ -538,7 +536,7 @@ fn clean_from_linked_worktree_with_worktree_config() {
         .unwrap();
 
     // Run clean from the linked worktree — must succeed and see config
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--no-worktrees"])
         .current_dir(&wt_path)
@@ -618,7 +616,7 @@ fn clean_skips_locked_worktree() {
         .unwrap();
 
     // Run clean — should skip the locked worktree
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(p)
@@ -699,7 +697,7 @@ fn clean_skips_locked_worktree_with_reason() {
         .unwrap();
 
     // Run clean — should show the lock reason
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(p)
@@ -715,7 +713,7 @@ fn clean_skips_locked_worktree_with_reason() {
 // ── Pull / fast-forward ─────────────────────────────────────────────
 
 /// Create a local bare "remote", clone it, push an initial commit, and
-/// configure sync.  Returns (tempdir, work_path, bare_path).
+/// configure git-wipe.  Returns (tempdir, work_path, bare_path).
 fn init_repo_with_remote() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
 
@@ -770,9 +768,9 @@ fn init_repo_with_remote() -> (TempDir, std::path::PathBuf, std::path::PathBuf) 
         .output()
         .unwrap();
 
-    // Configure sync
+    // Configure git-wipe
     StdCommand::new("git")
-        .args(["config", "--add", "sync.protected", "main"])
+        .args(["config", "--add", "wipe.protected", "main"])
         .current_dir(&work_path)
         .output()
         .unwrap();
@@ -834,7 +832,7 @@ fn no_pull_flag_accepted() {
     let dir = init_repo();
     configure(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--no-pull"])
         .current_dir(dir.path())
@@ -848,7 +846,7 @@ fn effort_flag_accepted() {
     configure(&dir);
 
     for level in ["1", "2", "3"] {
-        Command::cargo_bin("git-sync")
+        Command::cargo_bin("git-wipe")
             .unwrap()
             .args(["-y", "--no-fetch", "--local-only", "--effort", level])
             .current_dir(dir.path())
@@ -862,7 +860,7 @@ fn effort_flag_rejects_out_of_range_levels() {
     let dir = init_repo();
     configure(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--effort", "4"])
         .current_dir(dir.path())
@@ -875,7 +873,7 @@ fn effort_flag_rejects_out_of_range_levels() {
 fn config_set_effort_roundtrips() {
     let dir = init_repo();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "set", "effort", "3"])
         .current_dir(dir.path())
@@ -883,13 +881,13 @@ fn config_set_effort_roundtrips() {
         .success();
 
     let output = StdCommand::new("git")
-        .args(["config", "--get", "sync.effort"])
+        .args(["config", "--get", "wipe.effort"])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "3");
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -903,7 +901,7 @@ fn jobs_flag_rejects_zero() {
     let dir = init_repo();
     configure(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--jobs", "0"])
         .current_dir(dir.path())
@@ -916,7 +914,7 @@ fn jobs_flag_rejects_zero() {
 fn config_set_jobs_roundtrips() {
     let dir = init_repo();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "set", "jobs", "4"])
         .current_dir(dir.path())
@@ -924,13 +922,13 @@ fn config_set_jobs_roundtrips() {
         .success();
 
     let output = StdCommand::new("git")
-        .args(["config", "--get", "sync.jobs"])
+        .args(["config", "--get", "wipe.jobs"])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "4");
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -1001,7 +999,7 @@ fn output_is_identical_whatever_the_job_count() {
             jobs,
         ];
         args.extend_from_slice(extra);
-        Command::cargo_bin("git-sync")
+        Command::cargo_bin("git-wipe")
             .unwrap()
             .args(&args)
             .current_dir(dir.path())
@@ -1044,7 +1042,7 @@ fn min_age_flag_accepted() {
     configure(&dir);
 
     for value in ["0", "30s", "15m", "2h", "7d", "1w"] {
-        Command::cargo_bin("git-sync")
+        Command::cargo_bin("git-wipe")
             .unwrap()
             .args(["-y", "--no-fetch", "--local-only", "--min-age", value])
             .current_dir(dir.path())
@@ -1058,7 +1056,7 @@ fn min_age_flag_rejects_garbage() {
     let dir = init_repo();
     configure(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--min-age", "soon"])
         .current_dir(dir.path())
@@ -1073,7 +1071,7 @@ fn min_age_keeps_a_freshly_created_worktree() {
     configure(&dir);
     let wt_path = add_merged_worktree(&dir, "feature/fresh", "wt-fresh");
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--local-only", "--min-age", "1h"])
         .current_dir(dir.path())
@@ -1100,7 +1098,7 @@ fn yes_alone_keeps_a_dirty_worktree() {
     let wt_path = add_merged_worktree(&dir, "feature/dirty", "wt-dirty");
     dirty_worktree(&wt_path);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch", "--local-only"])
         .current_dir(dir.path())
@@ -1122,7 +1120,7 @@ fn yes_with_force_removes_a_dirty_worktree() {
     let wt_path = add_merged_worktree(&dir, "feature/dirty", "wt-dirty");
     dirty_worktree(&wt_path);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--force", "--no-fetch", "--local-only"])
         .current_dir(dir.path())
@@ -1140,7 +1138,7 @@ fn yes_with_force_removes_a_dirty_worktree() {
 fn config_set_minage_roundtrips() {
     let dir = init_repo();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "set", "minage", "2h"])
         .current_dir(dir.path())
@@ -1148,13 +1146,13 @@ fn config_set_minage_roundtrips() {
         .success();
 
     let output = StdCommand::new("git")
-        .args(["config", "--get", "sync.minage"])
+        .args(["config", "--get", "wipe.minage"])
         .current_dir(dir.path())
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2h");
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -1173,8 +1171,8 @@ fn pull_updates_current_branch() {
 
     let before = git_rev_parse(&work_path, "HEAD");
 
-    // Run git-sync with pull enabled (default), fetch enabled
-    Command::cargo_bin("git-sync")
+    // Run git-wipe with pull enabled (default), fetch enabled
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y"])
         .current_dir(&work_path)
@@ -1199,8 +1197,8 @@ fn no_pull_skips_fast_forward() {
 
     let before = git_rev_parse(&work_path, "HEAD");
 
-    // Run git-sync with --no-pull
-    Command::cargo_bin("git-sync")
+    // Run git-wipe with --no-pull
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-pull"])
         .current_dir(&work_path)
@@ -1237,7 +1235,7 @@ fn pull_updates_branch_in_worktree() {
 
     // Add develop as protected
     StdCommand::new("git")
-        .args(["config", "--add", "sync.protected", "develop"])
+        .args(["config", "--add", "wipe.protected", "develop"])
         .current_dir(&work_path)
         .output()
         .unwrap();
@@ -1291,8 +1289,8 @@ fn pull_updates_branch_in_worktree() {
 
     let before = git_rev_parse(&work_path, "develop");
 
-    // Run git-sync — should pull develop via the worktree
-    Command::cargo_bin("git-sync")
+    // Run git-wipe — should pull develop via the worktree
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y"])
         .current_dir(&work_path)
@@ -1334,7 +1332,7 @@ fn pull_updates_non_checked_out_branch_via_fetch() {
 
     // Add develop as protected
     StdCommand::new("git")
-        .args(["config", "--add", "sync.protected", "develop"])
+        .args(["config", "--add", "wipe.protected", "develop"])
         .current_dir(&work_path)
         .output()
         .unwrap();
@@ -1380,8 +1378,8 @@ fn pull_updates_non_checked_out_branch_via_fetch() {
 
     let before = git_rev_parse(&work_path, "develop");
 
-    // Run git-sync — should update develop via fetch refspec
-    Command::cargo_bin("git-sync")
+    // Run git-wipe — should update develop via fetch refspec
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y"])
         .current_dir(&work_path)
@@ -1404,8 +1402,8 @@ fn pull_dry_run_does_not_update() {
 
     let before = git_rev_parse(&work_path, "HEAD");
 
-    // Run git-sync with --dry-run
-    Command::cargo_bin("git-sync")
+    // Run git-wipe with --dry-run
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "-n"])
         .current_dir(&work_path)
@@ -1423,7 +1421,7 @@ fn pull_dry_run_does_not_update() {
 fn exits_with_error_when_not_in_a_git_repo() {
     let dir = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .current_dir(dir.path())
         .assert()
@@ -1436,7 +1434,7 @@ fn exits_with_error_when_not_in_a_git_repo() {
 fn no_stack_trace_when_not_in_a_git_repo() {
     let dir = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .current_dir(dir.path())
         .assert()
@@ -1514,7 +1512,7 @@ fn branches_in(path: &std::path::Path) -> Vec<String> {
 fn gone_upstream_branch_is_reported_but_kept_by_default() {
     let (_dir, work_path) = init_repo_with_gone_upstream();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-pull", "--local-only"])
         .current_dir(&work_path)
@@ -1533,7 +1531,7 @@ fn gone_upstream_branch_is_reported_but_kept_by_default() {
 fn delete_gone_removes_branch_with_deleted_upstream() {
     let (_dir, work_path) = init_repo_with_gone_upstream();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-pull", "--local-only", "--delete-gone"])
         .current_dir(&work_path)
@@ -1552,7 +1550,7 @@ fn delete_gone_removes_branch_with_deleted_upstream() {
 fn gone_upstream_detection_requires_a_fetch() {
     let (_dir, work_path) = init_repo_with_gone_upstream();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args([
             "-y",
@@ -1580,7 +1578,7 @@ fn gone_upstream_detection_runs_in_dry_run_without_fetch() {
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args([
             "-y",
@@ -1610,12 +1608,12 @@ fn ignored_branch_is_not_offered_for_deletion() {
     add_branches(&dir);
 
     StdCommand::new("git")
-        .args(["config", "--add", "sync.ignore", "feature/*"])
+        .args(["config", "--add", "wipe.ignore", "feature/*"])
         .current_dir(dir.path())
         .output()
         .unwrap();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["--dry-run", "--no-fetch"])
         .current_dir(dir.path())
@@ -1623,7 +1621,7 @@ fn ignored_branch_is_not_offered_for_deletion() {
         .success()
         .stderr(predicate::str::contains("feature/done").not());
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(dir.path())
@@ -1643,14 +1641,14 @@ fn per_branch_ignore_flag_survives_clean() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "ignore", "feature/done"])
         .current_dir(dir.path())
         .assert()
         .success();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(dir.path())
@@ -1665,7 +1663,7 @@ fn config_add_ignore_and_list() {
     let dir = init_repo();
     configure(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-ignore", "wip/*"])
         .current_dir(dir.path())
@@ -1673,7 +1671,7 @@ fn config_add_ignore_and_list() {
         .success()
         .stderr(predicate::str::contains("Added ignore pattern: wip/*"));
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -1682,7 +1680,7 @@ fn config_add_ignore_and_list() {
         .stderr(predicate::str::contains("ignore:"))
         .stderr(predicate::str::contains("wip/*"));
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "remove-ignore", "wip/*"])
         .current_dir(dir.path())
@@ -1690,7 +1688,7 @@ fn config_add_ignore_and_list() {
         .success()
         .stderr(predicate::str::contains("Removed ignore pattern: wip/*"));
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -1705,7 +1703,7 @@ fn config_ignore_and_unignore_individual_branch() {
     configure(&dir);
     add_branches(&dir);
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "ignore", "feature/done"])
         .current_dir(dir.path())
@@ -1713,7 +1711,7 @@ fn config_ignore_and_unignore_individual_branch() {
         .success()
         .stderr(predicate::str::contains("is now ignored"));
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -1721,7 +1719,7 @@ fn config_ignore_and_unignore_individual_branch() {
         .success()
         .stderr(predicate::str::contains("branch ignored: feature/done"));
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "unignore", "feature/done"])
         .current_dir(dir.path())
@@ -1729,7 +1727,7 @@ fn config_ignore_and_unignore_individual_branch() {
         .success()
         .stderr(predicate::str::contains("no longer ignored"));
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -1738,7 +1736,7 @@ fn config_ignore_and_unignore_individual_branch() {
         .stderr(predicate::str::contains("branch ignored: (none)"));
 
     // Once unignored, the merged branch is a deletion candidate again.
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["-y", "--no-fetch"])
         .current_dir(dir.path())
@@ -1753,7 +1751,7 @@ fn config_remove_ignore_keeps_the_other_patterns() {
     configure(&dir);
 
     for pattern in ["wip/*", "scratch", "tmp/*"] {
-        Command::cargo_bin("git-sync")
+        Command::cargo_bin("git-wipe")
             .unwrap()
             .args(["config", "add-ignore", pattern])
             .current_dir(dir.path())
@@ -1761,7 +1759,7 @@ fn config_remove_ignore_keeps_the_other_patterns() {
             .success();
     }
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "remove-ignore", "scratch"])
         .current_dir(dir.path())
@@ -1769,7 +1767,7 @@ fn config_remove_ignore_keeps_the_other_patterns() {
         .success();
 
     let output = StdCommand::new("git")
-        .args(["config", "--get-all", "sync.ignore"])
+        .args(["config", "--get-all", "wipe.ignore"])
         .current_dir(dir.path())
         .output()
         .unwrap();
@@ -1789,14 +1787,14 @@ fn config_list_renders_empty_sections_as_none() {
     let dir = init_repo();
 
     // A config section that exists but holds no protected pattern.
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "add-ignore", "wip/*"])
         .current_dir(dir.path())
         .assert()
         .success();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["config", "list"])
         .current_dir(dir.path())
@@ -1815,7 +1813,7 @@ fn json_output(dir: &TempDir, args: &[&str]) -> serde_json::Value {
 }
 
 fn json_output_at(path: &std::path::Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::cargo_bin("git-sync")
+    let output = Command::cargo_bin("git-wipe")
         .unwrap()
         .args(args)
         .current_dir(path)
@@ -1950,7 +1948,7 @@ fn json_implies_yes_without_prompting() {
     add_branches(&dir);
 
     // No `-y`: the run must still complete non-interactively.
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["--json", "--no-fetch"])
         .current_dir(dir.path())
@@ -1966,7 +1964,7 @@ fn json_keeps_stdout_free_of_human_output() {
     configure(&dir);
     add_branches(&dir);
 
-    let output = Command::cargo_bin("git-sync")
+    let output = Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["--json", "--dry-run", "--no-fetch"])
         .current_dir(dir.path())
@@ -2010,7 +2008,7 @@ fn json_reports_a_young_worktree_as_too_young() {
 fn json_reports_fatal_error_outside_a_repository() {
     let dir = tempfile::tempdir().unwrap();
 
-    let output = Command::cargo_bin("git-sync")
+    let output = Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["--json", "--no-fetch"])
         .current_dir(dir.path())
@@ -2033,9 +2031,9 @@ fn json_reports_fatal_error_outside_a_repository() {
 #[test]
 fn json_requires_an_existing_configuration() {
     let dir = init_repo();
-    // No `[sync]` section: the wizard cannot run without a human.
+    // No `[wipe]` section: the wizard cannot run without a human.
 
-    let output = Command::cargo_bin("git-sync")
+    let output = Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["--json", "--no-fetch"])
         .current_dir(dir.path())
@@ -2085,9 +2083,9 @@ fn config_list_json_reports_unconfigured_repository() {
 
 // ── Status subcommand ────────────────────────────────────────────────
 
-/// Run `git sync status` (or an alias) and return its stdout.
+/// Run `git wipe status` (or an alias) and return its stdout.
 fn status_stdout(path: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::cargo_bin("git-sync")
+    let output = Command::cargo_bin("git-wipe")
         .unwrap()
         .args(args)
         .current_dir(path)
@@ -2171,7 +2169,7 @@ fn status_works_without_configuration() {
     let dir = init_repo();
     add_branches(&dir);
 
-    let assertion = Command::cargo_bin("git-sync")
+    let assertion = Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["status", "--no-color"])
         .current_dir(dir.path())
@@ -2359,7 +2357,7 @@ fn status_orders_oldest_first() {
 fn status_help_documents_its_flags() {
     let dir = init_repo();
 
-    Command::cargo_bin("git-sync")
+    Command::cargo_bin("git-wipe")
         .unwrap()
         .args(["status", "--help"])
         .current_dir(dir.path())

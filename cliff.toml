@@ -12,15 +12,25 @@
 
 [remote.github]
 owner = "noirbizarre"
-repo = "git-synchronizer"
+repo = "git-wipe"
 
 [changelog]
+# The rename notice lives here rather than being hand-written into
+# CHANGELOG.md: git-cliff regenerates that file on every release and would
+# drop anything not in this header.
 header = """
 # Changelog
 
 All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+> **This project was renamed.** It was `git-synchronizer`, providing a
+> `git sync` command configured under `[sync]`; it is now `git-wipe`, providing
+> `git wipe` configured under `[wipe]`. Entries below the rename refer to the
+> old names, and their links resolve through GitHub's repository redirect.
+> There is no automatic configuration migration — see the README for how to
+> move an existing `[sync]` section across.
 """
 body = """
 {%- macro remote_url() -%}
@@ -81,7 +91,7 @@ postprocessors = [
   # is what prek's end-of-file-fixer wants.
   { pattern = '\n+\z', replace = "\n" },
   # Resolve the placeholder left by the issue-linking preprocessor below.
-  { pattern = "<REPO>", replace = "https://github.com/noirbizarre/git-synchronizer" },
+  { pattern = "<REPO>", replace = "https://github.com/noirbizarre/git-wipe" },
 ]
 
 

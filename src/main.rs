@@ -1,4 +1,4 @@
-//! `git-sync`: synchronize local branches and worktrees with their remotes.
+//! `git-wipe`: wipe out merged local branches and worktrees.
 //!
 //! This is a binary crate, so nothing is exported to downstream users and
 //! `pub` therefore means "visible to the other modules" — it carries no
@@ -163,7 +163,7 @@ fn short_cause(err: &anyhow::Error) -> String {
         .unwrap_or_else(|| err.to_string())
 }
 
-/// Whether a `[sync]` key is stored as repeated git config entries.
+/// Whether a `[wipe]` key is stored as repeated git config entries.
 ///
 /// Multi-valued keys cannot be written with a plain `git config <key> <value>`
 /// once they hold more than one entry.
@@ -184,7 +184,7 @@ fn handle_config_command(
             }
             match config::Config::try_load(git)? {
                 Some(cfg) => {
-                    ui.heading("Current configuration [sync]:");
+                    ui.heading("Current configuration [wipe]:");
                     ui.blank();
 
                     ui.field(
@@ -265,7 +265,7 @@ fn handle_config_command(
                     );
                 }
                 None => {
-                    ui.muted("No configuration found. Run `git sync` to start the setup wizard.");
+                    ui.muted("No configuration found. Run `git wipe` to start the setup wizard.");
                 }
             }
             Ok(())
@@ -401,7 +401,7 @@ fn list_config_json(git: &git::Git) -> Result<()> {
     report::print_json(&report)
 }
 
-/// `git sync status`: a read-only inventory, never a setup wizard.
+/// `git wipe status`: a read-only inventory, never a setup wizard.
 ///
 /// Uses [`config::Config::try_load`] rather than [`config::load_or_setup`]: an
 /// unconfigured repository falls back to [`config::Config::default`] (`main`
@@ -415,7 +415,7 @@ fn handle_status(git: &git::Git, ui: &ui::Ui, cli: &Cli, merged_only: bool) -> R
         effort: resolve_effort(cli, &cfg)?,
         jobs: resolve_jobs(cli, &cfg),
         // Deliberately not `resolve_min_age`: here it is a display filter, and
-        // a `sync.minage` configured as a removal safety net must not silently
+        // a `wipe.minage` configured as a removal safety net must not silently
         // truncate the listing.
         min_age: cli.min_age.unwrap_or_default(),
         merged_only,
@@ -438,8 +438,8 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
     let cfg = if cli.json {
         config::Config::try_load(git)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "git-sync is not configured in this repository. \
-                 Run `git sync` once interactively to complete the setup wizard."
+                "git-wipe is not configured in this repository. \
+                 Run `git wipe` once interactively to complete the setup wizard."
             )
         })?
     } else {
@@ -533,9 +533,10 @@ fn resolve_worktrunk(git: &git::Git, ui: &ui::Ui, cli: &Cli, cfg: &config::Confi
     if let Some(val) = cfg.worktrunk {
         if val && !git::worktrunk_available() {
             anyhow::bail!(
-                "sync.worktrunk is enabled but worktrunk (wt) is not found on $PATH. \
+                "{}.worktrunk is enabled but worktrunk (wt) is not found on $PATH. \
                  Install it from https://worktrunk.dev or run: \
-                 git sync config set worktrunk false"
+                 git wipe config set worktrunk false",
+                config::SECTION
             );
         }
         return Ok(val);
@@ -578,8 +579,8 @@ mod tests {
             ..config::Config::default()
         };
 
-        let cli_unset = Cli::parse_from(["git-sync"]);
-        let cli_30m = Cli::parse_from(["git-sync", "--min-age", "30m"]);
+        let cli_unset = Cli::parse_from(["git-wipe"]);
+        let cli_30m = Cli::parse_from(["git-wipe", "--min-age", "30m"]);
 
         // Nothing set anywhere: no guard.
         assert!(resolve_min_age(&cli_unset, &cfg_default).is_zero());
@@ -597,8 +598,8 @@ mod tests {
             ..config::Config::default()
         };
 
-        let cli_unset = Cli::parse_from(["git-sync"]);
-        let cli_quick = Cli::parse_from(["git-sync", "--effort", "1"]);
+        let cli_unset = Cli::parse_from(["git-wipe"]);
+        let cli_quick = Cli::parse_from(["git-wipe", "--effort", "1"]);
 
         // Nothing set anywhere: the built-in default.
         assert_eq!(
@@ -626,9 +627,9 @@ mod tests {
             ..config::Config::default()
         };
 
-        let cli_unset = Cli::parse_from(["git-sync"]);
-        let cli_two = Cli::parse_from(["git-sync", "--jobs", "2"]);
-        let cli_verbose_two = Cli::parse_from(["git-sync", "--verbose", "-j", "2"]);
+        let cli_unset = Cli::parse_from(["git-wipe"]);
+        let cli_two = Cli::parse_from(["git-wipe", "--jobs", "2"]);
+        let cli_verbose_two = Cli::parse_from(["git-wipe", "--verbose", "-j", "2"]);
 
         // Nothing set anywhere: as many workers as the machine has cores.
         let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
@@ -742,7 +743,7 @@ mod tests {
     #[test]
     fn handle_clean_refuses_to_run_json_without_a_configuration() -> Result<()> {
         let (_dir, git) = test_helpers::init_repo()?;
-        let cli = Cli::parse_from(["git-sync", "--json", "--no-fetch"]);
+        let cli = Cli::parse_from(["git-wipe", "--json", "--no-fetch"]);
 
         let err = handle_clean(&git, &ui::Ui::quiet(), &cli)
             .expect_err("an unconfigured repository must not start the wizard");
@@ -761,7 +762,7 @@ mod tests {
             ..config::Config::default()
         }
         .save(&git)?;
-        let cli = Cli::parse_from(["git-sync", "--json", "--no-fetch", "--no-pull", "--dry-run"]);
+        let cli = Cli::parse_from(["git-wipe", "--json", "--no-fetch", "--no-pull", "--dry-run"]);
 
         handle_clean(&git, &ui::Ui::quiet(), &cli)
     }
@@ -771,20 +772,20 @@ mod tests {
         // The regression test for the acceptance criterion: no configuration,
         // and still no wizard. A prompt would fail on the quiet UI.
         let (_dir, git) = test_helpers::init_repo_with_branches()?;
-        let cli = Cli::parse_from(["git-sync", "status"]);
+        let cli = Cli::parse_from(["git-wipe", "status"]);
         handle_status(&git, &ui::Ui::quiet(), &cli, false)
     }
 
     #[test]
     fn handle_status_prints_a_json_document() -> Result<()> {
         let (_dir, git) = test_helpers::init_repo_with_branches()?;
-        let cli = Cli::parse_from(["git-sync", "status", "--json"]);
+        let cli = Cli::parse_from(["git-wipe", "status", "--json"]);
         handle_status(&git, &ui::Ui::quiet(), &cli, false)
     }
 
     #[test]
     fn handle_status_does_not_inherit_the_configured_min_age() -> Result<()> {
-        // `sync.minage` guards worktree removal; it must not silently truncate
+        // `wipe.minage` guards worktree removal; it must not silently truncate
         // an inventory the user asked no filter for.
         let (_dir, git) = test_helpers::init_repo_with_branches()?;
         config::Config {
@@ -794,7 +795,7 @@ mod tests {
         }
         .save(&git)?;
 
-        let cli = Cli::parse_from(["git-sync", "status", "--json"]);
+        let cli = Cli::parse_from(["git-wipe", "status", "--json"]);
         let cfg = config::Config::try_load(&git)?.expect("just saved");
         let filter = branches::Filter::load(&git, &cfg)?;
         let opts = status::StatusOptions {
@@ -803,7 +804,7 @@ mod tests {
             min_age: cli.min_age.unwrap_or_default(),
             merged_only: false,
         };
-        assert!(opts.min_age.is_zero(), "sync.minage must not leak in");
+        assert!(opts.min_age.is_zero(), "wipe.minage must not leak in");
 
         let scan = status::scan(&git, &filter, &ui::Ui::quiet(), opts)?;
         assert!(!status::filter_rows(scan.rows, opts).is_empty());

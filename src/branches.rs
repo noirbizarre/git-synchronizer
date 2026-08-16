@@ -28,17 +28,17 @@ fn build_matcher(patterns: &[String]) -> Result<GlobSet> {
 /// Branch classification: which branches are off-limits and why.
 ///
 /// Two independent mechanisms feed each category: global glob patterns from the
-/// `[sync]` config section, and per-branch git config flags
-/// (`branch.<name>.sync-protected` / `branch.<name>.sync-ignored`).
+/// `[wipe]` config section, and per-branch git config flags
+/// (`branch.<name>.wipe-protected` / `branch.<name>.wipe-ignored`).
 #[derive(Debug)]
 pub struct Filter {
-    /// Glob patterns from `sync.protected`.
+    /// Glob patterns from `wipe.protected`.
     protected: GlobSet,
-    /// Branches flagged with `branch.<name>.sync-protected`.
+    /// Branches flagged with `branch.<name>.wipe-protected`.
     protected_branches: HashSet<String>,
-    /// Glob patterns from `sync.ignore`.
+    /// Glob patterns from `wipe.ignore`.
     ignored: GlobSet,
-    /// Branches flagged with `branch.<name>.sync-ignored`.
+    /// Branches flagged with `branch.<name>.wipe-ignored`.
     ignored_branches: HashSet<String>,
 }
 
@@ -53,7 +53,7 @@ impl Filter {
         })
     }
 
-    /// Whether git-sync should pretend the branch does not exist.
+    /// Whether git-wipe should pretend the branch does not exist.
     pub fn is_ignored(&self, branch: &str) -> bool {
         self.ignored.is_match(branch) || self.ignored_branches.contains(branch)
     }
@@ -76,7 +76,7 @@ impl Filter {
 ///
 /// Literal patterns (e.g. "main") are kept as-is if they exist.
 /// Glob patterns (e.g. "release/*") are expanded to matching branches.
-/// Branches marked with per-branch `sync-protected` config are also included.
+/// Branches marked with per-branch `wipe-protected` config are also included.
 /// Ignored branches are never returned.
 pub fn resolve_merge_targets(git: &Git, filter: &Filter) -> Result<Vec<String>> {
     let all_branches = git.local_branches()?;
@@ -108,12 +108,12 @@ pub enum Effort {
 }
 
 impl Effort {
-    /// The numeric level, as accepted by `--effort` and `sync.effort`.
+    /// The numeric level, as accepted by `--effort` and `wipe.effort`.
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Human-readable name, used in `git sync config list`.
+    /// Human-readable name, used in `git wipe config list`.
     pub fn label(self) -> &'static str {
         match self {
             Self::Quick => "quick",
@@ -154,7 +154,7 @@ impl fmt::Display for Effort {
     }
 }
 
-/// Serialized as its numeric level, matching `--effort` and `sync.effort`.
+/// Serialized as its numeric level, matching `--effort` and `wipe.effort`.
 impl serde::Serialize for Effort {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u8(self.as_u8())

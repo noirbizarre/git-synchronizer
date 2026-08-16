@@ -1,6 +1,6 @@
 name: 🚢 Ship
 
-# gh-ship releases git-synchronizer. This workflow does none of the release
+# gh-ship releases git-wipe. This workflow does none of the release
 # work itself; it drives the two halves of the lifecycle:
 #
 #   push to main          -> `gh ship prepare` -> opens or updates the Release PR

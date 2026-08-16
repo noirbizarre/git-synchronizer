@@ -770,9 +770,9 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             //
             // Branches whose worktree was removed via worktrunk are normally
             // deleted by `wt remove` itself. However, `wt`'s merge check is
-            // narrower than git-sync's (it only considers the local default
+            // narrower than git-wipe's (it only considers the local default
             // branch / its upstream and caps its walk for speed), so it may
-            // leave behind a branch git-sync considers merged. For such
+            // leave behind a branch git-wipe considers merged. For such
             // branches we verify the ref is actually gone and delete it
             // ourselves if it survived. Branches whose worktree the user chose
             // not to force-remove are skipped.
@@ -793,7 +793,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     // `wt remove` was responsible for deleting this branch.
                     // Confirm it actually did; if the branch survives, delete
                     // it ourselves (branch_delete uses -D, and the branch is
-                    // already proven merged by git-sync).
+                    // already proven merged by git-wipe).
                     match git.branch_exists(branch) {
                         Ok(false) => {
                             total_deleted += 1;
@@ -980,7 +980,7 @@ fn effective_remotes(git: &Git, config: &Config) -> Result<Vec<String>> {
     }
 }
 
-/// Why git-sync must leave a worktree alone.
+/// Why git-wipe must leave a worktree alone.
 ///
 /// Guarded worktrees are reported and then excluded from every subsequent
 /// step: the multiselect, the dirty/unmerged scan and the removal loops. The
@@ -2237,7 +2237,7 @@ mod tests {
 
     #[test]
     fn run_yes_without_force_skips_dirty_worktree() -> Result<()> {
-        // --yes accepts the deletions git-sync proposed, but it must not
+        // --yes accepts the deletions git-wipe proposed, but it must not
         // silently destroy uncommitted work: without --force the dirty
         // worktree and its branch are left untouched and reported as skipped.
         let (dir, _git) = crate::test_helpers::init_repo()?;
@@ -2548,10 +2548,10 @@ mod tests {
     fn run_worktrunk_deletes_branch_wt_leaves_behind() -> Result<()> {
         // Regression test: when worktrunk removes a worktree but leaves the
         // branch behind (because `wt`'s merge check is narrower than
-        // git-sync's), git-sync must delete the surviving branch itself.
+        // git-wipe's), git-wipe must delete the surviving branch itself.
         //
         // Reproduced by merging the feature into a non-default protected
-        // target ("develop"). git-sync detects it as merged (develop is
+        // target ("develop"). git-wipe detects it as merged (develop is
         // protected), but `wt remove` checks only the default branch ("main")
         // and so refuses to delete the branch without `-D`.
         //
@@ -2621,7 +2621,7 @@ mod tests {
         run(&git, &config, &ui, &opts)?;
 
         // The worktree registration is gone: `wt` removed the worktree and
-        // git-sync pruned any stale metadata. (The directory itself may linger
+        // git-wipe pruned any stale metadata. (The directory itself may linger
         // briefly depending on `wt`'s platform-specific cleanup — e.g. its
         // trash/background rm — so assert on git's view rather than the path.)
         let still_registered = git
@@ -2632,10 +2632,10 @@ mod tests {
             !still_registered,
             "worktree should no longer be registered after worktrunk removal"
         );
-        // The branch `wt remove` left behind must be deleted by git-sync.
+        // The branch `wt remove` left behind must be deleted by git-wipe.
         assert!(
             !git.branch_exists("feature/wt-leftover")?,
-            "branch left behind by `wt remove` should be deleted by git-sync"
+            "branch left behind by `wt remove` should be deleted by git-wipe"
         );
         Ok(())
     }

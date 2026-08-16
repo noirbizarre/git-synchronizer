@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **This project was renamed.** It was `git-synchronizer`, providing a
+> `git sync` command configured under `[sync]`; it is now `git-wipe`, providing
+> `git wipe` configured under `[wipe]`. Entries below the rename refer to the
+> old names, and their links resolve through GitHub's repository redirect.
+> There is no automatic configuration migration — see the README for how to
+> move an existing `[sync]` section across.
+
 ## [v0.3.0](https://github.com/noirbizarre/git-synchronizer/compare/v0.2.0..v0.3.0) - 2026-08-15
 
 ### 💫 Features

@@ -1,4 +1,4 @@
-//! Read-only inventory of local branches and worktrees (`git sync status`).
+//! Read-only inventory of local branches and worktrees (`git wipe status`).
 //!
 //! Unlike [`crate::cleaner`], this module never fetches, never prompts and
 //! never mutates: it observes the repository as it is on disk and renders one
@@ -9,7 +9,7 @@
 //! - A detached-HEAD worktree *is* listed, as an orphan.
 //!   [`crate::worktrees::find_orphan_worktrees`] skips it because it cannot be
 //!   removed safely; an inventory that hid a real checkout would simply lie.
-//! - An ignored branch is *not* listed. `sync.ignore` means "pretend this does
+//! - An ignored branch is *not* listed. `wipe.ignore` means "pretend this does
 //!   not exist", and being consistent with every other pass beats completeness.
 
 use std::cmp::Ordering;
@@ -272,7 +272,7 @@ pub fn filter_rows(rows: Vec<Row>, opts: StatusOptions) -> Vec<Row> {
         .filter(|row| !opts.merged_only || row.flags.merged)
         .filter(|row| {
             // `--min-age` filters here rather than guarding, as it does on a
-            // sync run. An entry whose age is unknown is kept: silently hiding
+            // wipe run. An entry whose age is unknown is kept: silently hiding
             // something we merely failed to date is the worst outcome for an
             // inventory.
             opts.min_age.is_zero() || row.age.is_none_or(|age| age >= opts.min_age.as_duration())
@@ -807,10 +807,10 @@ mod tests {
             .into_iter()
             .find(|b| b != &git.current_branch().unwrap_or_default())
             .expect("the fixture has more than one branch");
-        git.config_add("sync.ignore", &ignored)?;
+        git.config_add("wipe.ignore", &ignored)?;
 
         // Reload so the filter picks up the pattern just written.
-        let cfg = Config::try_load(&git)?.expect("sync.ignore makes the repo configured");
+        let cfg = Config::try_load(&git)?.expect("wipe.ignore makes the repo configured");
         let filter = Filter::load(&git, &cfg)?;
         let scan = scan(&git, &filter, &Ui::quiet(), opts())?;
         assert!(!names(&scan.rows).contains(&ignored.as_str()));

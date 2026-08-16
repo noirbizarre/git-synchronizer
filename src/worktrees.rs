@@ -14,7 +14,7 @@ use crate::git::{Git, Worktree};
 
 /// Find worktrees whose branch no longer exists locally.
 ///
-/// Worktrees holding an ignored branch are skipped: git-sync must not touch
+/// Worktrees holding an ignored branch are skipped: git-wipe must not touch
 /// them even if their branch ref has disappeared.
 pub fn find_orphan_worktrees(git: &Git, filter: &Filter) -> Result<Vec<Worktree>> {
     let worktrees = git.worktree_list()?;

@@ -96,8 +96,8 @@ jobs:
       - run: echo "RUSTFLAGS=${RUSTFLAGS} -C target-feature=+crt-static" >> "${GITHUB_ENV}"
         if: endsWith(matrix.target, 'windows-msvc')
 
-      # Ships the man pages alongside the binary: `git sync --help` is rewritten
-      # by git into `git help sync`, which runs `man git-sync` and fails when no
+      # Ships the man pages alongside the binary: `git wipe --help` is rewritten
+      # by git into `git help wipe`, which runs `man git-wipe` and fails when no
       # page is installed. Built for the host rather than ${{ matrix.target }} —
       # the output is plain text, identical for every target, and a host build
       # avoids needing to run a cross-compiled build script.
@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           out=$(cargo build --message-format=json 2>/dev/null \
-            | jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("git-synchronizer")) | .out_dir' \
+            | jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("git-wipe")) | .out_dir' \
             | tail -n 1)
           test -n "$out"
           mkdir -p dist/man dist/completions
@@ -115,14 +115,14 @@ jobs:
 
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: git-sync
+          bin: git-wipe
           target: ${{ matrix.target }}
           # Must be a *fully-formed* tag ref: the action bails on anything not
           # starting with `refs/tags/`. It is passed explicitly because this
           # workflow is dispatched, so GITHUB_REF names a branch, not the tag.
           ref: refs/tags/${{ inputs.tag }}
           # LICENSE ships too: MIT is not one of the common licenses Arch keeps
-          # in /usr/share/licenses/common, so `git-synchronizer-bin` has to
+          # in /usr/share/licenses/common, so `git-wipe-bin` has to
           # install the file itself and can only take it from here.
           include: dist/man,dist/completions,LICENSE,README.md
           tar: all
@@ -131,7 +131,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # The source tarball is what distribution packagers build from — the
-  # `git-synchronizer` and `git-synchronizer-git` AUR packages consume it. It is
+  # `git-wipe` and `git-wipe-git` AUR packages consume it. It is
   # published here rather than relying on GitHub's auto-generated tag archive,
   # whose bytes (and therefore its checksum) are not guaranteed to be stable
   # over time, which a PKGBUILD's `sha256sums` cannot tolerate.
@@ -163,17 +163,17 @@ jobs:
           version="${TAG#v}"
           mkdir -p dist
           git archive --format=tar.gz \
-            --prefix="git-synchronizer-${version}/" \
-            -o "dist/git-synchronizer-${version}.tar.gz" "$TAG"
+            --prefix="git-wipe-${version}/" \
+            -o "dist/git-wipe-${version}.tar.gz" "$TAG"
           # Cargo.lock is tracked, so the archive supports `cargo build --locked`.
           # The listing goes through a file rather than a pipe into `grep -q`:
           # grep exits on the first match, tar takes SIGPIPE, and `pipefail`
           # turns that into a failure of the very check that just passed.
-          tar -tzf "dist/git-synchronizer-${version}.tar.gz" > "$RUNNER_TEMP/files"
-          grep -qx "git-synchronizer-${version}/Cargo.lock" "$RUNNER_TEMP/files"
+          tar -tzf "dist/git-wipe-${version}.tar.gz" > "$RUNNER_TEMP/files"
+          grep -qx "git-wipe-${version}/Cargo.lock" "$RUNNER_TEMP/files"
           cd dist
-          sha256sum "git-synchronizer-${version}.tar.gz" \
-            > "git-synchronizer-${version}.tar.gz.sha256"
+          sha256sum "git-wipe-${version}.tar.gz" \
+            > "git-wipe-${version}.tar.gz.sha256"
 
       # The release exists as a DRAFT: gh-ship created it before dispatching
       # this workflow and undrafts it once we succeed. Upload, never create.

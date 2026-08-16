@@ -779,8 +779,8 @@ impl Git {
     /// Return true if a local branch ref exists.
     ///
     /// Used to verify whether `wt remove` actually deleted the associated
-    /// branch; `wt`'s own merge check is narrower than git-sync's, so it may
-    /// leave behind a branch git-sync considers merged.
+    /// branch; `wt`'s own merge check is narrower than git-wipe's, so it may
+    /// leave behind a branch git-wipe considers merged.
     pub fn branch_exists(&self, branch: &str) -> Result<bool> {
         self.run_exit_code(&[
             "show-ref",
@@ -893,8 +893,8 @@ impl Git {
     /// available) needs no separate entry point.
     ///
     /// Uses `--foreground` to wait for hooks to complete and `--yes` to skip
-    /// wt's approval prompts (git-sync already confirmed with the user).
-    /// `wt` deletes the associated branch itself; git-sync skips its own
+    /// wt's approval prompts (git-wipe already confirmed with the user).
+    /// `wt` deletes the associated branch itself; git-wipe skips its own
     /// `git branch -D` for branches removed this way.
     ///
     /// When `force` is true, passes `--force` so removal succeeds despite
@@ -1047,25 +1047,25 @@ impl Git {
     }
 
     /// Return the names of branches that have
-    /// `branch.<name>.sync-protected = true` in git config.
+    /// `branch.<name>.wipe-protected = true` in git config.
     pub fn branch_protected_list(&self) -> Result<Vec<String>> {
-        self.branch_flag_list("sync-protected")
+        self.branch_flag_list("wipe-protected")
     }
 
     /// Set or unset per-branch protection for a given branch.
     pub fn set_branch_protected(&self, branch: &str, protected: bool) -> Result<()> {
-        self.set_branch_flag(branch, "sync-protected", protected)
+        self.set_branch_flag(branch, "wipe-protected", protected)
     }
 
     /// Return the names of branches that have
-    /// `branch.<name>.sync-ignored = true` in git config.
+    /// `branch.<name>.wipe-ignored = true` in git config.
     pub fn branch_ignored_list(&self) -> Result<Vec<String>> {
-        self.branch_flag_list("sync-ignored")
+        self.branch_flag_list("wipe-ignored")
     }
 
     /// Set or unset the per-branch ignore flag for a given branch.
     pub fn set_branch_ignored(&self, branch: &str, ignored: bool) -> Result<()> {
-        self.set_branch_flag(branch, "sync-ignored", ignored)
+        self.set_branch_flag(branch, "wipe-ignored", ignored)
     }
 }
 
@@ -1248,8 +1248,8 @@ mod tests {
     fn config_readers_treat_an_unset_key_as_empty() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
-        assert_eq!(git.config_get("sync.never-set")?, None);
-        assert_eq!(git.config_get_all("sync.never-set")?, Vec::<String>::new());
+        assert_eq!(git.config_get("wipe.never-set")?, None);
+        assert_eq!(git.config_get_all("wipe.never-set")?, Vec::<String>::new());
         assert!(!git.config_section_exists("never-set")?);
         Ok(())
     }
@@ -1257,7 +1257,7 @@ mod tests {
     #[test]
     fn config_remove_value_preserves_the_order_of_the_survivors() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
-        let key = "sync.protected";
+        let key = "wipe.protected";
 
         for value in ["main", "develop", "release", "staging"] {
             git.config_add(key, value)?;
@@ -1276,7 +1276,7 @@ mod tests {
     #[test]
     fn config_remove_value_is_a_noop_for_an_absent_value() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
-        let key = "sync.protected";
+        let key = "wipe.protected";
 
         git.config_add(key, "main")?;
         git.config_remove_value(key, "never-added")?;
@@ -1668,12 +1668,12 @@ locked work in progress, do not remove
         assert!(merged.contains(&"feature/test".to_string()));
 
         // Config operations
-        git.config_add("sync.protected", "main")?;
-        git.config_add("sync.protected", "release/*")?;
-        let protected = git.config_get_all("sync.protected")?;
+        git.config_add("wipe.protected", "main")?;
+        git.config_add("wipe.protected", "release/*")?;
+        let protected = git.config_get_all("wipe.protected")?;
         assert_eq!(protected, vec!["main", "release/*"]);
 
-        assert!(git.config_section_exists("sync")?);
+        assert!(git.config_section_exists("wipe")?);
         assert!(!git.config_section_exists("nonexistent")?);
 
         Ok(())
@@ -2216,11 +2216,11 @@ locked work in progress, do not remove
 
         // Mark two branches as protected via per-branch config
         Command::new("git")
-            .args(["config", "branch.develop.sync-protected", "true"])
+            .args(["config", "branch.develop.wipe-protected", "true"])
             .current_dir(path)
             .output()?;
         Command::new("git")
-            .args(["config", "branch.staging.sync-protected", "true"])
+            .args(["config", "branch.staging.wipe-protected", "true"])
             .current_dir(path)
             .output()?;
 
@@ -2259,11 +2259,11 @@ locked work in progress, do not remove
 
         // Write config from the linked worktree
         let git_wt = Git::with_workdir(false, &wt_path);
-        git_wt.config_set("sync.worktrunk", "true")?;
+        git_wt.config_set("wipe.worktrunk", "true")?;
 
         // Read from the main worktree — must see the value
         let git_main = Git::with_workdir(false, &main_path);
-        let val = git_main.config_get("sync.worktrunk")?;
+        let val = git_main.config_get("wipe.worktrunk")?;
         assert_eq!(val.as_deref(), Some("true"));
 
         Ok(())
@@ -2275,12 +2275,12 @@ locked work in progress, do not remove
 
         // Add config values from the linked worktree
         let git_wt = Git::with_workdir(false, &wt_path);
-        git_wt.config_add("sync.protected", "main")?;
-        git_wt.config_add("sync.protected", "release/*")?;
+        git_wt.config_add("wipe.protected", "main")?;
+        git_wt.config_add("wipe.protected", "release/*")?;
 
         // Read from the main worktree
         let git_main = Git::with_workdir(false, &main_path);
-        let protected = git_main.config_get_all("sync.protected")?;
+        let protected = git_main.config_get_all("wipe.protected")?;
         assert_eq!(protected, vec!["main", "release/*"]);
 
         Ok(())
@@ -2292,15 +2292,15 @@ locked work in progress, do not remove
 
         // Set some values from the main worktree
         let git_main = Git::with_workdir(false, &main_path);
-        git_main.config_add("sync.protected", "main")?;
-        git_main.config_add("sync.protected", "develop")?;
+        git_main.config_add("wipe.protected", "main")?;
+        git_main.config_add("wipe.protected", "develop")?;
 
         // Unset from the linked worktree
         let git_wt = Git::with_workdir(false, &wt_path);
-        git_wt.config_unset_all("sync.protected")?;
+        git_wt.config_unset_all("wipe.protected")?;
 
         // Verify from the main worktree
-        let protected = git_main.config_get_all("sync.protected")?;
+        let protected = git_main.config_get_all("wipe.protected")?;
         assert!(protected.is_empty());
 
         Ok(())
@@ -2333,12 +2333,12 @@ locked work in progress, do not remove
 
         // Write from linked worktree
         let git_wt = Git::with_workdir(false, &wt_path);
-        git_wt.config_add("sync.protected", "main")?;
+        git_wt.config_add("wipe.protected", "main")?;
 
         // Section should be visible from both worktrees
-        assert!(git_wt.config_section_exists("sync")?);
+        assert!(git_wt.config_section_exists("wipe")?);
         let git_main = Git::with_workdir(false, &main_path);
-        assert!(git_main.config_section_exists("sync")?);
+        assert!(git_main.config_section_exists("wipe")?);
 
         Ok(())
     }

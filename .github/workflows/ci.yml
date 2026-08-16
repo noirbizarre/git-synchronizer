@@ -55,7 +55,7 @@ jobs:
         with:
           files: lcov.info
 
-  # gh-ship releases git-synchronizer. Its configuration and the workflows it
+  # gh-ship releases git-wipe. Its configuration and the workflows it
   # names must satisfy the contract gh-ship enforces, or the release breaks at
   # the worst possible moment. This catches that on a pull request instead.
   ship:
