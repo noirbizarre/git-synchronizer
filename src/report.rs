@@ -306,6 +306,94 @@ pub fn path_string(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// What a [`StatusEntry`] describes.
+///
+/// Distinct from [`WorktreeKind`], which has no case for a branch that is not
+/// checked out anywhere — a row `git sync status` must be able to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusKind {
+    /// A worktree holding a local branch.
+    Worktree,
+    /// A worktree whose branch no longer exists, or which is detached.
+    Orphan,
+    /// A local branch with no worktree checked out.
+    Branch,
+}
+
+/// A single observation about a [`StatusEntry`]. Several may apply at once.
+///
+/// Deliberately not [`ItemStatus`]: those variants are *outcomes*
+/// (`deleted`, `removed`, `dry_run`), and `git sync status` never acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusFlag {
+    /// Detected as merged into a protected branch.
+    Merged,
+    /// Configured upstream no longer exists.
+    Gone,
+    /// Working tree has no uncommitted change.
+    Clean,
+    /// Working tree has uncommitted changes.
+    Dirty,
+    /// Holds commits absent from every merge target.
+    Unmerged,
+    /// Worktree is locked.
+    Locked,
+    /// Worktree has no live branch.
+    Orphan,
+}
+
+/// One branch or worktree in the [`StatusReport`] inventory.
+#[derive(Debug, Serialize)]
+pub struct StatusEntry {
+    pub kind: StatusKind,
+    /// Absent for a detached-HEAD worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Absolute worktree path; absent for a branch without a worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Age in seconds, or `null` when it could not be established.
+    ///
+    /// Serialized rather than skipped, so consumers can tell "unknown" from
+    /// "this tool version does not report an age".
+    pub age_seconds: Option<u64>,
+    /// The observations that apply, in the order the STATUS column renders them.
+    pub status: Vec<StatusFlag>,
+    /// Checked out in the worktree the command was run from.
+    pub current: bool,
+    /// Matched by a protected pattern, and therefore never a deletion candidate.
+    pub protected: bool,
+}
+
+/// Serializable view of `git sync status`.
+///
+/// A read-only document: it carries no action or outcome field, because
+/// `status` neither fetches nor mutates. `version` is [`Report::VERSION`] —
+/// both documents belong to the same versioned schema.
+#[derive(Debug, Serialize)]
+pub struct StatusReport {
+    pub version: u32,
+    pub status: Status,
+    pub entries: Vec<StatusEntry>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<ReportError>,
+}
+
+impl StatusReport {
+    /// Build a successful status document.
+    pub fn new(entries: Vec<StatusEntry>, warnings: Vec<String>) -> Self {
+        Self {
+            version: Report::VERSION,
+            status: Status::Success,
+            entries,
+            warnings,
+            errors: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -77,7 +77,9 @@ pub struct Cli {
     ///
     /// 3: adds patch-id, simulated merge and squash patch-id detection,
     /// the most thorough but noticeably slower.
-    #[arg(long, value_name = "LEVEL", value_parser = clap::value_parser!(u8).range(1..=3))]
+    ///
+    /// Global, so `status` classifies branches exactly like a sync run does.
+    #[arg(long, value_name = "LEVEL", global = true, value_parser = clap::value_parser!(u8).range(1..=3))]
     pub effort: Option<u8>,
 
     /// Skip worktrees created less than this long ago (default: 0s)
@@ -85,7 +87,10 @@ pub struct Cli {
     /// Accepts a single value and unit: 30s, 15m, 2h, 7d, 1w — or a bare 0 to
     /// disable the guard. Protects a worktree you just created from the
     /// default branch from being removed along with its "merged" branch.
-    #[arg(long, value_name = "DURATION")]
+    ///
+    /// On `status` this is a filter instead of a guard: only entries at least
+    /// this old are listed, and the configured `sync.minage` is not inherited.
+    #[arg(long, value_name = "DURATION", global = true)]
     pub min_age: Option<MinAge>,
 
     /// Number of git probes to run at once during analysis (default: CPU count)
@@ -96,7 +101,9 @@ pub struct Cli {
     ///
     /// Fetching, pulling, deleting branches and removing worktrees always run
     /// serially. `--verbose` forces 1 so the echoed commands stay in order.
-    #[arg(short = 'j', long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    ///
+    /// Global, so `status` can overlap its probes the same way.
+    #[arg(short = 'j', long, value_name = "N", global = true, value_parser = clap::value_parser!(u32).range(1..))]
     pub jobs: Option<u32>,
 
     /// Use worktrunk (wt) for worktree removal to trigger pre/post-remove hooks
@@ -116,6 +123,16 @@ pub struct Cli {
     /// (`git sync config list --json`).
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Disable ANSI colours and styling in all output
+    ///
+    /// Colour is disabled automatically already when the stream is not a
+    /// terminal, or when the standard `NO_COLOR` environment variable is set;
+    /// this flag forces it off regardless.
+    ///
+    /// Global so it can be given before or after a subcommand.
+    #[arg(long, global = true)]
+    pub no_color: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -137,6 +154,26 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+
+    /// Show a read-only inventory of local branches and worktrees
+    ///
+    /// One line per worktree and per branch without a worktree, oldest first,
+    /// with an age and a combined status. Nothing is fetched, nothing is
+    /// prompted and nothing is modified, so it is safe to run at any time —
+    /// including in a repository git-sync has never been configured in.
+    ///
+    /// Merge detection honours --effort and --jobs; --effort 1 is the fast
+    /// path. Because remotes are never fetched, `gone` reflects the
+    /// remote-tracking refs as they are on disk and may be stale.
+    ///
+    /// Ignored branches are not listed, since git-sync treats them as
+    /// non-existent everywhere else.
+    #[command(alias = "list")]
+    Status {
+        /// Only list branches detected as merged into a protected branch
+        #[arg(long)]
+        merged: bool,
     },
 }
 
@@ -370,6 +407,7 @@ mod tests {
                 ConfigAction::List => {} // expected
                 _ => panic!("Expected ConfigAction::List"),
             },
+            other => panic!("Expected Command::Config, got {other:?}"),
         }
 
         let cli = Cli::parse_from(["git-sync", "config", "set", "remote", "origin"]);
@@ -381,6 +419,7 @@ mod tests {
                 }
                 _ => panic!("Expected ConfigAction::Set"),
             },
+            other => panic!("Expected Command::Config, got {other:?}"),
         }
 
         let cli = Cli::parse_from(["git-sync", "config", "add-protected", "release/*"]);
@@ -391,6 +430,82 @@ mod tests {
                 }
                 _ => panic!("Expected ConfigAction::AddProtected"),
             },
+            other => panic!("Expected Command::Config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_status_subcommand() {
+        let cli = Cli::parse_from(["git-sync", "status"]);
+        match cli.command.unwrap() {
+            Command::Status { merged } => assert!(!merged),
+            other => panic!("Expected Command::Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_status_list_alias() {
+        let cli = Cli::parse_from(["git-sync", "list"]);
+        match cli.command.unwrap() {
+            Command::Status { merged } => assert!(!merged),
+            other => panic!("Expected Command::Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_status_merged_flag() {
+        let cli = Cli::parse_from(["git-sync", "status", "--merged"]);
+        match cli.command.unwrap() {
+            Command::Status { merged } => assert!(merged),
+            other => panic!("Expected Command::Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_global_flags_after_a_subcommand() {
+        let cli = Cli::parse_from([
+            "git-sync",
+            "status",
+            "--effort",
+            "3",
+            "--jobs",
+            "2",
+            "--min-age",
+            "2h",
+            "--json",
+            "--no-color",
+        ]);
+        assert_eq!(cli.effort, Some(3));
+        assert_eq!(cli.jobs, Some(2));
+        assert_eq!(cli.min_age, Some("2h".parse().unwrap()));
+        assert!(cli.json);
+        assert!(cli.no_color);
+    }
+
+    #[test]
+    fn cli_global_flags_before_a_subcommand() {
+        let cli = Cli::parse_from([
+            "git-sync",
+            "--effort",
+            "3",
+            "--jobs",
+            "2",
+            "--min-age",
+            "2h",
+            "--json",
+            "--no-color",
+            "status",
+        ]);
+        assert_eq!(cli.effort, Some(3));
+        assert_eq!(cli.jobs, Some(2));
+        assert_eq!(cli.min_age, Some("2h".parse().unwrap()));
+        assert!(cli.json);
+        assert!(cli.no_color);
+    }
+
+    #[test]
+    fn cli_no_color_default_is_false() {
+        assert!(!Cli::parse_from(["git-sync"]).no_color);
+        assert!(Cli::parse_from(["git-sync", "--no-color"]).no_color);
     }
 }

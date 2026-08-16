@@ -5,7 +5,7 @@
 //! place. Failures surface as [`GitCommandError`], whose [`GitErrorKind`] lets
 //! callers tell a network or auth problem from a genuine git error.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -535,6 +535,24 @@ impl Git {
         ])?;
         let remotes = self.run(&["for-each-ref", "--format=%(refname)", "refs/remotes"])?;
         Ok(parse_gone_upstreams(&heads, &remotes))
+    }
+
+    /// Return the committer date, in Unix seconds, of every local branch tip.
+    ///
+    /// One `git for-each-ref` over `refs/heads` rather than one probe per
+    /// branch: the status listing needs an age for *every* branch, and the
+    /// per-branch cost would dominate the command on a large repository.
+    ///
+    /// Branch names are short (`feature/x`). A ref whose date git cannot render
+    /// is simply absent from the map; callers must read a missing entry as
+    /// "unknown age" rather than as zero.
+    pub fn branch_committer_dates(&self) -> Result<HashMap<String, u64>> {
+        let out = self.run(&[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(committerdate:unix)",
+            "refs/heads",
+        ])?;
+        Ok(parse_committer_dates(&out))
     }
 
     /// Return remote-tracking branches merged into `target` for the given remote.
@@ -1136,6 +1154,25 @@ fn parse_gone_upstreams(heads: &str, remotes: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse `%(refname:short)\0%(committerdate:unix)` lines into a name → epoch map.
+///
+/// Lines without a separator, with an empty name, or with an unparsable date are
+/// dropped: "unknown age" is a valid outcome for the status listing, and is far
+/// better than inventing an epoch of zero and calling the branch 56 years old.
+fn parse_committer_dates(output: &str) -> HashMap<String, u64> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (name, date) = line.split_once('\0')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), date.trim().parse().ok()?))
+        })
+        .collect()
+}
+
 /// Parse `git worktree list --porcelain` output.
 fn parse_worktree_list(output: &str) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
@@ -1427,6 +1464,53 @@ local-only\0";
             parse_gone_upstreams(heads, remotes),
             vec!["feature/gone".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_committer_dates_reads_name_and_epoch() {
+        let out = "main\x001700000000\nfeature/x\x001600000000\n";
+        let dates = parse_committer_dates(out);
+        assert_eq!(dates.len(), 2);
+        assert_eq!(dates["main"], 1_700_000_000);
+        assert_eq!(dates["feature/x"], 1_600_000_000);
+    }
+
+    #[test]
+    fn parse_committer_dates_skips_malformed_lines() {
+        // No separator, empty name, unparsable date, and an empty line.
+        let out = "no-separator\n\x001700000000\nbroken\x00soon\n\nok\x0042\n";
+        let dates = parse_committer_dates(out);
+        assert_eq!(dates.len(), 1);
+        assert_eq!(dates["ok"], 42);
+    }
+
+    #[test]
+    fn parse_committer_dates_of_empty_output_is_empty() {
+        assert!(parse_committer_dates("").is_empty());
+    }
+
+    #[test]
+    fn branch_committer_dates_covers_every_local_branch() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo_with_branches()?;
+        let dates = git.branch_committer_dates()?;
+        let branches = git.local_branches()?;
+        assert!(!branches.is_empty());
+        for branch in &branches {
+            let date = dates
+                .get(branch)
+                .unwrap_or_else(|| panic!("{branch} must have a committer date"));
+            // The fixture commits just now; allow generous clock slack.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert!(
+                now.abs_diff(*date) < 3600,
+                "{branch} dated {date}, now is {now}"
+            );
+        }
+        assert_eq!(dates.len(), branches.len());
+        Ok(())
     }
 
     #[test]

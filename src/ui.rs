@@ -7,10 +7,27 @@
 use console::{Style, Term};
 use demand::{Confirm, DemandOption, Input, MultiSelect, Spinner, SpinnerStyle};
 
+/// Return a display-friendly path with `$HOME` replaced by `~`.
+///
+/// Display only: the result is never fed back to git, which would not expand
+/// the tilde. JSON reports keep the absolute path via
+/// [`crate::report::path_string`].
+pub fn tilde_path(abs: &std::path::Path) -> String {
+    let abs = abs.to_string_lossy();
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = abs.strip_prefix(&home)
+    {
+        return format!("~{rest}");
+    }
+    abs.into_owned()
+}
+
 /// Terminal handle and style presets for consistent output.
 #[derive(Debug)]
 pub struct Ui {
     term: Term,
+    /// Where tabular *data* goes. See [`Ui::table_row`].
+    stdout: Term,
     heading_style: Style,
     muted_style: Style,
     bold_style: Style,
@@ -30,6 +47,7 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             term: Term::stderr(),
+            stdout: Term::stdout(),
             heading_style: Style::new().cyan().bold(),
             muted_style: Style::new().dim(),
             bold_style: Style::new().bold(),
@@ -56,6 +74,14 @@ impl Ui {
             return;
         }
         let _ = self.term.write_line(line);
+    }
+
+    /// Write a line of *data* to stdout unless muted. See [`Ui::table_row`].
+    fn write_data_line(&self, line: &str) {
+        if self.quiet {
+            return;
+        }
+        let _ = self.stdout.write_line(line);
     }
 
     fn prompt_unavailable<T>(&self) -> anyhow::Result<T> {
@@ -173,6 +199,26 @@ impl Ui {
             self.bold_style.apply_to(format!("{label}:")),
             value
         ));
+    }
+
+    /// Print a table header row in bold.
+    ///
+    /// The caller owns the column padding: widths must be computed on the
+    /// unstyled strings, since ANSI escapes would otherwise be counted as
+    /// visible characters.
+    pub fn table_header(&self, line: &str) {
+        self.write_data_line(&self.bold_style.apply_to(line).to_string());
+    }
+
+    /// Print a pre-formatted, possibly pre-styled table row verbatim.
+    ///
+    /// Tables go to **stdout**, unlike every other output method: a listing is
+    /// the answer the user asked for, not a log about producing it, and
+    /// `git sync status | grep` must work. Nothing else writes to stdout in
+    /// text mode, so the stream stays a clean, greppable table; `--json` mutes
+    /// this along with everything else and prints its document instead.
+    pub fn table_row(&self, line: &str) {
+        self.write_data_line(line);
     }
 
     /// Ask for confirmation, pre-selecting `default`.
@@ -410,5 +456,42 @@ mod tests {
             ui.multi_select("pick", &["a".to_string()], &[], &[], &[])
                 .is_err()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tilde_path_replaces_home() {
+        let home = std::env::var("HOME").expect("HOME must be set for this test");
+        assert_eq!(
+            tilde_path(&std::path::PathBuf::from(format!("{home}/projects/repo"))),
+            "~/projects/repo"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tilde_path_preserves_non_home_path() {
+        assert_eq!(
+            tilde_path(std::path::Path::new("/tmp/some/path")),
+            "/tmp/some/path"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tilde_path_exact_home() {
+        let home = std::env::var("HOME").expect("HOME must be set for this test");
+        // Exact HOME path (no trailing slash) should become just "~"
+        assert_eq!(tilde_path(std::path::Path::new(&home)), "~");
+    }
+
+    #[test]
+    fn table_helpers_do_not_panic() {
+        let ui = Ui::new();
+        ui.table_header("AGE  STATUS  BRANCH  PATH");
+        ui.table_row("3d   merged  feature ~/repo");
+        let quiet = Ui::quiet();
+        quiet.table_header("AGE");
+        quiet.table_row("3d");
     }
 }
