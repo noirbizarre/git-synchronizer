@@ -224,6 +224,9 @@ pub struct Report {
     pub effort: Effort,
     /// Effective minimum worktree age, e.g. `"0s"` or `"2h"`.
     pub min_age: MinAge,
+    /// Effective number of concurrent git probes used during analysis.
+    /// Reported for reproducibility only: it never changes the results.
+    pub jobs: usize,
     pub fetch: FetchPhase,
     pub pull: PullPhase,
     pub local: LocalPhase,
@@ -239,13 +242,14 @@ impl Report {
     /// Schema version. Bump on any breaking change to the document shape.
     pub const VERSION: u32 = 1;
 
-    pub fn new(dry_run: bool, effort: Effort, min_age: MinAge) -> Self {
+    pub fn new(dry_run: bool, effort: Effort, min_age: MinAge, jobs: usize) -> Self {
         Self {
             version: Self::VERSION,
             status: Status::Success,
             dry_run,
             effort,
             min_age,
+            jobs,
             fetch: FetchPhase::default(),
             pull: PullPhase::default(),
             local: LocalPhase::default(),
@@ -269,7 +273,7 @@ impl Report {
 
     /// A single-error document for a run that could not complete.
     pub fn fatal(action: &str, target: &str, err: &anyhow::Error) -> Self {
-        let mut report = Self::new(false, Effort::default(), MinAge::default());
+        let mut report = Self::new(false, Effort::default(), MinAge::default(), 1);
         report.status = Status::Error;
         report.push_error(action, target, err);
         report
@@ -291,6 +295,8 @@ pub struct ConfigReport {
     pub effort: Option<Effort>,
     /// `null` means "use the built-in default" (no guard).
     pub min_age: Option<MinAge>,
+    /// `null` means "use the CPU count".
+    pub jobs: Option<u32>,
     /// `null` means "auto-detect".
     pub worktrunk: Option<bool>,
 }
@@ -306,7 +312,7 @@ mod tests {
 
     #[test]
     fn report_serializes_expected_shape() {
-        let mut report = Report::new(true, Effort::Thorough, MinAge::default());
+        let mut report = Report::new(true, Effort::Thorough, MinAge::default(), 1);
         report.local.merged.push("feature".to_string());
         report.local.branches.push(LocalBranch {
             branch: "feature".to_string(),
@@ -329,7 +335,7 @@ mod tests {
 
     #[test]
     fn push_error_classifies_and_counts() {
-        let mut report = Report::new(false, Effort::default(), MinAge::default());
+        let mut report = Report::new(false, Effort::default(), MinAge::default(), 1);
         let err = anyhow::Error::new(GitCommandError {
             program: "git".into(),
             args: vec!["fetch".into()],
@@ -362,14 +368,14 @@ mod tests {
 
     #[test]
     fn effort_serializes_as_its_numeric_level() {
-        let report = Report::new(false, Effort::Thorough, MinAge::default());
+        let report = Report::new(false, Effort::Thorough, MinAge::default(), 1);
         let value: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["effort"], 3);
     }
 
     #[test]
     fn min_age_serializes_as_its_canonical_string() {
-        let report = Report::new(false, Effort::default(), "2h".parse().unwrap());
+        let report = Report::new(false, Effort::default(), "2h".parse().unwrap(), 1);
         let value: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["min_age"], "2h");
     }
@@ -378,7 +384,7 @@ mod tests {
     fn print_json_writes_a_document_to_stdout() {
         // stdout is captured by the test harness and is not a terminal here,
         // so this exercises the compact branch.
-        print_json(&Report::new(true, Effort::default(), MinAge::default())).unwrap();
+        print_json(&Report::new(true, Effort::default(), MinAge::default(), 1)).unwrap();
         print_json(&ConfigReport {
             configured: false,
             protected: Vec::new(),
@@ -389,6 +395,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            jobs: None,
         })
         .unwrap();
     }
@@ -405,6 +412,7 @@ mod tests {
             worktrunk: Some(true),
             min_age: None,
             effort: Some(Effort::Quick),
+            jobs: None,
         })
         .unwrap();
         assert_eq!(value["configured"], true);

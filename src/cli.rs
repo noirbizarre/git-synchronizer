@@ -88,6 +88,17 @@ pub struct Cli {
     #[arg(long, value_name = "DURATION")]
     pub min_age: Option<MinAge>,
 
+    /// Number of git probes to run at once during analysis (default: CPU count)
+    ///
+    /// Analysis spends its time waiting on independent, read-only git commands;
+    /// overlapping them shortens the pause before the first prompt. The results
+    /// are identical whatever the value — only the wall clock changes.
+    ///
+    /// Fetching, pulling, deleting branches and removing worktrees always run
+    /// serially. `--verbose` forces 1 so the echoed commands stay in order.
+    #[arg(short = 'j', long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub jobs: Option<u32>,
+
     /// Use worktrunk (wt) for worktree removal to trigger pre/post-remove hooks
     #[arg(long, overrides_with = "no_worktrunk")]
     pub worktrunk: bool,

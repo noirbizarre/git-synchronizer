@@ -899,6 +899,146 @@ fn config_set_effort_roundtrips() {
 }
 
 #[test]
+fn jobs_flag_rejects_zero() {
+    let dir = init_repo();
+    configure(&dir);
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--jobs", "0"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("0 is not in 1.."));
+}
+
+#[test]
+fn config_set_jobs_roundtrips() {
+    let dir = init_repo();
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "set", "jobs", "4"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let output = StdCommand::new("git")
+        .args(["config", "--get", "sync.jobs"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "4");
+
+    Command::cargo_bin("git-sync")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("jobs:"));
+}
+
+/// The acceptance criterion for #73: `--jobs` may only change the wall clock.
+///
+/// Both the JSON document (candidate ordering) and the human output (warning
+/// ordering, prompts, summary) are compared verbatim; only the echoed job count
+/// itself is allowed to differ.
+#[test]
+fn output_is_identical_whatever_the_job_count() {
+    let dir = init_repo();
+    configure(&dir);
+    add_branches(&dir);
+
+    // Enough branches that the work is actually spread over several workers.
+    for n in 0..12 {
+        let branch = format!("feature/extra-{n}");
+        StdCommand::new("git")
+            .args(["checkout", "-b", &branch, "main"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join(format!("extra-{n}.txt")), "extra").unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-m", &format!("extra {n}")])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        // Squash-merge half of them so the expensive strategies do real work.
+        if n % 2 == 0 {
+            StdCommand::new("git")
+                .args(["merge", "--squash", &branch])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            StdCommand::new("git")
+                .args(["commit", "-m", &format!("squash extra {n}")])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+        }
+    }
+
+    let run = |jobs: &str, extra: &[&str]| {
+        let mut args = vec![
+            "-y",
+            "--dry-run",
+            "--no-fetch",
+            "--local-only",
+            "--effort",
+            "3",
+            "--jobs",
+            jobs,
+        ];
+        args.extend_from_slice(extra);
+        Command::cargo_bin("git-sync")
+            .unwrap()
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+
+    // Human output: warnings, prompts and the summary, in order.
+    assert_eq!(
+        String::from_utf8_lossy(&run("1", &[]).stderr),
+        String::from_utf8_lossy(&run("8", &[]).stderr),
+        "--jobs must not change the human output"
+    );
+
+    // JSON document: candidate ordering above all.
+    let mut serial: serde_json::Value =
+        serde_json::from_slice(&run("1", &["--json"]).stdout).unwrap();
+    let mut parallel: serde_json::Value =
+        serde_json::from_slice(&run("8", &["--json"]).stdout).unwrap();
+
+    // The effective job count is echoed in the document by design.
+    serial.as_object_mut().unwrap().remove("jobs");
+    parallel.as_object_mut().unwrap().remove("jobs");
+    assert_eq!(serial, parallel);
+}
+
+/// The document echoes the job count actually used, so a run can be reproduced.
+#[test]
+fn json_reports_the_effective_job_count() {
+    let dir = init_repo();
+    configure(&dir);
+
+    let doc = json_output(&dir, &["--json", "--dry-run", "--no-fetch", "--jobs", "3"]);
+    assert_eq!(doc["jobs"], 3);
+}
+
+#[test]
 fn min_age_flag_accepted() {
     let dir = init_repo();
     configure(&dir);
