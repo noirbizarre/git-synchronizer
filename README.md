@@ -5,17 +5,12 @@
 <p align="center"><strong>Wipe out merged local branches and worktrees</strong></p>
 
 <p align="center">
-  <a href="https://github.com/noirbizarre/git-wipe/actions/workflows/ci.yml">
-    <img src="https://github.com/noirbizarre/git-wipe/actions/workflows/ci.yml/badge.svg" alt="CI">
-  </a>
-  <a href="https://codecov.io/gh/noirbizarre/git-wipe">
-    <img src="https://codecov.io/gh/noirbizarre/git-wipe/graph/badge.svg" alt="Codecov">
-  </a>
-  <a href="https://crates.io/crates/git-wipe">
-    <img src="https://img.shields.io/crates/v/git-wipe" alt="crates.io">
-  </a>
-  <img src="https://img.shields.io/github/v/release/noirbizarre/git-wipe" alt="Release">
-  <img src="https://img.shields.io/github/license/noirbizarre/git-wipe" alt="License">
+  <a href="https://github.com/noirbizarre/git-wipe/actions/workflows/ci.yml" title="CI"><img src="https://github.com/noirbizarre/git-wipe/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/gh/noirbizarre/git-wipe" title="Codecov"><img src="https://codecov.io/gh/noirbizarre/git-wipe/graph/badge.svg" alt="Codecov"></a>
+  <a href="https://crates.io/crates/git-wipe" title="crates.io"><img src="https://img.shields.io/crates/v/git-wipe" alt="crates.io"></a>
+  <a href="https://github.com/noirbizarre/git-wipe/releases/latest" title="Release"><img src="https://img.shields.io/github/v/release/noirbizarre/git-wipe" alt="Release"></a>
+  <a href="https://aur.archlinux.org/packages/git-wipe-bin" title="AUR"><img src="https://img.shields.io/aur/version/git-wipe-bin" alt="AUR"></a>
+  <a href="https://github.com/noirbizarre/git-wipe/blob/main/LICENSE" title="License"><img src="https://img.shields.io/github/license/noirbizarre/git-wipe" alt="License"></a>
 </p>
 
 ---
