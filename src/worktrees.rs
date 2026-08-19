@@ -79,13 +79,24 @@ fn find_branch_worktrees(git: &Git, branches: &[String]) -> Result<Vec<Worktree>
 /// enumerated: an orphan whose checkout was removed, a corrupted index, or
 /// another broken worktree.
 ///
-/// Returns `None` when the age cannot be established by either means
-/// (unreadable metadata, a filesystem without birth *or* modification
-/// times, or a clock that moved backwards). Callers must treat that as "old
-/// enough": the guard is a safety net, not a reason to refuse work.
+/// Returns `None` when the age cannot be established at all (unreadable
+/// metadata, or a filesystem without birth *or* modification times).
+/// Callers must treat that as "old enough": the guard is a safety net, not a
+/// reason to refuse work.
+///
+/// A reference that is at or after `SystemTime::now()` — plausible on a
+/// virtualized CI clock (an NTP step, VM clock jitter) for a worktree
+/// created moments ago — is *not* treated as unknown: it resolves to
+/// [`Duration::ZERO`] instead, since the most plausible explanation is that
+/// the change really did just happen. Falling back to "unknown" (and thus
+/// "old enough") here would defeat the very purpose of a freshness guard.
 pub fn worktree_age(git: &Git, wt: &Worktree) -> Option<Duration> {
-    let reference = last_real_change(git, &wt.path).or_else(|| admin_dir_time(git, wt));
-    SystemTime::now().duration_since(reference?).ok()
+    let reference = last_real_change(git, &wt.path).or_else(|| admin_dir_time(git, wt))?;
+    Some(
+        SystemTime::now()
+            .duration_since(reference)
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 /// The newest of the tracked/untracked file mtimes and `HEAD`'s committer
@@ -227,6 +238,28 @@ mod tests {
 
         let age = worktree_age(&git, &wt).expect("age should be resolvable");
         assert!(age < Duration::from_secs(60), "unexpected age: {age:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_age_treats_a_future_reference_as_zero() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_worktree()?;
+        let wt = worktree(&git)?;
+        let wt_dir = std::path::Path::new(&wt_path);
+
+        // Simulate clock skew (e.g. an NTP step on a virtualized CI runner)
+        // making the freshest reference appear to be after "now": push a
+        // tracked file's mtime an hour into the future.
+        let file = std::fs::File::options()
+            .write(true)
+            .open(wt_dir.join("README.md"))?;
+        file.set_modified(SystemTime::now() + Duration::from_secs(3600))?;
+
+        assert_eq!(
+            worktree_age(&git, &wt),
+            Some(Duration::ZERO),
+            "a reference newer than 'now' must resolve to zero, not unknown"
+        );
         Ok(())
     }
 
