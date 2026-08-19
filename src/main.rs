@@ -19,6 +19,7 @@ mod duration;
 mod git;
 mod parallel;
 mod report;
+mod size;
 mod status;
 #[cfg(test)]
 mod test_helpers;
@@ -257,6 +258,14 @@ fn handle_config_command(
                     );
 
                     ui.field(
+                        "min size",
+                        &match cfg.min_size {
+                            Some(min_size) => min_size.to_string(),
+                            None => format!("(default: {})", size::Size::default()),
+                        },
+                    );
+
+                    ui.field(
                         "jobs",
                         &match cfg.jobs {
                             Some(jobs) => jobs.to_string(),
@@ -395,6 +404,7 @@ fn list_config_json(git: &git::Git) -> Result<()> {
         branch_ignored: git.branch_ignored_list()?,
         effort: cfg.as_ref().and_then(|c| c.effort),
         min_age: cfg.as_ref().and_then(|c| c.min_age),
+        min_size: cfg.as_ref().and_then(|c| c.min_size),
         jobs: cfg.as_ref().and_then(|c| c.jobs),
         worktrunk: cfg.as_ref().and_then(|c| c.worktrunk),
     };
@@ -414,10 +424,12 @@ fn handle_status(git: &git::Git, ui: &ui::Ui, cli: &Cli, merged_only: bool) -> R
     let opts = status::StatusOptions {
         effort: resolve_effort(cli, &cfg)?,
         jobs: resolve_jobs(cli, &cfg),
-        // Deliberately not `resolve_min_age`: here it is a display filter, and
-        // a `wipe.minage` configured as a removal safety net must not silently
-        // truncate the listing.
+        // Deliberately not `resolve_min_age`/`resolve_min_size`: here they are
+        // display filters, and a `wipe.minage`/`wipe.minsize` configured as a
+        // removal safety net must not silently truncate the listing.
         min_age: cli.min_age.unwrap_or_default(),
+        min_size: cli.min_size.unwrap_or_default(),
+        show_size: cli.size,
         merged_only,
     };
 
@@ -449,6 +461,7 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
     let use_worktrunk = resolve_worktrunk(git, ui, cli, &cfg)?;
     let effort = resolve_effort(cli, &cfg)?;
     let min_age = resolve_min_age(cli, &cfg);
+    let min_size = resolve_min_size(cli, &cfg);
     let jobs = resolve_jobs(cli, &cfg);
 
     let opts = cleaner::CleanerOptions {
@@ -464,6 +477,8 @@ fn handle_clean(git: &git::Git, ui: &ui::Ui, cli: &Cli) -> Result<()> {
         use_worktrunk,
         effort,
         min_age,
+        min_size,
+        show_size: cli.size,
         jobs,
     };
 
@@ -492,6 +507,14 @@ fn resolve_effort(cli: &Cli, cfg: &config::Config) -> Result<branches::Effort> {
 /// Priority: CLI flag > config setting > [`duration::MinAge::default`] (no guard).
 fn resolve_min_age(cli: &Cli, cfg: &config::Config) -> duration::MinAge {
     cli.min_age.or(cfg.min_age).unwrap_or_default()
+}
+
+/// Resolve the minimum on-disk size a worktree must have before it may be
+/// removed.
+///
+/// Priority: CLI flag > config setting > [`size::Size::default`] (no guard).
+fn resolve_min_size(cli: &Cli, cfg: &config::Config) -> size::Size {
+    cli.min_size.or(cfg.min_size).unwrap_or_default()
 }
 
 /// Resolve how many read-only git probes analysis may run at once.
@@ -588,6 +611,28 @@ mod tests {
         assert_eq!(resolve_min_age(&cli_unset, &cfg_2h), "2h".parse().unwrap());
         // CLI wins over config.
         assert_eq!(resolve_min_age(&cli_30m, &cfg_2h), "30m".parse().unwrap());
+    }
+
+    #[test]
+    fn resolve_min_size_prefers_cli_then_config_then_default() {
+        let cfg_default = config::Config::default();
+        let cfg_100m = config::Config {
+            min_size: Some("100M".parse().unwrap()),
+            ..config::Config::default()
+        };
+
+        let cli_unset = Cli::parse_from(["git-wipe"]);
+        let cli_1g = Cli::parse_from(["git-wipe", "--min-size", "1G"]);
+
+        // Nothing set anywhere: no guard.
+        assert!(resolve_min_size(&cli_unset, &cfg_default).is_zero());
+        // Config only.
+        assert_eq!(
+            resolve_min_size(&cli_unset, &cfg_100m),
+            "100M".parse().unwrap()
+        );
+        // CLI wins over config.
+        assert_eq!(resolve_min_size(&cli_1g, &cfg_100m), "1G".parse().unwrap());
     }
 
     #[test]
@@ -802,9 +847,41 @@ mod tests {
             effort: resolve_effort(&cli, &cfg)?,
             jobs: resolve_jobs(&cli, &cfg),
             min_age: cli.min_age.unwrap_or_default(),
+            min_size: cli.min_size.unwrap_or_default(),
+            show_size: cli.size,
             merged_only: false,
         };
         assert!(opts.min_age.is_zero(), "wipe.minage must not leak in");
+
+        let scan = status::scan(&git, &filter, &ui::Ui::quiet(), opts)?;
+        assert!(!status::filter_rows(scan.rows, opts).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn handle_status_does_not_inherit_the_configured_min_size() -> Result<()> {
+        // `wipe.minsize` guards worktree removal; it must not silently
+        // truncate an inventory the user asked no filter for.
+        let (_dir, git) = test_helpers::init_repo_with_branches()?;
+        config::Config {
+            protected: vec!["main".to_string()],
+            min_size: Some("1G".parse().unwrap()),
+            ..config::Config::default()
+        }
+        .save(&git)?;
+
+        let cli = Cli::parse_from(["git-wipe", "status", "--json"]);
+        let cfg = config::Config::try_load(&git)?.expect("just saved");
+        let filter = branches::Filter::load(&git, &cfg)?;
+        let opts = status::StatusOptions {
+            effort: resolve_effort(&cli, &cfg)?,
+            jobs: resolve_jobs(&cli, &cfg),
+            min_age: cli.min_age.unwrap_or_default(),
+            min_size: cli.min_size.unwrap_or_default(),
+            show_size: cli.size,
+            merged_only: false,
+        };
+        assert!(opts.min_size.is_zero(), "wipe.minsize must not leak in");
 
         let scan = status::scan(&git, &filter, &ui::Ui::quiet(), opts)?;
         assert!(!status::filter_rows(scan.rows, opts).is_empty());

@@ -21,8 +21,9 @@ use crate::report::{
     BranchReason, ItemStatus, LocalBranch, PulledBranch, RemoteBranch, RemoteFetch, RemoteReport,
     Report, WorktreeEntry, WorktreeKind, path_string,
 };
+use crate::size::{Size, format_bytes};
 use crate::ui::{Ui, tilde_path};
-use crate::worktrees::{find_orphan_worktrees, is_too_young};
+use crate::worktrees::{find_orphan_worktrees, is_too_young, worktree_size};
 
 /// Report a failed operation to both the user and the JSON report.
 fn fail(ui: &Ui, report: &mut Report, action: &str, target: &str, err: &anyhow::Error) {
@@ -63,6 +64,11 @@ pub struct CleanerOptions {
     pub effort: Effort,
     /// Minimum age a worktree must have before it may be removed.
     pub min_age: MinAge,
+    /// Minimum on-disk size a worktree must have before it may be removed.
+    pub min_size: Size,
+    /// Compute and show worktree sizes, without filtering or excluding
+    /// anything.
+    pub show_size: bool,
     /// How many read-only git probes may run at once during analysis.
     ///
     /// Purely a wall-clock knob: 0 and 1 both mean "stay on this thread", and
@@ -315,33 +321,66 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             .collect()
         };
 
+        // Worktree sizes, in bytes. Resolved once, up front, the same way
+        // `young` is: each measurement walks a directory tree, so it is
+        // skipped entirely unless `--min-size` or `--size` asked for it.
+        let need_size = !opts.no_worktrees && (opts.show_size || !opts.min_size.is_zero());
+        let sizes: HashMap<PathBuf, u64> = if !need_size {
+            HashMap::new()
+        } else {
+            let to_size: Vec<&Worktree> = candidates
+                .iter()
+                .filter_map(|branch| wt_map.get(branch))
+                .chain(orphans.iter())
+                .collect();
+            parallel::map(&to_size, opts.jobs, |_, wt| worktree_size(wt))
+                .into_iter()
+                .zip(&to_size)
+                .filter_map(|(size, wt)| size.map(|s| (wt.path.clone(), s)))
+                .collect()
+        };
+
+        // Worktrees smaller than `--min-size`. Empty (and therefore free to
+        // check) when the guard is disabled.
+        let small: HashSet<PathBuf> = if opts.min_size.is_zero() {
+            HashSet::new()
+        } else {
+            sizes
+                .iter()
+                .filter(|&(_, &bytes)| bytes < opts.min_size.as_bytes())
+                .map(|(path, _)| path.clone())
+                .collect()
+        };
+
         let (orphan_guarded, orphan_actionable): (Vec<_>, Vec<_>) = orphans
             .into_iter()
-            .partition(|wt| worktree_guard(wt, &young).is_some());
+            .partition(|wt| worktree_guard(wt, &young, &small).is_some());
 
         // Report guarded worktrees (both branch-associated and orphan).
         if !opts.no_worktrees {
             for branch in &candidates {
                 if let Some(wt) = wt_map.get(branch)
-                    && let Some(guard) = worktree_guard(wt, &young)
+                    && let Some(guard) = worktree_guard(wt, &young, &small)
                 {
-                    ui.muted(&guard.skip_message(wt, opts.min_age));
+                    ui.muted(&guard.skip_message(wt, opts.min_age, opts.min_size));
                     report.local.worktrees.push(WorktreeEntry {
                         path: path_string(&wt.path),
                         branch: wt.branch.clone(),
                         kind: WorktreeKind::Branch,
                         status: guard.status(),
+                        size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
                     });
                 }
             }
             for wt in &orphan_guarded {
-                let guard = worktree_guard(wt, &young).expect("partitioned as guarded");
-                ui.muted(&guard.skip_message(wt, opts.min_age));
+                let guard = worktree_guard(wt, &young, &small).expect("partitioned as guarded");
+                ui.muted(&guard.skip_message(wt, opts.min_age, opts.min_size));
                 report.local.worktrees.push(WorktreeEntry {
                     path: path_string(&wt.path),
                     branch: wt.branch.clone(),
                     kind: WorktreeKind::Orphan,
                     status: guard.status(),
+                    size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
                 });
             }
         }
@@ -376,15 +415,19 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 let is_gone = gone_set.contains(branch);
                 let has_actionable_wt = wt_map
                     .get(branch)
-                    .is_some_and(|wt| worktree_guard(wt, &young).is_none());
+                    .is_some_and(|wt| worktree_guard(wt, &young, &small).is_none());
                 if !opts.no_worktrees && has_actionable_wt {
                     let wt = &wt_map[branch];
                     labels.push(format!("{branch} ({})", tilde_path(&wt.path)));
-                    hints.push(if is_gone {
+                    let mut hint = if is_gone {
                         "upstream gone + worktree".to_string()
                     } else {
                         "branch + worktree".to_string()
-                    });
+                    };
+                    if let Some(&bytes) = sizes.get(&wt.path) {
+                        hint = format!("{hint}, {}", format_bytes(bytes));
+                    }
+                    hints.push(hint);
                 } else {
                     labels.push(branch.clone());
                     hints.push(if is_gone {
@@ -400,10 +443,14 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             for wt in &orphan_actionable {
                 values.push(format!("orphan-wt:{}", wt.path.display()));
                 labels.push(tilde_path(&wt.path));
-                hints.push(format!(
+                let mut hint = format!(
                     "orphan worktree, branch: {}",
                     wt.branch.as_deref().unwrap_or("detached")
-                ));
+                );
+                if let Some(&bytes) = sizes.get(&wt.path) {
+                    hint = format!("{hint}, {}", format_bytes(bytes));
+                }
+                hints.push(hint);
                 defaults.push(false);
             }
 
@@ -497,7 +544,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                 .iter()
                 .filter(|branch| selected.contains(&format!("branch:{branch}")))
                 .filter_map(|branch| wt_map.get(branch).map(|wt| (branch, wt)))
-                .filter(|(_, wt)| worktree_guard(wt, &young).is_none())
+                .filter(|(_, wt)| worktree_guard(wt, &young, &small).is_none())
                 .collect();
 
             // Workers report, they never print: the messages are emitted below
@@ -632,6 +679,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             branch: Some(branch.clone()),
                             kind: WorktreeKind::Branch,
                             status: ItemStatus::Skipped,
+                            size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
                         });
                         warn(
                             ui,
@@ -655,6 +703,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             // 1. Remove worktrees for selected merged branches first.
             if !opts.no_worktrees {
                 let mut wt_removed = 0usize;
+                let mut freed_bytes: u64 = 0;
                 for branch in &candidates {
                     let key = format!("branch:{branch}");
                     if !selected.contains(&key) {
@@ -664,7 +713,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         continue; // already warned above
                     }
                     if let Some(wt) = wt_map.get(branch) {
-                        if worktree_guard(wt, &young).is_some() {
+                        if worktree_guard(wt, &young, &small).is_some() {
                             continue; // already reported above
                         }
                         let (force, force_delete) =
@@ -679,6 +728,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                 branch: Some(branch.clone()),
                                 kind: WorktreeKind::Branch,
                                 status: ItemStatus::DryRun,
+                                size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
                             });
                         } else {
                             let result = ui.spinner(
@@ -696,6 +746,9 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             let status = match result {
                                 Ok(()) => {
                                     wt_removed += 1;
+                                    if let Some(&bytes) = sizes.get(&wt.path) {
+                                        freed_bytes += bytes;
+                                    }
                                     if opts.use_worktrunk {
                                         wt_handled_branches.insert(branch.clone());
                                     }
@@ -715,6 +768,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                 branch: Some(branch.clone()),
                                 kind: WorktreeKind::Branch,
                                 status,
+                                size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
                             });
                         }
                     }
@@ -733,6 +787,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             branch: wt.branch.clone(),
                             kind: WorktreeKind::Orphan,
                             status: ItemStatus::DryRun,
+                            size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
                         });
                     } else {
                         let result = ui.spinner(
@@ -742,6 +797,9 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         let status = match result {
                             Ok(()) => {
                                 wt_removed += 1;
+                                if let Some(&bytes) = sizes.get(&wt.path) {
+                                    freed_bytes += bytes;
+                                }
                                 ui.success(&format!(
                                     "{} removed.",
                                     console::style(tilde_path(&wt.path)).cyan(),
@@ -758,12 +816,17 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             branch: wt.branch.clone(),
                             kind: WorktreeKind::Orphan,
                             status,
+                            size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
                         });
                     }
                 }
                 report.summary.worktrees_removed = wt_removed;
+                report.summary.freed_kb = freed_bytes / 1024;
                 if !opts.dry_run && wt_removed > 0 {
                     ui.summary(wt_removed, "worktree", "worktrees", "removed");
+                    if freed_bytes > 0 {
+                        ui.freed(freed_bytes);
+                    }
                 }
             }
 
@@ -994,6 +1057,8 @@ enum WorktreeGuard {
     Locked,
     /// It was created less than `--min-age` ago.
     TooYoung,
+    /// It is smaller than `--min-size`.
+    TooSmall,
 }
 
 impl WorktreeGuard {
@@ -1002,25 +1067,34 @@ impl WorktreeGuard {
         match self {
             Self::Locked => ItemStatus::Locked,
             Self::TooYoung => ItemStatus::TooYoung,
+            Self::TooSmall => ItemStatus::TooSmall,
         }
     }
 
     /// The informational line shown to the user.
-    fn skip_message(self, wt: &Worktree, min_age: MinAge) -> String {
+    fn skip_message(self, wt: &Worktree, min_age: MinAge, min_size: Size) -> String {
         match self {
             Self::Locked => format_locked_skip_message(wt),
             Self::TooYoung => format_too_young_skip_message(wt, min_age),
+            Self::TooSmall => format_too_small_skip_message(wt, min_size),
         }
     }
 }
 
 /// Whether `wt` is guarded, and why. `young` holds the paths of the worktrees
-/// already found to be below the `--min-age` threshold.
-fn worktree_guard(wt: &Worktree, young: &HashSet<PathBuf>) -> Option<WorktreeGuard> {
+/// already found to be below the `--min-age` threshold; `small` holds those
+/// below `--min-size`.
+fn worktree_guard(
+    wt: &Worktree,
+    young: &HashSet<PathBuf>,
+    small: &HashSet<PathBuf>,
+) -> Option<WorktreeGuard> {
     if wt.is_locked {
         Some(WorktreeGuard::Locked)
     } else if young.contains(&wt.path) {
         Some(WorktreeGuard::TooYoung)
+    } else if small.contains(&wt.path) {
+        Some(WorktreeGuard::TooSmall)
     } else {
         None
     }
@@ -1050,6 +1124,15 @@ fn format_too_young_skip_message(wt: &Worktree, min_age: MinAge) -> String {
     let branch_label = wt.branch.as_deref().unwrap_or("detached");
     format!(
         "  Skipping recent worktree '{}' (branch: {branch_label}): created less than {min_age} ago.",
+        wt.path.display()
+    )
+}
+
+/// Format an informational skip message for a worktree below `--min-size`.
+fn format_too_small_skip_message(wt: &Worktree, min_size: Size) -> String {
+    let branch_label = wt.branch.as_deref().unwrap_or("detached");
+    format!(
+        "  Skipping small worktree '{}' (branch: {branch_label}): smaller than {min_size}.",
         wt.path.display()
     )
 }
@@ -1113,6 +1196,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         }
     }
@@ -1131,6 +1215,8 @@ mod tests {
             use_worktrunk: false,
             effort: Effort::Standard,
             min_age: MinAge::default(),
+            min_size: Size::default(),
+            show_size: false,
             jobs: TEST_JOBS,
         }
     }
@@ -1205,6 +1291,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let ui = Ui::new();
@@ -1221,6 +1308,8 @@ mod tests {
             use_worktrunk: false,
             effort: Effort::Standard,
             min_age: MinAge::default(),
+            min_size: Size::default(),
+            show_size: false,
             jobs: TEST_JOBS,
         };
 
@@ -1386,6 +1475,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let remotes = effective_remotes(&git, &config_with)?;
@@ -1398,6 +1488,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let remotes = effective_remotes(&git, &config_without)?;
@@ -1533,6 +1624,22 @@ mod tests {
     }
 
     #[test]
+    fn format_too_small_skip_message_mentions_the_threshold() {
+        let wt = Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: Some("feature/x".to_string()),
+            is_bare: false,
+            is_locked: false,
+            lock_reason: None,
+        };
+        let msg = format_too_small_skip_message(&wt, "100M".parse().unwrap());
+        assert!(msg.contains("Skipping small worktree"));
+        assert!(msg.contains("/tmp/wt"));
+        assert!(msg.contains("feature/x"));
+        assert!(msg.contains("smaller than 100M"));
+    }
+
+    #[test]
     fn worktree_guard_prefers_locked_over_too_young() {
         let mut wt = Worktree {
             path: PathBuf::from("/tmp/wt"),
@@ -1542,16 +1649,38 @@ mod tests {
             lock_reason: None,
         };
         let young: HashSet<PathBuf> = [wt.path.clone()].into_iter().collect();
+        let empty: HashSet<PathBuf> = HashSet::new();
 
         assert_eq!(
-            worktree_guard(&wt, &young),
+            worktree_guard(&wt, &young, &empty),
             Some(WorktreeGuard::Locked),
             "a lock is the more specific reason and should win"
         );
 
         wt.is_locked = false;
-        assert_eq!(worktree_guard(&wt, &young), Some(WorktreeGuard::TooYoung));
-        assert_eq!(worktree_guard(&wt, &HashSet::new()), None);
+        assert_eq!(
+            worktree_guard(&wt, &young, &empty),
+            Some(WorktreeGuard::TooYoung)
+        );
+        assert_eq!(worktree_guard(&wt, &HashSet::new(), &empty), None);
+    }
+
+    #[test]
+    fn worktree_guard_detects_too_small() {
+        let wt = Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: None,
+            is_bare: false,
+            is_locked: false,
+            lock_reason: None,
+        };
+        let small: HashSet<PathBuf> = [wt.path.clone()].into_iter().collect();
+
+        assert_eq!(
+            worktree_guard(&wt, &HashSet::new(), &small),
+            Some(WorktreeGuard::TooSmall)
+        );
+        assert_eq!(worktree_guard(&wt, &HashSet::new(), &HashSet::new()), None);
     }
 
     /// Repo with `feature/merged` merged into `main` and a worktree on it.
@@ -2614,6 +2743,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let ui = Ui::new();

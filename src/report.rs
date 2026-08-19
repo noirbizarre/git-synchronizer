@@ -13,6 +13,7 @@ use serde::Serialize;
 use crate::branches::Effort;
 use crate::duration::MinAge;
 use crate::git::{GitCommandError, GitErrorKind};
+use crate::size::Size;
 
 /// Serialize `value` to stdout as a single JSON document.
 ///
@@ -55,6 +56,8 @@ pub enum ItemStatus {
     Locked,
     /// Worktree is newer than `--min-age`, so it was left alone.
     TooYoung,
+    /// Worktree is smaller than `--min-size`, so it was left alone.
+    TooSmall,
     /// The git operation failed; see the matching entry in `errors`.
     Failed,
     /// Would have been acted upon, but `--dry-run` was in effect.
@@ -188,6 +191,10 @@ pub struct WorktreeEntry {
     pub branch: Option<String>,
     pub kind: WorktreeKind,
     pub status: ItemStatus,
+    /// Size in kibibytes, absent when sizing was not requested (no
+    /// `--min-size` or `--size`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_kb: Option<u64>,
 }
 
 /// Phase 4: merged branches on each configured remote.
@@ -212,6 +219,9 @@ pub struct Summary {
     pub remote_branches_deleted: usize,
     pub worktrees_removed: usize,
     pub errors: usize,
+    /// Total size of removed worktrees, in kibibytes. Zero when sizing was
+    /// not requested or nothing was removed.
+    pub freed_kb: u64,
 }
 
 /// The complete JSON document.
@@ -295,6 +305,8 @@ pub struct ConfigReport {
     pub effort: Option<Effort>,
     /// `null` means "use the built-in default" (no guard).
     pub min_age: Option<MinAge>,
+    /// `null` means "use the built-in default" (no guard).
+    pub min_size: Option<Size>,
     /// `null` means "use the CPU count".
     pub jobs: Option<u32>,
     /// `null` means "auto-detect".
@@ -359,6 +371,9 @@ pub struct StatusEntry {
     /// Serialized rather than skipped, so consumers can tell "unknown" from
     /// "this tool version does not report an age".
     pub age_seconds: Option<u64>,
+    /// Size in kibibytes, or `null` when it was not computed (sizing needs
+    /// `--min-size` or `--size`) or the row has no worktree (a plain branch).
+    pub size_kb: Option<u64>,
     /// The observations that apply, in the order the STATUS column renders them.
     pub status: Vec<StatusFlag>,
     /// Checked out in the worktree the command was run from.
@@ -483,6 +498,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         })
         .unwrap();
@@ -499,6 +515,7 @@ mod tests {
             branch_ignored: Vec::new(),
             worktrunk: Some(true),
             min_age: None,
+            min_size: None,
             effort: Some(Effort::Quick),
             jobs: None,
         })
