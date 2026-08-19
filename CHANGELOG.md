@@ -11,6 +11,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 > There is no automatic configuration migration — see the README for how to
 > move an existing `[sync]` section across.
 
+## [v0.5.0](https://github.com/noirbizarre/git-wipe/compare/v0.4.0..v0.5.0) - 2026-08-19
+
+### 💫 Features
+
+- **ui** Enable fuzzy filtering on branch/worktree multi-selects ([#84](https://github.com/noirbizarre/git-wipe/issues/84)) - ([69a77fe](https://github.com/noirbizarre/git-wipe/commit/69a77feb13ba7d8fb5264d368417fb37ebb585fa))
+- **worktrees** Recover from stale worktree locks instead of skipping forever ([#89](https://github.com/noirbizarre/git-wipe/issues/89)) - ([960202a](https://github.com/noirbizarre/git-wipe/commit/960202ac8be278197f65395b2c391f6085b135d3))
+- **worktrees** Report worktree sizes and add a --min-size guard/filter ([#90](https://github.com/noirbizarre/git-wipe/issues/90)) - ([6914f77](https://github.com/noirbizarre/git-wipe/commit/6914f77a2d145f2761c4fa9bc1e587333bf18431))
+
+### 🐛 Bug Fixes
+
+- **worktrees** Treat a reference newer than now as zero age, not unknown - ([34d1596](https://github.com/noirbizarre/git-wipe/commit/34d159689f30dc279acd987a568cf39de20e09f2))
+- **worktrees** Base worktree age on the last real change, not the admin dir timestamp ([#85](https://github.com/noirbizarre/git-wipe/issues/85)) - ([a53d7e0](https://github.com/noirbizarre/git-wipe/commit/a53d7e022ebfa6c1512a138980c4abb625ca5f16))
+
+### 📚 Documentation
+
+- **readme** Improve the badges row (strip spaces, add missing links, add titles, add AUR) ([#82](https://github.com/noirbizarre/git-wipe/issues/82)) - ([750e815](https://github.com/noirbizarre/git-wipe/commit/750e815965cc88383bcfd1424cb9d3c5c8962547))
+
+### 🔧 CI
+
+- Don't fail-fast the OS test matrix - ([ac92063](https://github.com/noirbizarre/git-wipe/commit/ac92063c3aa0626608e46a363219adb24478e1be))
+
 ## [v0.4.0](https://github.com/noirbizarre/git-wipe/compare/v0.3.0..v0.4.0) - 2026-08-16
 
 ### 💫 Features
