@@ -849,6 +849,39 @@ impl Git {
         Ok(!out.trim().is_empty())
     }
 
+    /// List every tracked and untracked-but-not-ignored file inside `path`.
+    ///
+    /// Runs `git ls-files --cached --others --exclude-standard` from `path`.
+    /// Gitignored files (build output, caches, dependency directories) are
+    /// excluded, so scanning these for the newest mtime cannot be fooled by a
+    /// build or a dependency install.
+    pub fn worktree_files(&self, path: &Path) -> Result<Vec<String>> {
+        let out =
+            self.in_dir(path)
+                .run(&["ls-files", "--cached", "--others", "--exclude-standard"])?;
+        Ok(out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect())
+    }
+
+    /// Return the committer date, in Unix seconds, of `rev` as seen from `path`.
+    ///
+    /// `Ok(None)` covers every reason git can't render a date for `rev` — an
+    /// unborn `HEAD`, a dangling ref left by a deleted branch, anything short
+    /// of the command failing to launch — since a caller building a fallback
+    /// chain must be able to treat "no date" the same way regardless of cause.
+    pub fn committer_date(&self, path: &Path, rev: &str) -> Result<Option<u64>> {
+        let output = self
+            .in_dir(path)
+            .spawn(&["log", "-1", "--format=%ct", rev])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok())
+    }
+
     /// Return the porcelain status of the current working directory.
     pub fn status_porcelain(&self) -> Result<String> {
         self.run(&["status", "--porcelain"])
