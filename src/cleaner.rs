@@ -447,7 +447,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     .cloned()
                     .collect()
             } else {
-                ui.multi_select(&prompt, &values, &labels, &defaults, &hints)?
+                ui.multi_select(&prompt, &values, &labels, &defaults, &hints, true)?
             };
 
             selected_branches = selected
@@ -616,6 +616,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         &f_labels,
                         &f_defaults,
                         &f_hints,
+                        true,
                     )?
                 };
                 let f_selected_set: HashSet<String> = f_selected.into_iter().collect();
@@ -906,6 +907,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     &display,
                     &defaults,
                     &[],
+                    true,
                 )?
             };
             let selected: HashSet<&String> = to_delete.iter().collect();
