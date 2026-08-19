@@ -312,6 +312,17 @@ impl Ui {
             console::style(format!("{count} {noun}")).cyan(),
         ));
     }
+
+    /// Print a "freed" summary line: "✔ 3.4G freed."
+    ///
+    /// Styled like [`Ui::summary`]: the value in cyan, the verb and period in
+    /// the terminal's default colour.
+    pub fn freed(&self, bytes: u64) {
+        self.success(&format!(
+            "{} freed.",
+            console::style(crate::size::format_bytes(bytes)).cyan(),
+        ));
+    }
 }
 
 #[cfg(test)]

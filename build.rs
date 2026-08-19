@@ -30,9 +30,16 @@ mod cli;
 #[allow(dead_code)]
 mod duration;
 
+// `cli` names it through `crate::size`, which here resolves against the
+// build script's own root.
+#[path = "src/size.rs"]
+#[allow(dead_code)]
+mod size;
+
 fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed=src/cli.rs");
     println!("cargo:rerun-if-changed=src/duration.rs");
+    println!("cargo:rerun-if-changed=src/size.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is always set by cargo"));

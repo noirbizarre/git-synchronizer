@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use crate::branches::Effort;
 use crate::duration::MinAge;
 use crate::git::Git;
+use crate::size::Size;
 use crate::ui::Ui;
 
 /// The git config section name used for all git-wipe settings.
@@ -60,6 +61,9 @@ pub struct Config {
     /// Minimum age a worktree must have before it may be removed.
     /// `None` means use [`MinAge::default`], i.e. no guard.
     pub min_age: Option<MinAge>,
+    /// Minimum on-disk size a worktree must have before it may be removed.
+    /// `None` means use [`Size::default`], i.e. no guard.
+    pub min_size: Option<Size>,
     /// How many read-only git probes may run at once during analysis.
     /// `None` means use the CPU count.
     pub jobs: Option<u32>,
@@ -81,6 +85,7 @@ impl Default for Config {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         }
     }
@@ -121,6 +126,12 @@ impl Config {
             .transpose()
             .with_context(|| format!("invalid {SECTION}.minage in git config"))?;
 
+        let min_size = git
+            .config_get(&format!("{SECTION}.minsize"))?
+            .map(|v| v.parse::<Size>())
+            .transpose()
+            .with_context(|| format!("invalid {SECTION}.minsize in git config"))?;
+
         let jobs = git
             .config_get(&format!("{SECTION}.jobs"))?
             .map(|v| parse_jobs(&v))
@@ -134,6 +145,7 @@ impl Config {
             worktrunk,
             effort,
             min_age,
+            min_size,
             jobs,
         }))
     }
@@ -190,6 +202,16 @@ impl Config {
             }
             None => {
                 git.config_unset_all(&format!("{SECTION}.minage"))?;
+            }
+        }
+
+        // Minimum worktree size (optional)
+        match self.min_size {
+            Some(min_size) => {
+                git.config_set(&format!("{SECTION}.minsize"), &min_size.to_string())?;
+            }
+            None => {
+                git.config_unset_all(&format!("{SECTION}.minsize"))?;
             }
         }
 
@@ -303,9 +325,10 @@ impl Config {
 
         // ── Save ─────────────────────────────────────────────────────
 
-        // Effort and min age are deliberately not asked here: they are
-        // power-user knobs with sensible defaults, set later with
-        // `git wipe config set effort <n>` / `... set minage <duration>`.
+        // Effort, min age and min size are deliberately not asked here: they
+        // are power-user knobs with sensible defaults, set later with
+        // `git wipe config set effort <n>` / `... set minage <duration>` /
+        // `... set minsize <size>`.
         let config = Self {
             protected,
             ignore,
@@ -313,6 +336,7 @@ impl Config {
             worktrunk,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config.save(git)?;
@@ -355,6 +379,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config.save(&git)?;
@@ -377,6 +402,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config.save(&git)?;
@@ -422,6 +448,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config.save(&git)?;
@@ -442,6 +469,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         }
         .save(&git)?;
@@ -462,6 +490,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         }
         .save(&git)?;
@@ -473,6 +502,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         }
         .save(&git)?;
@@ -493,6 +523,7 @@ mod tests {
             worktrunk: Some(true),
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config1.save(&git)?;
@@ -504,6 +535,7 @@ mod tests {
             worktrunk: Some(false),
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config2.save(&git)?;
@@ -559,6 +591,51 @@ mod tests {
     }
 
     #[test]
+    fn config_min_size_roundtrip() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+
+        let config = Config {
+            min_size: Some("100M".parse().unwrap()),
+            ..Config::default()
+        };
+        config.save(&git)?;
+        assert_eq!(
+            Config::try_load(&git)?
+                .expect("config should exist")
+                .min_size,
+            Some("100M".parse().unwrap())
+        );
+
+        // Unsetting it removes the key entirely, falling back to the default.
+        let config = Config {
+            min_size: None,
+            ..Config::default()
+        };
+        config.save(&git)?;
+        assert!(
+            Config::try_load(&git)?
+                .expect("config should exist")
+                .min_size
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_min_size_rejects_an_invalid_stored_value() -> Result<()> {
+        let (_dir, git) = crate::test_helpers::init_repo()?;
+        Config::default().save(&git)?;
+        git.config_set(&format!("{SECTION}.minsize"), "5x")?;
+
+        let err = Config::try_load(&git).expect_err("invalid minsize must fail to load");
+        assert!(
+            format!("{err:#}").contains("wipe.minsize"),
+            "error should name the offending key, got: {err:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn config_jobs_roundtrips_and_rejects_invalid_stored_values() -> Result<()> {
         let (_dir, git) = crate::test_helpers::init_repo()?;
 
@@ -598,6 +675,7 @@ mod tests {
             worktrunk: Some(true),
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config.save(&git)?;
@@ -613,6 +691,7 @@ mod tests {
             worktrunk: Some(false),
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config2.save(&git)?;
@@ -628,6 +707,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config3.save(&git)?;
@@ -648,6 +728,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         config.save(&git)?;

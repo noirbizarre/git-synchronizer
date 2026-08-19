@@ -493,6 +493,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let filter = filter_for(&git, &config)?;
@@ -514,6 +515,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -546,6 +548,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -579,6 +582,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -600,6 +604,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
@@ -616,6 +621,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         assert!(find_gone_local(&git, &filter_for(&git, &config)?, &[])?.is_empty());
@@ -632,6 +638,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -707,6 +714,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let filter = filter_for(&git, &config)?;
@@ -768,6 +776,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let merged = find_merged_local(
@@ -828,6 +837,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let merged = find_merged_local(
@@ -907,6 +917,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let filter = filter_for(&git, &config)?;
@@ -980,6 +991,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let merged = find_merged_local(
@@ -1064,6 +1076,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let filter = filter_for(&git, &config)?;
@@ -1094,6 +1107,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -1116,6 +1130,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -1140,6 +1155,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -1183,6 +1199,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -1277,6 +1294,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         }
     }
@@ -1410,6 +1428,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -1444,6 +1463,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
 
@@ -1612,6 +1632,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         }
     }
@@ -1658,6 +1679,7 @@ mod tests {
             worktrunk: None,
             effort: None,
             min_age: None,
+            min_size: None,
             jobs: None,
         };
         let filter = filter_for(&git, &config)?;

@@ -28,6 +28,7 @@ configured remotes. It also handles orphaned worktree cleanup.
 - Worktree cleanup: unified prompt for branches with worktrees and orphaned worktrees
 - Respects locked worktrees: skips removal with an informational message
 - Min-age guard (`--min-age`): never removes a worktree changed too recently
+- Worktree size reporting and a `--min-size` guard/filter (`--size` shows sizes without filtering)
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.wipe-protected`)
 - Ignore branch patterns entirely (`wipe.ignore`) -- never fetched, never analysed
@@ -157,18 +158,31 @@ setup wizard.
 
 ```console
 $ git wipe status
-AGE  STATUS          BRANCH              PATH
-34w  merged,clean    blog-archive        ~/src/blog-archive
-30w  merged,dirty    submit-to-registry  ~/src/islamabad
-29w  orphan,clean    (detached)          ~/src/tree-sitter-x
-2h   unmerged      * migrate-vfs         ~/src/slicc
-3h   merged,gone     fix/typo            -
+AGE  SIZE  STATUS          BRANCH              PATH
+34w  -     merged,clean    blog-archive        ~/src/blog-archive
+30w  -     merged,dirty    submit-to-registry  ~/src/islamabad
+29w  -     orphan,clean    (detached)          ~/src/tree-sitter-x
+2h   -     unmerged      * migrate-vfs         ~/src/slicc
+3h   -     merged,gone     fix/typo            -
+```
+
+Sizing walks each worktree's directory tree, so by default `SIZE` is always
+`-`: pass `--size` to compute and show it (or `--min-size`, which implies it):
+
+```console
+$ git wipe status --size
+AGE  SIZE    STATUS          BRANCH              PATH
+34w  160.7M  merged,clean    blog-archive        ~/src/blog-archive
+30w  116.1M  merged,dirty    submit-to-registry  ~/src/islamabad
+29w    6.0M  orphan,clean    (detached)          ~/src/tree-sitter-x
+2h     2.8G  unmerged      * migrate-vfs         ~/src/slicc
+3h        -  merged,gone     fix/typo            -
 ```
 
 One line per worktree, plus one per local branch that has no worktree, sorted
-oldest first. The current branch is marked with `*`. A `-` in the `PATH` column
-means the branch is not checked out anywhere; `?` in `AGE` means the age could
-not be established.
+oldest first. The current branch is marked with `*`. A `-` in the `PATH` or
+`SIZE` column means there is nothing to report (no worktree, or sizing was not
+requested); `?` in `AGE` means the age could not be established.
 
 The listing goes to stdout so it can be piped and grepped; warnings and the
 detection spinner go to stderr.
@@ -189,7 +203,7 @@ Statuses combine, and are rendered most-actionable first:
 without a worktree gets neither `clean` nor `dirty` — there is no working tree
 to inspect.
 
-Two filters narrow the listing:
+Three filters narrow the listing:
 
 - `--merged` keeps only entries detected as merged.
 - `--min-age <DURATION>` keeps only entries at least that old. Note the
@@ -197,8 +211,15 @@ Two filters narrow the listing:
   removal: here it is a *display filter*, and the configured `wipe.minage` is
   deliberately not inherited so a safety setting cannot silently truncate the
   inventory. Entries whose age could not be established are always kept.
+- `--min-size <SIZE>` keeps only entries at least that large, with the same
+  guard-vs-filter distinction as `--min-age`: `wipe.minsize` is not inherited,
+  and entries with no known size are always kept. Only worktree rows have a
+  size; branch-only rows never do.
 
-Two caveats worth knowing:
+Pass `--size` to compute and show sizes without filtering anything (implied by
+a non-zero `--min-size`).
+
+Three caveats worth knowing:
 
 - Because `status` never fetches, `gone` reflects the remote-tracking refs as
   they are on disk, and is only as fresh as your last `git fetch --prune`. A
@@ -206,6 +227,10 @@ Two caveats worth knowing:
 - Merge detection is the slow part, and honours `--effort` and `--jobs` exactly
   as a wipe run does, so the two always agree on what "merged" means. Use
   `--effort 1` for a fast, ancestor-only answer.
+- Sizing walks each worktree's directory tree, which can be slow for a large
+  `node_modules` or `target`. It is therefore skipped entirely unless
+  `--min-size` or `--size` is given, so a plain `git wipe status` stays cheap
+  enough for a shell prompt or a hook.
 
 Branches matched by `wipe.ignore` are not listed: git-wipe treats them as
 non-existent everywhere else.
@@ -246,11 +271,12 @@ that has never been configured is an error rather than a setup wizard (run
 | `remotes` | Phase 4: merged branches and deletion outcome per remote |
 | `warnings` | Non-fatal messages surfaced during the run |
 | `errors` | Failed operations, each with `action`, `target`, `kind` (`network`, `auth`, `other`) and `message` |
-| `summary` | `local_branches_deleted`, `remote_branches_deleted`, `worktrees_removed`, `errors` |
+| `summary` | `local_branches_deleted`, `remote_branches_deleted`, `worktrees_removed`, `errors`, `freed_kb` (bytes freed by removed worktrees, in kibibytes; zero unless `--min-size`/`--size` was given) |
 
 Item statuses are `updated`, `deleted`, `removed`, `skipped`, `locked`,
-`too_young`, `failed` or `dry_run`. A fatal error still yields a document (with
-`status: "error"`) and a non-zero exit code.
+`too_young`, `too_small`, `failed` or `dry_run`. A fatal error still yields a
+document (with `status: "error"`) and a non-zero exit code. Worktree entries
+also carry `size_kb` (kibibytes), present only when sizing was requested.
 
 `git wipe status --json` shares the same versioned schema, but carries no
 action or outcome field — `status` never acts:
@@ -276,6 +302,7 @@ Each entry has:
 | `branch` | Branch name; absent for a detached-HEAD worktree |
 | `path` | Absolute worktree path; absent for a branch with no worktree |
 | `age_seconds` | Age in seconds, or `null` when it could not be established |
+| `size_kb` | Size in kibibytes, or `null` when not computed (needs `--min-size`/`--size`) or the row has no worktree |
 | `status` | The statuses that apply, in the order the `STATUS` column renders them |
 | `current` | Whether it is checked out in the worktree the command ran from |
 | `protected` | Whether a protected pattern matches it |
@@ -341,6 +368,7 @@ to the repository-local `.git/config`:
     worktrunk = true
     effort = 3
     minage = 2h
+    minsize = 100M
     jobs = 8
 ```
 
@@ -352,6 +380,7 @@ to the repository-local `.git/config`:
 | `worktrunk` | bool | Enable/disable [worktrunk](https://worktrunk.dev) for worktree removal. When omitted, auto-detects (see below) |
 | `effort` | `1`-`3` | How thorough merge detection should be. Defaults to `2`; `--effort` overrides it |
 | `minage` | duration | Minimum age a worktree must have before it may be removed, e.g. `30s`, `2h`, `7d`. Defaults to `0s` (no guard); `--min-age` overrides it |
+| `minsize` | size | Minimum on-disk size a worktree must have before it may be removed, e.g. `512B`, `100K`, `100M`, `2G`. Defaults to `0B` (no guard); `--min-size` overrides it |
 | `jobs` | integer >= 1 | How many read-only git probes analysis may run at once. Defaults to the CPU count; `--jobs` overrides it, `--verbose` forces `1` |
 
 When `worktrunk` is unset, git-wipe enables it only if the repository has a

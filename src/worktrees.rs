@@ -129,6 +129,43 @@ pub fn is_too_young(git: &Git, wt: &Worktree, min_age: MinAge) -> bool {
     worktree_age(git, wt).is_some_and(|age| age < min_age.as_duration())
 }
 
+/// The on-disk size of `wt`'s working tree, in bytes.
+///
+/// A hand-rolled recursive walk rather than a `du` shell-out: portable, and
+/// avoids a process spawn per worktree. Symlinks are counted by their own
+/// (small) metadata rather than followed — safe against cycles, and avoids
+/// double-counting a target that lives elsewhere. Entries that cannot be read
+/// (a permission error, a race with concurrent mutation) are skipped rather
+/// than failing the whole walk: a partial answer beats none for what is
+/// inherently an approximation.
+///
+/// Returns `None` only when the worktree's own root cannot be read at all
+/// (e.g. it was already removed).
+pub fn worktree_size(wt: &Worktree) -> Option<u64> {
+    if !wt.path.is_dir() {
+        return None;
+    }
+    Some(dir_size(&wt.path))
+}
+
+/// Recursively sum file sizes under `path`. Unreadable entries contribute
+/// zero rather than aborting the walk.
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match entry.metadata() {
+            // `DirEntry::metadata` does not follow symlinks, unlike
+            // `fs::metadata`, so a symlink is measured as itself.
+            Ok(meta) if meta.is_dir() => dir_size(&entry.path()),
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +245,43 @@ mod tests {
         let wt = worktree(&git)?;
 
         assert!(!is_too_young(&git, &wt, MinAge::default()));
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_size_is_positive_for_a_populated_worktree() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
+        let wt = worktree(&git)?;
+
+        let size = worktree_size(&wt).expect("size should be resolvable");
+        assert!(size > 0, "a checked-out worktree must have some size");
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_size_grows_when_a_file_is_added() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_worktree()?;
+        let wt = worktree(&git)?;
+        let wt_dir = std::path::Path::new(&wt_path);
+
+        let before = worktree_size(&wt).expect("size should be resolvable");
+        std::fs::write(wt_dir.join("padding.bin"), vec![0u8; 4096])?;
+        let after = worktree_size(&wt).expect("size should be resolvable");
+
+        assert!(
+            after >= before + 4096,
+            "expected size to grow by at least the new file's bytes: {before} -> {after}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_size_returns_none_for_a_missing_worktree() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_worktree()?;
+        let mut wt = worktree(&git)?;
+        wt.path = std::path::PathBuf::from("/this/path/does/not/exist");
+
+        assert!(worktree_size(&wt).is_none());
         Ok(())
     }
 

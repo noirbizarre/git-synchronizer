@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::duration::MinAge;
+use crate::size::Size;
 
 /// Wipe out merged local branches and worktrees.
 ///
@@ -92,6 +93,28 @@ pub struct Cli {
     /// this old are listed, and the configured `wipe.minage` is not inherited.
     #[arg(long, value_name = "DURATION", global = true)]
     pub min_age: Option<MinAge>,
+
+    /// Skip worktrees smaller than this on disk (default: 0B)
+    ///
+    /// Accepts a single value and unit: 512B, 100K, 100M, 2G — binary units —
+    /// or a bare 0 to disable the filter/guard.
+    ///
+    /// On a wipe run this excludes smaller worktrees from the candidate list
+    /// entirely. On `status` this is a display filter instead, and the
+    /// configured `wipe.minsize` is not inherited — same reasoning as
+    /// `--min-age`.
+    ///
+    /// Computing a worktree's size walks its directory tree, so sizing is
+    /// skipped unless this or --size is given.
+    #[arg(long, value_name = "SIZE", global = true)]
+    pub min_size: Option<Size>,
+
+    /// Compute and show worktree sizes, without filtering or excluding anything
+    ///
+    /// Implied by a non-zero --min-size. Exists so sizes can be inspected
+    /// without setting a threshold.
+    #[arg(long, global = true)]
+    pub size: bool,
 
     /// Number of git probes to run at once during analysis (default: CPU count)
     ///
@@ -373,6 +396,25 @@ mod tests {
     }
 
     #[test]
+    fn cli_min_size_flag() {
+        let cli = Cli::parse_from(["git-wipe", "--min-size", "100M"]);
+        assert_eq!(cli.min_size, Some("100M".parse().unwrap()));
+        assert_eq!(Cli::parse_from(["git-wipe"]).min_size, None);
+    }
+
+    #[test]
+    fn cli_min_size_rejects_garbage() {
+        assert!(Cli::try_parse_from(["git-wipe", "--min-size", "soon"]).is_err());
+        assert!(Cli::try_parse_from(["git-wipe", "--min-size", "5x"]).is_err());
+    }
+
+    #[test]
+    fn cli_size_flag_defaults_to_false() {
+        assert!(!Cli::parse_from(["git-wipe"]).size);
+        assert!(Cli::parse_from(["git-wipe", "--size"]).size);
+    }
+
+    #[test]
     fn cli_worktrunk_flag() {
         let cli = Cli::parse_from(["git-wipe", "--worktrunk"]);
         assert!(cli.worktrunk);
@@ -472,12 +514,17 @@ mod tests {
             "2",
             "--min-age",
             "2h",
+            "--min-size",
+            "100M",
+            "--size",
             "--json",
             "--no-color",
         ]);
         assert_eq!(cli.effort, Some(3));
         assert_eq!(cli.jobs, Some(2));
         assert_eq!(cli.min_age, Some("2h".parse().unwrap()));
+        assert_eq!(cli.min_size, Some("100M".parse().unwrap()));
+        assert!(cli.size);
         assert!(cli.json);
         assert!(cli.no_color);
     }
@@ -492,6 +539,9 @@ mod tests {
             "2",
             "--min-age",
             "2h",
+            "--min-size",
+            "100M",
+            "--size",
             "--json",
             "--no-color",
             "status",
@@ -499,6 +549,8 @@ mod tests {
         assert_eq!(cli.effort, Some(3));
         assert_eq!(cli.jobs, Some(2));
         assert_eq!(cli.min_age, Some("2h".parse().unwrap()));
+        assert_eq!(cli.min_size, Some("100M".parse().unwrap()));
+        assert!(cli.size);
         assert!(cli.json);
         assert!(cli.no_color);
     }

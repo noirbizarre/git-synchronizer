@@ -1084,6 +1084,71 @@ fn min_age_keeps_a_freshly_created_worktree() {
     );
 }
 
+#[test]
+fn min_size_flag_accepted() {
+    let dir = init_repo();
+    configure(&dir);
+
+    for value in ["0", "512B", "100K", "100M", "2G"] {
+        Command::cargo_bin("git-wipe")
+            .unwrap()
+            .args(["-y", "--no-fetch", "--local-only", "--min-size", value])
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn min_size_flag_rejects_garbage() {
+    let dir = init_repo();
+    configure(&dir);
+
+    Command::cargo_bin("git-wipe")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--min-size", "soon"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid size"));
+}
+
+#[test]
+fn size_flag_accepted() {
+    let dir = init_repo();
+    configure(&dir);
+
+    Command::cargo_bin("git-wipe")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--local-only", "--size"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn min_size_excludes_a_small_worktree() {
+    let dir = init_repo();
+    configure(&dir);
+    let wt_path = add_merged_worktree(&dir, "feature/small", "wt-small");
+
+    // The fixture worktree holds only a couple of small tracked files, so any
+    // realistic --min-size excludes it.
+    let doc = json_output(
+        &dir,
+        &["--json", "--no-fetch", "--local-only", "--min-size", "1G"],
+    );
+
+    let worktrees = doc["local"]["worktrees"].as_array().unwrap();
+    let entry = worktrees
+        .iter()
+        .find(|w| w["branch"] == "feature/small")
+        .expect("the small worktree should be reported");
+    assert_eq!(entry["status"], "too_small");
+    assert_eq!(doc["summary"]["worktrees_removed"], 0);
+    assert!(wt_path.exists());
+}
+
 // ── Forced worktree removal ──────────────────────────────────────────
 
 /// Make `path` dirty with an untracked file.
@@ -1160,6 +1225,34 @@ fn config_set_minage_roundtrips() {
         .success()
         .stderr(predicate::str::contains("min age"))
         .stderr(predicate::str::contains("2h"));
+}
+
+#[test]
+fn config_set_minsize_roundtrips() {
+    let dir = init_repo();
+
+    Command::cargo_bin("git-wipe")
+        .unwrap()
+        .args(["config", "set", "minsize", "100M"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let output = StdCommand::new("git")
+        .args(["config", "--get", "wipe.minsize"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "100M");
+
+    Command::cargo_bin("git-wipe")
+        .unwrap()
+        .args(["config", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("min size"))
+        .stderr(predicate::str::contains("100M"));
 }
 
 #[test]
@@ -2289,6 +2382,69 @@ fn status_min_age_filters_entries() {
 }
 
 #[test]
+fn status_skips_sizing_by_default() {
+    let dir = init_repo();
+    configure(&dir);
+    add_merged_worktree(&dir, "feature/unsized", "wt-unsized");
+
+    let doc = json_output(&dir, &["status", "--json"]);
+    assert!(
+        doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["size_kb"].is_null()),
+        "sizing must be skipped unless --min-size or --size is given: {doc}"
+    );
+}
+
+#[test]
+fn status_size_flag_computes_sizes_without_filtering() {
+    let dir = init_repo();
+    configure(&dir);
+    add_merged_worktree(&dir, "feature/sized", "wt-sized");
+
+    let doc = json_output(&dir, &["status", "--json", "--size"]);
+    let entries = doc["entries"].as_array().unwrap();
+    assert!(
+        entries.iter().any(|e| e["kind"] == "worktree"
+            && e["branch"] == "feature/sized"
+            && !e["size_kb"].is_null()),
+        "the worktree row should have a computed size: {doc}"
+    );
+}
+
+#[test]
+fn status_min_size_filters_entries() {
+    let dir = init_repo();
+    configure(&dir);
+    add_merged_worktree(&dir, "feature/small-wt", "wt-small");
+
+    // The fixture worktree is tiny, so a large threshold excludes it, while
+    // an unknown-size branch row (none here, since every row has a worktree
+    // or is a plain branch) is unaffected either way.
+    let doc = json_output(&dir, &["status", "--json", "--min-size", "1G"]);
+    assert!(
+        !doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["branch"] == "feature/small-wt"),
+        "the small worktree must be filtered out: {doc}"
+    );
+
+    let doc = json_output(&dir, &["status", "--json", "--min-size", "0"]);
+    assert!(
+        doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["branch"] == "feature/small-wt"),
+        "zero --min-size must keep everything: {doc}"
+    );
+}
+
+#[test]
 fn status_merged_only_filters_entries() {
     let dir = init_repo();
     configure(&dir);
@@ -2366,6 +2522,8 @@ fn status_help_documents_its_flags() {
         .stdout(
             predicate::str::contains("--merged")
                 .and(predicate::str::contains("--min-age"))
+                .and(predicate::str::contains("--min-size"))
+                .and(predicate::str::contains("--size"))
                 .and(predicate::str::contains("--effort"))
                 .and(predicate::str::contains("--no-color")),
         );

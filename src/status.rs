@@ -24,8 +24,9 @@ use crate::duration::MinAge;
 use crate::git::Git;
 use crate::parallel;
 use crate::report::{StatusEntry, StatusFlag, StatusKind, StatusReport, path_string};
+use crate::size::{Size, format_bytes};
 use crate::ui::{Ui, tilde_path};
-use crate::worktrees::worktree_age;
+use crate::worktrees::{worktree_age, worktree_size};
 
 /// Emitted whenever a `gone` branch is reported: `status` never fetches, so the
 /// remote-tracking refs it reads are only as fresh as the last `git fetch`.
@@ -68,6 +69,9 @@ pub struct Row {
     pub path: Option<PathBuf>,
     /// `None` when the age could not be established.
     pub age: Option<Duration>,
+    /// Size in bytes, or `None` when sizing was not requested, or the row has
+    /// no worktree (a branch row).
+    pub size: Option<u64>,
     pub flags: Flags,
     /// Checked out in the worktree the command was run from.
     pub current: bool,
@@ -81,6 +85,11 @@ pub struct StatusOptions {
     pub jobs: usize,
     /// `--min-age`: list only entries at least this old. Zero disables it.
     pub min_age: MinAge,
+    /// `--min-size`: list only entries at least this large. Zero disables it.
+    pub min_size: Size,
+    /// `--size`: force size computation/display without filtering (implied
+    /// by a non-zero `min_size`).
+    pub show_size: bool,
     /// `--merged`: list only rows flagged as merged.
     pub merged_only: bool,
 }
@@ -144,6 +153,15 @@ pub fn scan(git: &Git, filter: &Filter, ui: &Ui, opts: StatusOptions) -> Result<
         parallel::map(&worktrees, opts.jobs, |_, wt| git.worktree_dirty(&wt.path));
     let ages: Vec<Option<Duration>> =
         parallel::map(&worktrees, opts.jobs, |_, wt| worktree_age(git, wt));
+    // Sizing walks each worktree's directory tree, so it is skipped entirely
+    // unless `--min-size` or `--size` asked for it, keeping the default
+    // listing cheap enough for a shell hook.
+    let need_size = opts.show_size || !opts.min_size.is_zero();
+    let sizes: Vec<Option<u64>> = if need_size {
+        parallel::map(&worktrees, opts.jobs, |_, wt| worktree_size(wt))
+    } else {
+        vec![None; worktrees.len()]
+    };
 
     // Only branches that are not already merged need the unmerged probe.
     let to_probe: Vec<&String> = locals
@@ -164,7 +182,7 @@ pub fn scan(git: &Git, filter: &Filter, ui: &Ui, opts: StatusOptions) -> Result<
     let mut rows = Vec::new();
     let mut with_worktree: HashSet<&str> = HashSet::new();
 
-    for ((wt, dirty), age) in worktrees.iter().zip(dirty).zip(ages) {
+    for (((wt, dirty), age), size) in worktrees.iter().zip(dirty).zip(ages).zip(sizes) {
         let orphan = match &wt.branch {
             Some(branch) => !live.contains(branch.as_str()),
             None => true, // detached HEAD
@@ -198,6 +216,7 @@ pub fn scan(git: &Git, filter: &Filter, ui: &Ui, opts: StatusOptions) -> Result<
             branch: wt.branch.clone(),
             path: Some(wt.path.clone()),
             age,
+            size,
             flags,
             current: wt.branch.as_deref() == current.as_deref() && current.is_some(),
             protected: wt.branch.as_ref().is_some_and(|b| filter.is_protected(b)),
@@ -220,6 +239,8 @@ pub fn scan(git: &Git, filter: &Filter, ui: &Ui, opts: StatusOptions) -> Result<
                 now.duration_since(UNIX_EPOCH + Duration::from_secs(secs))
                     .ok()
             }),
+            // A branch without a worktree has nothing on disk to measure.
+            size: None,
             flags,
             current: current.as_deref() == Some(branch.as_str()),
             protected: filter.is_protected(branch),
@@ -263,7 +284,7 @@ fn sort_rows(rows: &mut [Row]) {
     });
 }
 
-/// Apply `--min-age` and `--merged`.
+/// Apply `--min-age`, `--min-size` and `--merged`.
 ///
 /// Kept separate from [`scan`] so the table and the JSON document filter
 /// identically, and so it is testable without a repository.
@@ -276,6 +297,15 @@ pub fn filter_rows(rows: Vec<Row>, opts: StatusOptions) -> Vec<Row> {
             // something we merely failed to date is the worst outcome for an
             // inventory.
             opts.min_age.is_zero() || row.age.is_none_or(|age| age >= opts.min_age.as_duration())
+        })
+        .filter(|row| {
+            // `--min-size` filters here rather than guarding, exactly like
+            // `--min-age`. An entry with no known size (not computed, or a
+            // branch without a worktree) is kept.
+            opts.min_size.is_zero()
+                || row
+                    .size
+                    .is_none_or(|bytes| bytes >= opts.min_size.as_bytes())
         })
         .collect()
 }
@@ -338,6 +368,12 @@ fn format_age(age: Option<Duration>) -> String {
     "0s".to_string()
 }
 
+/// Render a size for the table: `-` when none was computed (sizing was not
+/// requested, or the row has no worktree).
+fn format_size(size: Option<u64>) -> String {
+    size.map_or_else(|| "-".to_string(), format_bytes)
+}
+
 /// Render the listing as an aligned table.
 ///
 /// Widths are computed on the unstyled cells and colour applied after padding,
@@ -352,7 +388,7 @@ pub fn render(ui: &Ui, rows: &[Row], filtered: bool) {
         return;
     }
 
-    let cells: Vec<[String; 4]> = rows
+    let cells: Vec<[String; 5]> = rows
         .iter()
         .map(|row| {
             let tokens = status_tokens(row.flags);
@@ -367,6 +403,7 @@ pub fn render(ui: &Ui, rows: &[Row], filtered: bool) {
                 .unwrap_or_else(|| "(detached)".to_string());
             [
                 format_age(row.age),
+                format_size(row.size),
                 status,
                 format!("{} {branch}", if row.current { "*" } else { " " }),
                 row.path
@@ -376,7 +413,7 @@ pub fn render(ui: &Ui, rows: &[Row], filtered: bool) {
         })
         .collect();
 
-    const HEADERS: [&str; 4] = ["AGE", "STATUS", "BRANCH", "PATH"];
+    const HEADERS: [&str; 5] = ["AGE", "SIZE", "STATUS", "BRANCH", "PATH"];
     let mut widths = HEADERS.map(|h| h.chars().count());
     for row in &cells {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -384,24 +421,26 @@ pub fn render(ui: &Ui, rows: &[Row], filtered: bool) {
         }
     }
     // BRANCH carries a two-character current-branch marker the header does not.
-    widths[2] = widths[2].max(HEADERS[2].chars().count() + 2);
+    widths[3] = widths[3].max(HEADERS[3].chars().count() + 2);
 
     ui.table_header(&format!(
-        "{:<a$}  {:<s$}  {:<b$}  {}",
+        "{:<a$}  {:<z$}  {:<s$}  {:<b$}  {}",
         HEADERS[0],
         HEADERS[1],
-        format!("  {}", HEADERS[2]),
-        HEADERS[3],
+        HEADERS[2],
+        format!("  {}", HEADERS[3]),
+        HEADERS[4],
         a = widths[0],
-        s = widths[1],
-        b = widths[2],
+        z = widths[1],
+        s = widths[2],
+        b = widths[3],
     ));
 
     for (row, cell) in rows.iter().zip(&cells) {
         let tokens = status_tokens(row.flags);
-        let status_pad = " ".repeat(widths[1].saturating_sub(cell[1].chars().count()));
+        let status_pad = " ".repeat(widths[2].saturating_sub(cell[2].chars().count()));
         let status = if tokens.is_empty() {
-            cell[1].clone()
+            cell[2].clone()
         } else {
             tokens
                 .iter()
@@ -410,12 +449,14 @@ pub fn render(ui: &Ui, rows: &[Row], filtered: bool) {
                 .join(",")
         };
         ui.table_row(&format!(
-            "{:<a$}  {status}{status_pad}  {:<b$}  {}",
+            "{:<a$}  {:<z$}  {status}{status_pad}  {:<b$}  {}",
             cell[0],
-            cell[2],
+            cell[1],
             cell[3],
+            cell[4],
             a = widths[0],
-            b = widths[2],
+            z = widths[1],
+            b = widths[3],
         ));
     }
 }
@@ -433,6 +474,7 @@ pub fn to_report(rows: &[Row], warnings: Vec<String>) -> StatusReport {
             branch: row.branch.clone(),
             path: row.path.as_deref().map(path_string),
             age_seconds: row.age.map(|age| age.as_secs()),
+            size_kb: row.size.map(|bytes| bytes / 1024),
             status: status_tokens(row.flags)
                 .into_iter()
                 .map(|token| match token {
@@ -465,6 +507,8 @@ mod tests {
             effort: Effort::default(),
             jobs: 1,
             min_age: MinAge::default(),
+            min_size: Size::default(),
+            show_size: false,
             merged_only: false,
         }
     }
@@ -475,6 +519,7 @@ mod tests {
             branch: Some(branch.to_string()),
             path: None,
             age,
+            size: None,
             flags,
             current: false,
             protected: false,
@@ -564,6 +609,16 @@ mod tests {
         assert_eq!(format_age(None), "?");
     }
 
+    #[test]
+    fn format_size_renders_dash_for_none() {
+        assert_eq!(format_size(None), "-");
+    }
+
+    #[test]
+    fn format_size_renders_a_human_value() {
+        assert_eq!(format_size(Some(1024)), "1.0K");
+    }
+
     // ── Sorting ──────────────────────────────────────────────────────
 
     #[test]
@@ -633,6 +688,47 @@ mod tests {
     }
 
     #[test]
+    fn filter_rows_min_size_keeps_only_larger_entries() {
+        let rows = vec![
+            Row {
+                size: Some(200 * 1024 * 1024),
+                ..row("big", None, Flags::default())
+            },
+            Row {
+                size: Some(10 * 1024 * 1024),
+                ..row("small", None, Flags::default())
+            },
+        ];
+        let opts = StatusOptions {
+            min_size: "100M".parse().unwrap(),
+            ..opts()
+        };
+        assert_eq!(names(&filter_rows(rows, opts)), ["big"]);
+    }
+
+    #[test]
+    fn filter_rows_min_size_keeps_entries_with_unknown_size() {
+        let rows = vec![row("unknown", None, Flags::default())];
+        let opts = StatusOptions {
+            min_size: "1G".parse().unwrap(),
+            ..opts()
+        };
+        assert_eq!(names(&filter_rows(rows, opts)), ["unknown"]);
+    }
+
+    #[test]
+    fn filter_rows_zero_min_size_keeps_everything() {
+        let rows = vec![
+            Row {
+                size: Some(1),
+                ..row("a", None, Flags::default())
+            },
+            row("b", None, Flags::default()),
+        ];
+        assert_eq!(filter_rows(rows, opts()).len(), 2);
+    }
+
+    #[test]
     fn filter_rows_merged_only_drops_orphans_and_unmerged() {
         let merged = Flags {
             merged: true,
@@ -676,6 +772,7 @@ mod tests {
                 branch: None,
                 path: Some(PathBuf::from("/tmp/detached")),
                 age: Some(Duration::from_secs(3600)),
+                size: Some(1024 * 1024),
                 flags: Flags {
                     orphan: true,
                     dirty: true,
@@ -835,6 +932,39 @@ mod tests {
         Ok(())
     }
 
+    // ── Sizing ───────────────────────────────────────────────────────
+
+    #[test]
+    fn scan_skips_sizing_unless_requested() -> Result<()> {
+        let (_dir, git, _wt_path) = test_helpers::init_repo_with_worktree()?;
+        let filter = Filter::load(&git, &Config::default())?;
+        let scan = scan(&git, &filter, &Ui::quiet(), opts())?;
+        assert!(
+            scan.rows.iter().all(|r| r.size.is_none()),
+            "sizing must be skipped by default: {:?}",
+            scan.rows
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scan_computes_size_when_requested() -> Result<()> {
+        let (_dir, git, _wt_path) = test_helpers::init_repo_with_worktree()?;
+        let filter = Filter::load(&git, &Config::default())?;
+        let opts = StatusOptions {
+            show_size: true,
+            ..opts()
+        };
+        let scan = scan(&git, &filter, &Ui::quiet(), opts)?;
+        let wt_row = scan
+            .rows
+            .iter()
+            .find(|r| r.kind == RowKind::Worktree)
+            .expect("the fixture has a worktree row");
+        assert!(wt_row.size.is_some_and(|s| s > 0));
+        Ok(())
+    }
+
     // ── JSON ─────────────────────────────────────────────────────────
 
     #[test]
@@ -856,6 +986,20 @@ mod tests {
             assert!(doc.get(absent).is_none(), "{absent} must not be reported");
         }
         assert!(doc["entries"][0].get("selected").is_none());
+    }
+
+    #[test]
+    fn to_report_size_kb_is_null_when_unset_and_populated_when_set() {
+        let rows = vec![
+            row("no-size", None, Flags::default()),
+            Row {
+                size: Some(2 * 1024 * 1024),
+                ..row("with-size", None, Flags::default())
+            },
+        ];
+        let doc = serde_json::to_value(to_report(&rows, Vec::new())).unwrap();
+        assert!(doc["entries"][0]["size_kb"].is_null());
+        assert_eq!(doc["entries"][1]["size_kb"], 2048);
     }
 
     #[test]
