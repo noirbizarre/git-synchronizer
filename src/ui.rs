@@ -237,6 +237,12 @@ impl Ui {
     /// The `a` key inverts the whole selection (select all, or deselect all
     /// when everything is already selected), and demand renders a keymap hint
     /// in the footer so the shortcut is discoverable.
+    ///
+    /// `filterable` enables demand's built-in fuzzy filter: pressing `/`
+    /// starts a live fuzzy-matched search over the labels (arrow keys, the
+    /// toggle key and Enter still work while filtering; `Esc` clears it).
+    /// Pass `true` for lists that can grow long (branches, worktrees);
+    /// `false` keeps the plain list for short, fixed-size ones (remotes).
     pub fn multi_select(
         &self,
         prompt: &str,
@@ -244,11 +250,12 @@ impl Ui {
         labels: &[String],
         defaults: &[bool],
         hints: &[String],
+        filterable: bool,
     ) -> anyhow::Result<Vec<String>> {
         if self.quiet {
             return self.prompt_unavailable();
         }
-        let mut ms = MultiSelect::new(prompt).min(0);
+        let mut ms = MultiSelect::new(prompt).min(0).filterable(filterable);
         for (i, val) in values.iter().enumerate() {
             let label = labels.get(i).unwrap_or(val);
             let mut option = DemandOption::new(val.clone())
@@ -453,7 +460,7 @@ mod tests {
         assert!(ui.confirm("ok?", true).is_err());
         assert!(ui.input("name", "default").is_err());
         assert!(
-            ui.multi_select("pick", &["a".to_string()], &[], &[], &[])
+            ui.multi_select("pick", &["a".to_string()], &[], &[], &[], true)
                 .is_err()
         );
     }

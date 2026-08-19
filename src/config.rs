@@ -237,6 +237,7 @@ impl Config {
                 &branches,
                 &defaults,
                 &[],
+                true,
             )?
         };
 
@@ -277,6 +278,7 @@ impl Config {
                 &available_remotes,
                 &defaults,
                 &[],
+                false,
             )?;
             if selected.is_empty() {
                 None
