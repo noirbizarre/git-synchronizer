@@ -18,6 +18,7 @@ mod config;
 mod duration;
 mod git;
 mod parallel;
+mod pid;
 mod report;
 mod size;
 mod status;

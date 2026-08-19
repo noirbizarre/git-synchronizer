@@ -17,9 +17,10 @@ use crate::config::Config;
 use crate::duration::MinAge;
 use crate::git::{Git, Worktree};
 use crate::parallel;
+use crate::pid;
 use crate::report::{
     BranchReason, ItemStatus, LocalBranch, PulledBranch, RemoteBranch, RemoteFetch, RemoteReport,
-    Report, WorktreeEntry, WorktreeKind, path_string,
+    Report, StaleLock, StaleLockAction, WorktreeEntry, WorktreeKind, path_string,
 };
 use crate::size::{Size, format_bytes};
 use crate::ui::{Ui, tilde_path};
@@ -285,7 +286,19 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
         let candidates: Vec<String> = merged.iter().chain(gone.iter()).cloned().collect();
 
         // Build a map of branch → worktree for branches that have one.
-        let worktrees = git.worktree_list()?;
+        let mut worktrees = git.worktree_list()?;
+
+        // Resolve stale locks once, up front, over every worktree (branch
+        // associated or not) so wt_map, orphans and every guard check below
+        // already see them as unlocked. See `resolve_stale_lock` for what
+        // "stale" means and how `--dry-run` is handled.
+        let mut stale_locks: HashMap<PathBuf, StaleLock> = HashMap::new();
+        for wt in &mut worktrees {
+            if let Some(entry) = resolve_stale_lock(git, ui, &mut report, opts.dry_run, wt) {
+                stale_locks.insert(wt.path.clone(), entry);
+            }
+        }
+
         let wt_map: HashMap<String, Worktree> = worktrees
             .iter()
             .filter(|wt| !wt.is_bare)
@@ -293,11 +306,22 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
             .collect();
 
         // Collect orphan worktrees (if worktree cleanup is enabled).
-        let orphans = if !opts.no_worktrees {
+        let mut orphans = if !opts.no_worktrees {
             find_orphan_worktrees(git, &filter)?
         } else {
             Vec::new()
         };
+        // `find_orphan_worktrees` re-fetches the worktree list itself. In live
+        // mode that fresh fetch already reflects the real unlock above; in
+        // `--dry-run` nothing was actually unlocked, so patch in the same
+        // decision so orphan worktrees get the same "would unlock" treatment
+        // as branch-associated ones.
+        for wt in &mut orphans {
+            if stale_locks.contains_key(&wt.path) {
+                wt.is_locked = false;
+                wt.lock_reason = None;
+            }
+        }
 
         // Worktrees created too recently to touch. Resolved once, up front:
         // each lookup costs a `git rev-parse` and the answer is consulted at
@@ -369,6 +393,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                         kind: WorktreeKind::Branch,
                         status: guard.status(),
                         size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
+                        stale_lock: stale_locks.get(&wt.path).cloned(),
                     });
                 }
             }
@@ -381,6 +406,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                     kind: WorktreeKind::Orphan,
                     status: guard.status(),
                     size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
+                    stale_lock: stale_locks.get(&wt.path).cloned(),
                 });
             }
         }
@@ -680,6 +706,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             kind: WorktreeKind::Branch,
                             status: ItemStatus::Skipped,
                             size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
+                            stale_lock: stale_locks.get(&wt.path).cloned(),
                         });
                         warn(
                             ui,
@@ -729,6 +756,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                 kind: WorktreeKind::Branch,
                                 status: ItemStatus::DryRun,
                                 size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
+                                stale_lock: stale_locks.get(&wt.path).cloned(),
                             });
                         } else {
                             let result = ui.spinner(
@@ -769,6 +797,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                                 kind: WorktreeKind::Branch,
                                 status,
                                 size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
+                                stale_lock: stale_locks.get(&wt.path).cloned(),
                             });
                         }
                     }
@@ -788,6 +817,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             kind: WorktreeKind::Orphan,
                             status: ItemStatus::DryRun,
                             size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
+                            stale_lock: stale_locks.get(&wt.path).cloned(),
                         });
                     } else {
                         let result = ui.spinner(
@@ -817,6 +847,7 @@ pub fn run(git: &Git, config: &Config, ui: &Ui, opts: &CleanerOptions) -> Result
                             kind: WorktreeKind::Orphan,
                             status,
                             size_kb: sizes.get(&wt.path).map(|&b| b / 1024),
+                            stale_lock: stale_locks.get(&wt.path).cloned(),
                         });
                     }
                 }
@@ -1101,10 +1132,24 @@ fn worktree_guard(
 }
 
 /// Format an informational skip message for a locked worktree.
+///
+/// When the reason embeds a pid that is confirmed alive, the message names
+/// the still-running owner instead of the raw reason alone: a dead pid never
+/// reaches this function, since [`resolve_stale_lock`] clears such locks
+/// before `worktree_guard` is ever consulted.
 fn format_locked_skip_message(wt: &Worktree) -> String {
     let branch_label = wt.branch.as_deref().unwrap_or("detached");
     match &wt.lock_reason {
         Some(reason) => {
+            if let Some(pid) = pid::extract_pid(reason)
+                && pid::pid_is_alive(pid) == Some(true)
+            {
+                return format!(
+                    "  Skipping locked worktree '{}' (branch: {branch_label}): \
+                     owner (pid {pid}) is still running ({reason}).",
+                    wt.path.display()
+                );
+            }
             format!(
                 "  Skipping locked worktree '{}' (branch: {branch_label}): {reason}",
                 wt.path.display()
@@ -1117,6 +1162,68 @@ fn format_locked_skip_message(wt: &Worktree) -> String {
             )
         }
     }
+}
+
+/// Check whether `wt`'s lock is stale and, if so, clear it.
+///
+/// A lock is stale when its reason embeds a pid ([`pid::extract_pid`]) and
+/// that process is confirmed dead ([`pid::pid_is_alive`] returns
+/// `Some(false)`). Any other case — no reason, no pid, a live pid, or
+/// liveness that could not be determined — is left untouched: the
+/// conservative default, same as an opaque lock has always been.
+///
+/// `--dry-run` never calls `git worktree unlock`; the worktree is still
+/// treated as unlocked in memory for the rest of this run (so the eventual
+/// "would remove"/"would skip" reporting is accurate), but the audit trail
+/// records [`StaleLockAction::WouldUnlock`] instead of
+/// [`StaleLockAction::Unlocked`]. If the real unlock fails, the worktree is
+/// left locked and the failure is reported like any other failed operation.
+fn resolve_stale_lock(
+    git: &Git,
+    ui: &Ui,
+    report: &mut Report,
+    dry_run: bool,
+    wt: &mut Worktree,
+) -> Option<StaleLock> {
+    if !wt.is_locked {
+        return None;
+    }
+    let reason = wt.lock_reason.as_deref()?;
+    let pid = pid::extract_pid(reason)?;
+    if pid::pid_is_alive(pid) != Some(false) {
+        return None; // alive, or unknown — conservative, stays locked
+    }
+    let reason = reason.to_string();
+    let branch_label = wt.branch.as_deref().unwrap_or("detached");
+
+    if dry_run {
+        ui.dry_run(&format!(
+            "Would unlock stale lock on worktree '{}' (branch: {branch_label}): \
+             pid {pid} is no longer running (reason: {reason}).",
+            wt.path.display()
+        ));
+    } else if let Err(err) = git.worktree_unlock(&wt.path) {
+        fail(ui, report, "unlock", &path_string(&wt.path), &err);
+        return None; // couldn't unlock: stays guarded as locked
+    } else {
+        ui.muted(&format!(
+            "Unlocked stale lock on worktree '{}' (branch: {branch_label}): \
+             pid {pid} is no longer running (reason: {reason}).",
+            wt.path.display()
+        ));
+    }
+
+    wt.is_locked = false;
+    wt.lock_reason = None;
+    Some(StaleLock {
+        pid,
+        reason,
+        action: if dry_run {
+            StaleLockAction::WouldUnlock
+        } else {
+            StaleLockAction::Unlocked
+        },
+    })
 }
 
 /// Format an informational skip message for a worktree below `--min-age`.
@@ -1681,6 +1788,127 @@ mod tests {
             Some(WorktreeGuard::TooSmall)
         );
         assert_eq!(worktree_guard(&wt, &HashSet::new(), &HashSet::new()), None);
+    }
+
+    #[test]
+    fn format_locked_skip_message_mentions_a_live_owner() {
+        let wt = Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: Some("feature/x".to_string()),
+            is_bare: false,
+            is_locked: true,
+            lock_reason: Some(format!("pid={}", std::process::id())),
+        };
+        let msg = format_locked_skip_message(&wt);
+        assert!(msg.contains("Skipping locked worktree"));
+        assert!(
+            msg.contains("is still running"),
+            "message should name the still-running owner: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_stale_lock_leaves_an_opaque_reason_locked() {
+        let (_dir, git) = crate::test_helpers::init_repo().unwrap();
+        let ui = Ui::new();
+        let mut report = Report::new(false, Effort::default(), MinAge::default(), 1);
+        let mut wt = Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: Some("feature/x".to_string()),
+            is_bare: false,
+            is_locked: true,
+            lock_reason: Some("do not touch".to_string()),
+        };
+
+        let result = resolve_stale_lock(&git, &ui, &mut report, false, &mut wt);
+
+        assert!(result.is_none());
+        assert!(wt.is_locked, "an opaque reason must stay locked");
+    }
+
+    #[test]
+    fn resolve_stale_lock_leaves_a_live_pid_locked() {
+        let (_dir, git) = crate::test_helpers::init_repo().unwrap();
+        let ui = Ui::new();
+        let mut report = Report::new(false, Effort::default(), MinAge::default(), 1);
+        let mut wt = Worktree {
+            path: PathBuf::from("/tmp/wt"),
+            branch: Some("feature/x".to_string()),
+            is_bare: false,
+            is_locked: true,
+            lock_reason: Some(format!("pid={}", std::process::id())),
+        };
+
+        let result = resolve_stale_lock(&git, &ui, &mut report, false, &mut wt);
+
+        assert!(result.is_none());
+        assert!(wt.is_locked, "a live owner must stay locked");
+    }
+
+    #[test]
+    fn resolve_stale_lock_unlocks_a_dead_pid() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_stale_locked_worktree()?;
+        let ui = Ui::new();
+        let mut report = Report::new(false, Effort::default(), MinAge::default(), 1);
+        let mut wt = git
+            .worktree_list()?
+            .into_iter()
+            .find(|wt| wt.path.ends_with("worktree-stale-locked"))
+            .expect("the fixture worktree must be listed");
+        assert!(wt.is_locked, "fixture worktree should start locked");
+
+        let result = resolve_stale_lock(&git, &ui, &mut report, false, &mut wt);
+
+        let entry = result.expect("a dead pid must be recognised as stale");
+        assert_eq!(entry.pid, crate::test_helpers::DEAD_PID);
+        assert_eq!(entry.action, StaleLockAction::Unlocked);
+        assert!(!wt.is_locked);
+        assert!(wt.lock_reason.is_none());
+
+        // The real git state must be unlocked too.
+        let after = git.worktree_list()?;
+        assert!(
+            after
+                .iter()
+                .any(|wt| wt.path.ends_with("worktree-stale-locked") && !wt.is_locked),
+            "the real worktree lock should have been removed"
+        );
+
+        let _ = wt_path;
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_stale_lock_dry_run_does_not_unlock() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_stale_locked_worktree()?;
+        let ui = Ui::new();
+        let mut report = Report::new(true, Effort::default(), MinAge::default(), 1);
+        let mut wt = git
+            .worktree_list()?
+            .into_iter()
+            .find(|wt| wt.path.ends_with("worktree-stale-locked"))
+            .expect("the fixture worktree must be listed");
+
+        let result = resolve_stale_lock(&git, &ui, &mut report, true, &mut wt);
+
+        let entry = result.expect("a dead pid must be recognised as stale");
+        assert_eq!(entry.action, StaleLockAction::WouldUnlock);
+        assert!(
+            !wt.is_locked,
+            "in-memory copy is treated as unlocked so the rest of the dry run reports accurately"
+        );
+
+        // The real git state must be untouched.
+        let after = git.worktree_list()?;
+        assert!(
+            after
+                .iter()
+                .any(|wt| wt.path.ends_with("worktree-stale-locked") && wt.is_locked),
+            "--dry-run must never actually unlock"
+        );
+
+        let _ = wt_path;
+        Ok(())
     }
 
     /// Repo with `feature/merged` merged into `main` and a worktree on it.
@@ -2945,6 +3173,80 @@ mod tests {
         assert_eq!(entry.branch.as_deref(), Some("feature/locked-wt"));
         assert_eq!(entry.status, ItemStatus::Locked);
         assert_eq!(report.summary.worktrees_removed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn run_unlocks_a_stale_lock_and_removes_the_worktree() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_stale_locked_worktree()?;
+
+        let report = run(
+            &git,
+            &default_config(),
+            &Ui::new(),
+            &opts_yes_skip_network(),
+        )?;
+
+        assert!(
+            !std::path::Path::new(&wt_path).exists(),
+            "a stale lock must not prevent removal"
+        );
+
+        let branches = git.local_branches()?;
+        assert!(
+            !branches.contains(&"feature/stale-locked-wt".to_string()),
+            "the branch should be deletable once its stale lock is cleared"
+        );
+
+        let entry = report
+            .local
+            .worktrees
+            .iter()
+            .find(|wt| wt.path.ends_with("worktree-stale-locked"))
+            .expect("the worktree must be reported");
+        assert_eq!(entry.status, ItemStatus::Removed);
+        let stale_lock = entry
+            .stale_lock
+            .as_ref()
+            .expect("a stale lock must be recorded on the entry");
+        assert_eq!(stale_lock.pid, crate::test_helpers::DEAD_PID);
+        assert_eq!(stale_lock.action, StaleLockAction::Unlocked);
+        Ok(())
+    }
+
+    #[test]
+    fn run_dry_run_never_unlocks_a_stale_lock() -> Result<()> {
+        let (_dir, git, wt_path) = crate::test_helpers::init_repo_with_stale_locked_worktree()?;
+        let mut opts = opts_yes_skip_network();
+        opts.dry_run = true;
+
+        let report = run(&git, &default_config(), &Ui::new(), &opts)?;
+
+        assert!(
+            std::path::Path::new(&wt_path).exists(),
+            "--dry-run must not remove the worktree"
+        );
+
+        // The real git state must still be locked.
+        let worktrees = git.worktree_list()?;
+        assert!(
+            worktrees
+                .iter()
+                .any(|wt| wt.path.ends_with("worktree-stale-locked") && wt.is_locked),
+            "--dry-run must never actually unlock"
+        );
+
+        let entry = report
+            .local
+            .worktrees
+            .iter()
+            .find(|wt| wt.path.ends_with("worktree-stale-locked"))
+            .expect("the worktree must be reported");
+        let stale_lock = entry
+            .stale_lock
+            .as_ref()
+            .expect("a stale lock must be recorded on the entry");
+        assert_eq!(stale_lock.action, StaleLockAction::WouldUnlock);
         Ok(())
     }
 

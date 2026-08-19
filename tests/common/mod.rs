@@ -8,6 +8,12 @@
 use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
+/// A pid far beyond any real OS's pid_max (Linux tops out at 4194304 even at
+/// its highest configurable ceiling; macOS/BSD/Windows are far lower), so it
+/// is guaranteed dead without spawning and reaping a process. Mirrors
+/// `crate::test_helpers::DEAD_PID`.
+pub const DEAD_PID: u32 = 4_000_000_000;
+
 /// Initialize a minimal git repo with a single commit on `main`.
 pub fn init_repo() -> TempDir {
     let dir = tempfile::tempdir().unwrap();

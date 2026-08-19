@@ -223,6 +223,68 @@ pub fn init_repo_with_locked_worktree() -> Result<(TempDir, Git, String)> {
     Ok((dir, git, wt_path.to_string_lossy().to_string()))
 }
 
+/// A pid far beyond any real OS's pid_max (Linux tops out at 4194304 even at
+/// its highest configurable ceiling; macOS/BSD/Windows are far lower), so it
+/// is guaranteed dead without spawning and reaping a process.
+pub const DEAD_PID: u32 = 4_000_000_000;
+
+/// Same as [`init_repo_with_locked_worktree`], but the lock reason embeds a
+/// pid ([`DEAD_PID`]) guaranteed not to exist, so the lock reads as stale
+/// rather than opaque or held.
+pub fn init_repo_with_stale_locked_worktree() -> Result<(TempDir, Git, String)> {
+    let (dir, git) = init_repo()?;
+    let path = dir.path();
+
+    // Create and merge a feature branch
+    Command::new("git")
+        .args(["checkout", "-b", "feature/stale-locked-wt"])
+        .current_dir(path)
+        .output()?;
+    std::fs::write(path.join("stale-locked.txt"), "stale locked feature")?;
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .output()?;
+    Command::new("git")
+        .args(["commit", "-m", "stale locked feature"])
+        .current_dir(path)
+        .output()?;
+    Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(path)
+        .output()?;
+    Command::new("git")
+        .args(["merge", "feature/stale-locked-wt"])
+        .current_dir(path)
+        .output()?;
+
+    // Create a worktree for the merged branch
+    let wt_path = dir.path().join("worktree-stale-locked");
+    Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "feature/stale-locked-wt",
+        ])
+        .current_dir(path)
+        .output()?;
+
+    // Lock the worktree with a reason embedding a pid confirmed dead.
+    Command::new("git")
+        .args([
+            "worktree",
+            "lock",
+            "--reason",
+            &format!("pid={DEAD_PID}"),
+            wt_path.to_str().unwrap(),
+        ])
+        .current_dir(path)
+        .output()?;
+
+    Ok((dir, git, wt_path.to_string_lossy().to_string()))
+}
+
 /// Helper: create a repo with `extensions.worktreeConfig = true` and
 /// a linked worktree, returning (tempdir, main_path, worktree_path).
 pub fn init_repo_with_worktree_config() -> Result<(TempDir, std::path::PathBuf, std::path::PathBuf)>
