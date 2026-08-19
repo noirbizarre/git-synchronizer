@@ -828,6 +828,13 @@ impl Git {
         Ok(())
     }
 
+    /// Remove the lock on a worktree (`git worktree unlock`).
+    pub fn worktree_unlock(&self, path: &Path) -> Result<()> {
+        let path = path_arg(path)?;
+        self.run(&["worktree", "unlock", path])?;
+        Ok(())
+    }
+
     /// Prune stale worktree administrative entries.
     ///
     /// `wt remove` may fall back to `git worktree remove` on cross-filesystem
@@ -2605,6 +2612,34 @@ locked work in progress, do not remove
         // Modify it → dirty
         std::fs::write(path.join("file.txt"), "v2")?;
         assert!(git.worktree_dirty(path)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_unlock_clears_the_lock() -> Result<()> {
+        let (_dir, git, _wt_path) = crate::test_helpers::init_repo_with_locked_worktree()?;
+
+        // Match by suffix rather than exact path equality: on macOS the
+        // fixture's tempdir path and git's own reported path can differ in
+        // representation (e.g. `/private/var/...` vs `/var/...`).
+        let before = git.worktree_list()?;
+        let locked = before
+            .iter()
+            .find(|wt| wt.path.ends_with("worktree-locked"))
+            .expect("fixture worktree must be listed");
+        assert!(locked.is_locked, "fixture worktree should start locked");
+        let path = locked.path.clone();
+
+        git.worktree_unlock(&path)?;
+
+        let after = git.worktree_list()?;
+        assert!(
+            after.iter().any(|wt| wt.path.ends_with("worktree-locked")
+                && !wt.is_locked
+                && wt.lock_reason.is_none()),
+            "worktree should no longer be reported as locked"
+        );
 
         Ok(())
     }

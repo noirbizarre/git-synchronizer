@@ -26,7 +26,9 @@ configured remotes. It also handles orphaned worktree cleanup.
 - Delete local and remote branches that have been merged
 - Read-only inventory of branches and worktrees (`git wipe status`) -- no fetch, no prompts, no changes
 - Worktree cleanup: unified prompt for branches with worktrees and orphaned worktrees
-- Respects locked worktrees: skips removal with an informational message
+- Respects locked worktrees: skips removal with an informational message --
+  unless the lock reason embeds a pid that is no longer running, in which
+  case the stale lock is cleared automatically
 - Min-age guard (`--min-age`): never removes a worktree changed too recently
 - Worktree size reporting and a `--min-size` guard/filter (`--size` shows sizes without filtering)
 - Glob pattern support for protected branches (e.g. `release/*`)
@@ -277,6 +279,12 @@ Item statuses are `updated`, `deleted`, `removed`, `skipped`, `locked`,
 `too_young`, `too_small`, `failed` or `dry_run`. A fatal error still yields a
 document (with `status: "error"`) and a non-zero exit code. Worktree entries
 also carry `size_kb` (kibibytes), present only when sizing was requested.
+
+Each entry in `local.worktrees` also carries an optional `stale_lock` field
+(`pid`, `reason`, `action`: `unlocked` or `would_unlock`), present whenever
+that worktree's lock was found stale and cleared -- regardless of its
+eventual `status`, which reflects whatever happened next (`removed`,
+`skipped`, `dry_run`, `failed`).
 
 `git wipe status --json` shares the same versioned schema, but carries no
 action or outcome field — `status` never acts:
@@ -559,6 +567,16 @@ CLI flags:
    Locked worktrees (via `git worktree lock`) are automatically skipped with
    an informational message -- this also prevents their branch from being
    deleted, since git refuses to delete a branch checked out in any worktree.
+   The exception is a **stale** lock: when the lock reason embeds a pid (a
+   `pid` token, e.g. `pid=1234` or `pid: 1234`) and that process is confirmed
+   to no longer be running, git-wipe runs `git worktree unlock` and proceeds
+   as if the worktree had never been locked -- this recovers worktrees left
+   behind by a tool that locked one for the duration of a session and then
+   crashed, was killed, or never got to unlock it. When the pid is still
+   running, the skip message names it instead of the raw reason; when no pid
+   can be found in the reason, or its liveness cannot be determined, the
+   worktree is skipped as before. `--dry-run` never unlocks -- it reports the
+   intent instead, and the run continues as if it had.
    Worktrees changed less than `--min-age` ago (or `wipe.minage`) are skipped
    the same way. Age is measured from the time of the last real change: the
    newest mtime among tracked and untracked-but-not-ignored files, or the

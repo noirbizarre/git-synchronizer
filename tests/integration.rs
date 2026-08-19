@@ -710,6 +710,81 @@ fn clean_skips_locked_worktree_with_reason() {
     assert!(wt_path.exists(), "locked worktree should not be removed");
 }
 
+#[test]
+fn clean_recovers_from_a_stale_worktree_lock() {
+    let dir = init_repo();
+    let p = dir.path();
+    configure(&dir);
+
+    let wt_path = add_merged_worktree(&dir, "feature/stale-lock", "wt-stale-lock");
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "lock",
+            "--reason",
+            &format!("pid={}", common::DEAD_PID),
+            wt_path.to_str().unwrap(),
+        ])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    Command::cargo_bin("git-wipe")
+        .unwrap()
+        .args(["-y", "--no-fetch"])
+        .current_dir(p)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Unlocked stale lock"));
+
+    assert!(!wt_path.exists(), "a stale lock must not prevent removal");
+    assert!(
+        !git_branches(&dir).contains(&"feature/stale-lock".to_string()),
+        "the branch should be deletable once its stale lock is cleared"
+    );
+}
+
+#[test]
+fn clean_dry_run_reports_stale_lock_intent_without_unlocking() {
+    let dir = init_repo();
+    let p = dir.path();
+    configure(&dir);
+
+    let wt_path = add_merged_worktree(&dir, "feature/stale-lock-dry", "wt-stale-lock-dry");
+    StdCommand::new("git")
+        .args([
+            "worktree",
+            "lock",
+            "--reason",
+            &format!("pid={}", common::DEAD_PID),
+            wt_path.to_str().unwrap(),
+        ])
+        .current_dir(p)
+        .output()
+        .unwrap();
+
+    Command::cargo_bin("git-wipe")
+        .unwrap()
+        .args(["-y", "--no-fetch", "--dry-run"])
+        .current_dir(p)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Would unlock stale lock"));
+
+    assert!(wt_path.exists(), "--dry-run must not remove the worktree");
+
+    let output = StdCommand::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(p)
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        listing.contains("locked"),
+        "--dry-run must never actually unlock: {listing}"
+    );
+}
+
 // ── Pull / fast-forward ─────────────────────────────────────────────
 
 /// Create a local bare "remote", clone it, push an initial commit, and

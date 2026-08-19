@@ -195,6 +195,36 @@ pub struct WorktreeEntry {
     /// `--min-size` or `--size`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_kb: Option<u64>,
+    /// Present when this worktree's lock was found stale (see
+    /// [`crate::cleaner`]) and cleared, regardless of `status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_lock: Option<StaleLock>,
+}
+
+/// What happened to a worktree's stale lock, when it had one.
+///
+/// A lock is stale when its reason embeds a pid ([`crate::pid::extract_pid`])
+/// that is confirmed dead ([`crate::pid::pid_is_alive`]). Distinct from
+/// [`ItemStatus`], since a stale lock is an audit fact independent of the
+/// item's eventual outcome (removed, skipped for some other reason, dry-run,
+/// or failed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaleLockAction {
+    /// `git worktree unlock` actually ran.
+    Unlocked,
+    /// `--dry-run` was in effect; the lock would have been removed.
+    WouldUnlock,
+}
+
+/// Recorded when a worktree's lock reason embedded a pid confirmed dead.
+#[derive(Debug, Clone, Serialize)]
+pub struct StaleLock {
+    /// The pid found in the lock reason, confirmed no longer running.
+    pub pid: u32,
+    /// The original lock reason.
+    pub reason: String,
+    pub action: StaleLockAction,
 }
 
 /// Phase 4: merged branches on each configured remote.
