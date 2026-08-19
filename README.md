@@ -27,7 +27,7 @@ configured remotes. It also handles orphaned worktree cleanup.
 - Read-only inventory of branches and worktrees (`git wipe status`) -- no fetch, no prompts, no changes
 - Worktree cleanup: unified prompt for branches with worktrees and orphaned worktrees
 - Respects locked worktrees: skips removal with an informational message
-- Min-age guard (`--min-age`): never removes a worktree created too recently
+- Min-age guard (`--min-age`): never removes a worktree changed too recently
 - Glob pattern support for protected branches (e.g. `release/*`)
 - Per-branch protection via git config (`branch.<name>.wipe-protected`)
 - Ignore branch patterns entirely (`wipe.ignore`) -- never fetched, never analysed
@@ -530,12 +530,15 @@ CLI flags:
    Locked worktrees (via `git worktree lock`) are automatically skipped with
    an informational message -- this also prevents their branch from being
    deleted, since git refuses to delete a branch checked out in any worktree.
-   Worktrees created less than `--min-age` ago (or `wipe.minage`) are skipped
-   the same way. Age is measured from the creation time of the worktree's
-   administrative directory (`.git/worktrees/<id>`), not from its branch tip,
-   so a worktree you just created from an up-to-date default branch is
-   protected even though that branch counts as merged. The guard is disabled
-   by default (`0s`).
+   Worktrees changed less than `--min-age` ago (or `wipe.minage`) are skipped
+   the same way. Age is measured from the time of the last real change: the
+   newest mtime among tracked and untracked-but-not-ignored files, or the
+   committer date of `HEAD`, whichever is more recent. Gitignored churn
+   (`target/`, `node_modules/`, build output) does not count, so a build or
+   an install cannot make an old worktree look fresh; and a worktree just
+   created from a stale default branch is not treated as old, since its
+   freshly checked-out files still count as recent. The guard is disabled by
+   default (`0s`).
    Skipped with `--remote-only`. Worktree cleanup is skipped with
    `--no-worktrees`.
 
